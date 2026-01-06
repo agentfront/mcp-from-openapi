@@ -1,0 +1,196 @@
+name: Create release branch (next/{semver})
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver bump"
+        required: true
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    environment: release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "yarn"
+
+      - name: Install deps
+        run: yarn install --frozen-lockfile
+
+      - name: Configure git user
+        run: |
+          git config user.name "agentfront[bot]"
+          git config user.email "agentfront[bot]@users.noreply.github.com"
+
+      - name: Compute next version
+        id: next
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUMP="${{ inputs.bump }}"
+
+          CURRENT=$(node -e "console.log(require('./package.json').version)")
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+
+          if [ "$BUMP" = "major" ]; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+          elif [ "$BUMP" = "minor" ]; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+          else
+            PATCH=$((PATCH + 1))
+          fi
+
+          NEXT="$MAJOR.$MINOR.$PATCH"
+          echo "Current: $CURRENT, Next: $NEXT"
+          echo "value=$NEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Get last release tag
+        id: last_tag
+        shell: bash
+        run: |
+          LAST_TAG=$(git tag --list "v*" --sort=-version:refname | head -n1 || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            LAST_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
+          echo "tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
+          echo "Last tag: $LAST_TAG"
+
+      - name: Create branch next/${{ steps.next.outputs.value }}
+        shell: bash
+        run: |
+          NEXT="${{ steps.next.outputs.value }}"
+          git switch -c "next/$NEXT"
+
+      - name: Bump version in package.json
+        shell: bash
+        run: |
+          NEXT="${{ steps.next.outputs.value }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$NEXT';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Generate changelog entry
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEXT="${{ steps.next.outputs.value }}"
+          LAST_TAG="${{ steps.last_tag.outputs.tag }}"
+          TODAY=$(date -u +"%Y-%m-%d")
+
+          # Get commits since last tag
+          COMMITS=$(git log "$LAST_TAG"...HEAD --oneline --no-merges 2>/dev/null || echo "Initial release")
+
+          # Generate changelog entry
+          ENTRY="## [$NEXT] - $TODAY
+
+### Changes
+"
+          # Parse commits into categories
+          FEATURES=""
+          FIXES=""
+          OTHER=""
+
+          while IFS= read -r line; do
+            if [ -z "$line" ]; then continue; fi
+            commit_msg="${line#* }"
+            if [[ "$commit_msg" =~ ^feat ]]; then
+              FEATURES+="- ${commit_msg#feat: }
+"
+            elif [[ "$commit_msg" =~ ^fix ]]; then
+              FIXES+="- ${commit_msg#fix: }
+"
+            else
+              OTHER+="- $commit_msg
+"
+            fi
+          done <<< "$COMMITS"
+
+          if [ -n "$FEATURES" ]; then
+            ENTRY+="
+#### Added
+$FEATURES"
+          fi
+
+          if [ -n "$FIXES" ]; then
+            ENTRY+="
+#### Fixed
+$FIXES"
+          fi
+
+          if [ -n "$OTHER" ]; then
+            ENTRY+="
+#### Other
+$OTHER"
+          fi
+
+          # Prepend to CHANGELOG.md
+          if [ -f "CHANGELOG.md" ]; then
+            echo "$ENTRY" > CHANGELOG.new.md
+            echo "" >> CHANGELOG.new.md
+            cat CHANGELOG.md >> CHANGELOG.new.md
+            mv CHANGELOG.new.md CHANGELOG.md
+          else
+            echo "# Changelog
+
+$ENTRY" > CHANGELOG.md
+          fi
+
+      - name: Commit release preparation
+        shell: bash
+        run: |
+          NEXT="${{ steps.next.outputs.value }}"
+          git add -A
+          git commit -m "chore(release): prepare v$NEXT"
+
+      - name: Push branch
+        shell: bash
+        run: |
+          NEXT="${{ steps.next.outputs.value }}"
+          git push --set-upstream origin "next/$NEXT"
+
+      - name: Open PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          NEXT="${{ steps.next.outputs.value }}"
+
+          gh pr create \
+            --base "main" \
+            --head "next/$NEXT" \
+            --title "v$NEXT" \
+            --body "Release v$NEXT
+
+## Checklist
+- [ ] Review changelog
+- [ ] Verify version bump is correct
+- [ ] Tests pass"
+
+      - name: Summary
+        run: |
+          echo "✅ Created branch: next/${{ steps.next.outputs.value }}"
+          echo "➡️  Bump: ${{ inputs.bump }}"
+          echo "📦 PR title: v${{ steps.next.outputs.value }}"

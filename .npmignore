@@ -1,0 +1,31 @@
+# Source files (use dist)
+src/
+*.ts
+!*.d.ts
+
+# Tests
+__tests__/
+*.spec.ts
+*.test.ts
+jest.config.js
+coverage/
+
+# Config files
+tsconfig*.json
+.eslintrc*
+.prettierrc*
+
+# Git
+.git/
+.gitignore
+
+# GitHub
+.github/
+
+# IDE
+.idea/
+.vscode/
+
+# Misc
+*.log
+.DS_Store
