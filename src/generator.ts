@@ -5,6 +5,7 @@ import $RefParser from '@apidevtools/json-schema-ref-parser';
 import type {
   OpenAPIDocument,
   LoadOptions,
+  RefResolutionOptions,
   GenerateOptions,
   McpOpenAPITool,
   ValidationResult,
@@ -17,6 +18,7 @@ import type {
   ToolMetadata,
   ServerObject,
 } from './types';
+import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import { isReferenceObject } from './types';
 import { ParameterResolver } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
@@ -43,6 +45,7 @@ export class OpenAPIToolGenerator {
       timeout: options.timeout ?? 30000,
       validate: options.validate ?? true,
       followRedirects: options.followRedirects ?? true,
+      refResolution: options.refResolution ?? {},
     };
   }
 
@@ -165,6 +168,119 @@ export class OpenAPIToolGenerator {
   }
 
   /**
+   * Hostnames and IP patterns that are blocked by default to prevent SSRF.
+   * Covers RFC 1918/6598 private ranges, link-local, loopback, and cloud metadata endpoints.
+   */
+  private static readonly BLOCKED_HOSTNAME_PATTERNS: ReadonlyArray<string | RegExp> = [
+    'localhost',
+    'metadata.google.internal',
+    /^127\.\d+\.\d+\.\d+$/,           // 127.0.0.0/8 loopback
+    /^10\.\d+\.\d+\.\d+$/,            // 10.0.0.0/8 private
+    /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/, // 172.16.0.0/12 private
+    /^192\.168\.\d+\.\d+$/,           // 192.168.0.0/16 private
+    /^169\.254\.\d+\.\d+$/,           // 169.254.0.0/16 link-local / cloud metadata
+    /^0\.0\.0\.0$/,                    // unspecified
+    '::1',                             // IPv6 loopback
+    /^fd[0-9a-f]{2}:/i,               // fd00::/8 IPv6 ULA
+    /^fe80:/i,                         // fe80::/10 IPv6 link-local
+    /^\[::1\]$/,                       // bracketed IPv6 loopback
+    /^\[fd[0-9a-f]{2}:/i,             // bracketed IPv6 ULA
+    /^\[fe80:/i,                       // bracketed IPv6 link-local
+  ];
+
+  /**
+   * Check whether a hostname is blocked (internal/private IP or explicit blocklist).
+   */
+  private isBlockedHost(hostname: string, refOpts: Required<RefResolutionOptions>): boolean {
+    if (refOpts.allowInternalIPs) {
+      // Only check user-provided blockedHosts
+      return refOpts.blockedHosts.includes(hostname);
+    }
+
+    // Check user-provided blockedHosts
+    if (refOpts.blockedHosts.includes(hostname)) {
+      return true;
+    }
+
+    // Check built-in block list
+    for (const pattern of OpenAPIToolGenerator.BLOCKED_HOSTNAME_PATTERNS) {
+      if (typeof pattern === 'string') {
+        if (hostname === pattern) return true;
+      } else {
+        if (pattern.test(hostname)) return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Build $RefParser options based on refResolution configuration.
+   * Defaults: allow http/https, block file://, block internal IPs.
+   */
+  private buildRefParserOptions(): ParserOptions {
+    const raw = this.options.refResolution;
+    const refOpts: Required<RefResolutionOptions> = {
+      allowedProtocols: raw.allowedProtocols ?? ['http', 'https'],
+      allowedHosts: raw.allowedHosts ?? [],
+      blockedHosts: raw.blockedHosts ?? [],
+      allowInternalIPs: raw.allowInternalIPs ?? false,
+    };
+
+    const allowedProtocols = new Set(refOpts.allowedProtocols);
+    const hasNetworkProtocol = allowedProtocols.size > 0 &&
+      !([...allowedProtocols].length === 1 && allowedProtocols.has('file'));
+
+    // If no protocols allowed at all, disable external resolution entirely
+    if (allowedProtocols.size === 0) {
+      return { resolve: { external: false } } as ParserOptions;
+    }
+
+    const resolveConfig: Record<string, unknown> = {
+      external: true,
+      file: allowedProtocols.has('file') ? undefined : false,
+    };
+
+    // Configure HTTP/HTTPS resolver with security filtering
+    if (hasNetworkProtocol) {
+      const hasHostAllowlist = refOpts.allowedHosts.length > 0;
+      const hostAllowSet = new Set(refOpts.allowedHosts);
+
+      resolveConfig['http'] = {
+        canRead: (file: { url: string }): boolean => {
+          try {
+            const parsed = new URL(file.url);
+            const protocol = parsed.protocol.replace(':', '');
+
+            // Check protocol allowlist
+            if (!allowedProtocols.has(protocol)) {
+              return false;
+            }
+
+            // Check host allowlist (if configured)
+            if (hasHostAllowlist && !hostAllowSet.has(parsed.hostname)) {
+              return false;
+            }
+
+            // Check blocked hosts (internal IPs, etc.)
+            if (this.isBlockedHost(parsed.hostname, refOpts)) {
+              return false;
+            }
+
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      };
+    } else {
+      resolveConfig['http'] = false;
+    }
+
+    return { resolve: resolveConfig } as ParserOptions;
+  }
+
+  /**
    * Initialize the generator (dereference if needed)
    */
   private async initialize(): Promise<void> {
@@ -177,8 +293,10 @@ export class OpenAPIToolGenerator {
 
     if (this.options.dereference && !this.dereferencedDocument) {
       try {
+        const refParserOptions = this.buildRefParserOptions();
         this.dereferencedDocument = (await $RefParser.dereference(
           JSON.parse(JSON.stringify(this.document)),
+          refParserOptions,
         )) as OpenAPIDocument;
       } catch (error: unknown) {
         const errorMessage = error instanceof Error ? error.message : String(error);

@@ -22,6 +22,7 @@ export type {
   ServerInfo,
 
   // Configuration types
+  RefResolutionOptions,
   LoadOptions,
   GenerateOptions,
   NamingStrategy,
