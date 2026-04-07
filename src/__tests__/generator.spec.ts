@@ -192,6 +192,36 @@ paths:
       await expect(OpenAPIToolGenerator.fromURL('https://example.com/api.json')).rejects.toThrow(LoadError);
     });
 
+    it('should throw LoadError when YAML parse fails from URL', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve('{ invalid yaml: [[['),
+        headers: new Map([['content-type', 'application/yaml']]),
+      });
+
+      await expect(OpenAPIToolGenerator.fromURL('https://example.com/api.yaml')).rejects.toThrow(LoadError);
+    });
+
+    it('should throw LoadError when JSON parse fails from URL', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve('not valid json at all'),
+        headers: new Map([['content-type', 'application/json']]),
+      });
+
+      await expect(OpenAPIToolGenerator.fromURL('https://example.com/api.json')).rejects.toThrow(LoadError);
+    });
+
+    it('should wrap non-Error thrown values as LoadError', async () => {
+      mockFetch.mockRejectedValue('string error');
+
+      const promise = OpenAPIToolGenerator.fromURL('https://example.com/api.json');
+      await expect(promise).rejects.toThrow(LoadError);
+      await expect(promise).rejects.toMatchObject({
+        message: expect.stringContaining('string error'),
+      });
+    });
+
     it('should handle timeout option', async () => {
       const jsonSpec = JSON.stringify({
         openapi: '3.0.0',
@@ -308,8 +338,22 @@ paths:
   });
 
   describe('File Loading', () => {
-    // Note: File loading tests are skipped by default since they require actual fs mocking
-    // The fromFile method is tested through the error case which doesn't need mocking
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+
+    const minimalSpec = {
+      openapi: '3.0.0',
+      info: { title: 'File Test', version: '1.0.0' },
+      paths: {
+        '/test': {
+          get: {
+            operationId: 'test',
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
 
     it('should throw LoadError on file read error', async () => {
       await expect(OpenAPIToolGenerator.fromFile('/nonexistent/path/api.json')).rejects.toThrow(LoadError);
@@ -319,6 +363,52 @@ paths:
       await expect(OpenAPIToolGenerator.fromFile('/nonexistent/path/api.yaml')).rejects.toMatchObject({
         message: expect.stringContaining('Failed to load OpenAPI spec from file'),
       });
+    });
+
+    it('should load from JSON file', async () => {
+      const tmpFile = path.join(os.tmpdir(), `test-spec-${Date.now()}.json`);
+      fs.writeFileSync(tmpFile, JSON.stringify(minimalSpec));
+      try {
+        const generator = await OpenAPIToolGenerator.fromFile(tmpFile);
+        expect(generator.getDocument().info.title).toBe('File Test');
+      } finally {
+        fs.unlinkSync(tmpFile);
+      }
+    });
+
+    it('should load from YAML file', async () => {
+      const yaml = require('yaml');
+      const tmpFile = path.join(os.tmpdir(), `test-spec-${Date.now()}.yaml`);
+      fs.writeFileSync(tmpFile, yaml.stringify(minimalSpec));
+      try {
+        const generator = await OpenAPIToolGenerator.fromFile(tmpFile);
+        expect(generator.getDocument().info.title).toBe('File Test');
+      } finally {
+        fs.unlinkSync(tmpFile);
+      }
+    });
+
+    it('should auto-detect JSON for unknown extension', async () => {
+      const tmpFile = path.join(os.tmpdir(), `test-spec-${Date.now()}.txt`);
+      fs.writeFileSync(tmpFile, JSON.stringify(minimalSpec));
+      try {
+        const generator = await OpenAPIToolGenerator.fromFile(tmpFile);
+        expect(generator.getDocument().info.title).toBe('File Test');
+      } finally {
+        fs.unlinkSync(tmpFile);
+      }
+    });
+
+    it('should fallback to YAML for unknown extension when JSON parse fails', async () => {
+      const yaml = require('yaml');
+      const tmpFile = path.join(os.tmpdir(), `test-spec-${Date.now()}.txt`);
+      fs.writeFileSync(tmpFile, yaml.stringify(minimalSpec));
+      try {
+        const generator = await OpenAPIToolGenerator.fromFile(tmpFile);
+        expect(generator.getDocument().info.title).toBe('File Test');
+      } finally {
+        fs.unlinkSync(tmpFile);
+      }
     });
   });
 
@@ -852,6 +942,48 @@ describe('ParameterResolver', () => {
       expect(mapper.find((m) => m.type === 'body')).toBeDefined();
     });
 
+    it('should include body parameter description', () => {
+      const resolver = new ParameterResolver();
+      const { inputSchema } = resolver.resolve({
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string', description: 'The user name' },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const nameSchema = inputSchema.properties?.['name'] as any;
+      expect(nameSchema.description).toBe('The user name');
+    });
+
+    it('should handle object body without properties', () => {
+      const resolver = new ParameterResolver();
+      const { inputSchema, mapper } = resolver.resolve({
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+              },
+            },
+          },
+        },
+      });
+
+      // Object without properties falls through to the non-object body path
+      expect(inputSchema.properties).toHaveProperty('body');
+      expect(mapper.find((m) => m.type === 'body')).toBeDefined();
+    });
+
     it('should handle deprecated parameters', () => {
       const resolver = new ParameterResolver();
       const { inputSchema, mapper } = resolver.resolve({
@@ -989,6 +1121,16 @@ describe('ParameterResolver', () => {
       expect(oidcSchema.description).toContain('openid, profile');
     });
 
+    it('should throw when request body has empty content', () => {
+      const resolver = new ParameterResolver();
+      expect(() => resolver.resolve({
+        requestBody: {
+          required: true,
+          content: {},
+        },
+      })).toThrow('No content type available in request body');
+    });
+
     it('should use fallback content type when none match preferences', () => {
       const resolver = new ParameterResolver();
       const { inputSchema, mapper } = resolver.resolve({
@@ -1097,6 +1239,34 @@ describe('OpenAPIToolGenerator - Additional Coverage', () => {
 
       expect(tools).toHaveLength(1);
       expect(tools[0].name).toBe('getUsers');
+    });
+
+    it('should include operation when filterFn returns true', async () => {
+      const openapi = {
+        openapi: '3.0.0',
+        info: { title: 'Test', version: '1.0.0' },
+        paths: {
+          '/users': {
+            get: {
+              operationId: 'getUsers',
+              responses: { '200': { description: 'OK' } },
+            },
+          },
+          '/admin': {
+            get: {
+              operationId: 'getAdmin',
+              responses: { '200': { description: 'OK' } },
+            },
+          },
+        },
+      };
+
+      const generator = await OpenAPIToolGenerator.fromJSON(openapi);
+      const tools = await generator.generateTools({
+        filterFn: () => true,
+      });
+
+      expect(tools).toHaveLength(2);
     });
   });
 
@@ -1816,5 +1986,74 @@ describe('SSRF Prevention - $ref resolution security', () => {
     const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
     expect(canRead({ url: 'not-a-valid-url' })).toBe(false);
     expect(canRead({ url: '' })).toBe(false);
+  });
+
+  it('should disable http resolver when only file protocol is allowed', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec, {
+      refResolution: { allowedProtocols: ['file'] },
+    });
+    await generator.generateTools();
+
+    const options = derefSpy.mock.calls[0][1];
+    expect(options?.resolve?.http).toBe(false);
+    expect(options?.resolve?.external).toBe(true);
+  });
+
+  it('should throw ParseError when dereference fails', async () => {
+    derefSpy.mockRejectedValueOnce(new Error('Circular $ref detected'));
+
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec);
+    await expect(generator.generateTools()).rejects.toThrow('Failed to dereference OpenAPI document');
+  });
+
+  it('should handle security with reference object and dereference disabled', async () => {
+    const openapi = {
+      openapi: '3.0.0',
+      info: { title: 'Test', version: '1.0.0' },
+      components: {
+        securitySchemes: {
+          refAuth: {
+            $ref: '#/components/securitySchemes/otherAuth',
+          },
+        },
+      },
+      paths: {
+        '/users': {
+          get: {
+            operationId: 'getUsers',
+            security: [{ refAuth: [] }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+
+    const generator = await OpenAPIToolGenerator.fromJSON(openapi, { dereference: false });
+    const tool = await generator.generateTool('/users', 'get');
+
+    // With dereference disabled, the $ref is not resolved, so it hits the reference fallback
+    expect(tool.metadata.security).toBeDefined();
+    expect(tool.metadata.security![0].type).toBe('http');
+  });
+
+  it('should return empty security when no securitySchemes defined', async () => {
+    const openapi = {
+      openapi: '3.0.0',
+      info: { title: 'Test', version: '1.0.0' },
+      paths: {
+        '/users': {
+          get: {
+            operationId: 'getUsers',
+            security: [{ apiKey: [] }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+
+    const generator = await OpenAPIToolGenerator.fromJSON(openapi);
+    const tool = await generator.generateTool('/users', 'get');
+
+    expect(tool.metadata.security).toEqual([]);
   });
 });

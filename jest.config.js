@@ -1,6 +1,7 @@
 module.exports = {
   displayName: 'mcp-from-openapi',
   testEnvironment: 'node',
+  coverageProvider: 'v8',
   transform: {
     '^.+\\.[tj]s$': [
       '@swc/jest',
@@ -28,11 +29,15 @@ module.exports = {
       },
     ],
   },
+  transformIgnorePatterns: [
+    'node_modules/(?!@apidevtools/json-schema-ref-parser)',
+  ],
   moduleFileExtensions: ['ts', 'js'],
   testMatch: ['**/__tests__/**/*.spec.ts', '**/*.spec.ts', '**/*.test.ts'],
   coverageDirectory: 'coverage',
   collectCoverageFrom: [
     'src/**/*.ts',
+    '!src/index.ts',
     '!src/**/*.spec.ts',
     '!src/**/*.test.ts',
     '!src/**/__tests__/**',

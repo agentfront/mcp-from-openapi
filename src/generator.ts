@@ -1,7 +1,6 @@
 import * as yaml from 'yaml';
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import $RefParser from '@apidevtools/json-schema-ref-parser';
 import type {
   OpenAPIDocument,
   LoadOptions,
@@ -293,6 +292,7 @@ export class OpenAPIToolGenerator {
 
     if (this.options.dereference && !this.dereferencedDocument) {
       try {
+        const { default: $RefParser } = await import('@apidevtools/json-schema-ref-parser');
         const refParserOptions = this.buildRefParserOptions();
         this.dereferencedDocument = (await $RefParser.dereference(
           JSON.parse(JSON.stringify(this.document)),
