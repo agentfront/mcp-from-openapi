@@ -1682,6 +1682,39 @@ describe('OpenAPIToolGenerator - Additional Coverage', () => {
 
       await expect(generator.generateTools()).rejects.toThrow(ParseError);
     });
+
+    it('should validate dereferenced document so $ref parameters pass validation', async () => {
+      const openapi = {
+        openapi: '3.0.0',
+        info: { title: 'Test', version: '1.0.0' },
+        components: {
+          parameters: {
+            UserId: {
+              name: 'userId',
+              in: 'path',
+              required: true,
+              schema: { type: 'string' },
+            },
+          },
+        },
+        paths: {
+          '/users/{userId}': {
+            get: {
+              operationId: 'getUser',
+              parameters: [{ $ref: '#/components/parameters/UserId' }],
+              responses: { '200': { description: 'OK' } },
+            },
+          },
+        },
+      };
+
+      // With validate: true (default), this should pass because
+      // dereferencing resolves the $ref before validation runs
+      const generator = await OpenAPIToolGenerator.fromJSON(openapi);
+      const tools = await generator.generateTools();
+      expect(tools).toHaveLength(1);
+      expect(tools[0].name).toBe('getUser');
+    });
   });
 });
 

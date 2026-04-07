@@ -280,16 +280,9 @@ export class OpenAPIToolGenerator {
   }
 
   /**
-   * Initialize the generator (dereference if needed)
+   * Initialize the generator (dereference if needed, then validate)
    */
   private async initialize(): Promise<void> {
-    if (this.options.validate) {
-      const result = await this.validate();
-      if (!result.valid) {
-        throw new ParseError('Invalid OpenAPI document', { errors: result.errors });
-      }
-    }
-
     if (this.options.dereference && !this.dereferencedDocument) {
       try {
         const { default: $RefParser } = await import('@apidevtools/json-schema-ref-parser');
@@ -303,6 +296,15 @@ export class OpenAPIToolGenerator {
         throw new ParseError(`Failed to dereference OpenAPI document: ${errorMessage}`, {
           originalError: error,
         });
+      }
+    }
+
+    if (this.options.validate) {
+      const validator = new Validator();
+      const documentToValidate = this.dereferencedDocument ?? this.document;
+      const result = await validator.validate(documentToValidate);
+      if (!result.valid) {
+        throw new ParseError('Invalid OpenAPI document', { errors: result.errors });
       }
     }
   }
