@@ -6,7 +6,19 @@
 
 ## Overview
 
-When dereferencing `$ref` pointers, the library resolves external URLs. A malicious OpenAPI spec could point `$ref` to internal services, cloud metadata endpoints, or the local filesystem. The library blocks these by default.
+When dereferencing `$ref` pointers, the library resolves external URLs. A malicious OpenAPI spec could point `$ref` to internal services, cloud metadata endpoints, or the local filesystem -- enabling SSRF (Server-Side Request Forgery) and local file read attacks. The library blocks these by default.
+
+### Attack Scenarios
+
+Without protection, a crafted OpenAPI spec could:
+
+- **Cloud credential theft** -- `$ref` pointing to `http://169.254.169.254/latest/meta-data/` steals AWS/GCP/Azure instance metadata
+- **Internal network scanning** -- `$ref` values probe internal services and ports
+- **Local file read** -- `file:///etc/passwd` reads arbitrary files from the server filesystem
+
+All it takes is processing an untrusted OpenAPI spec.
+
+> **Acknowledgment:** Thanks to [@TharVid](https://github.com/TharVid) for responsibly reporting the SSRF via `$ref` dereferencing attack vector, which led to the implementation of these protections.
 
 ---
 
