@@ -27,7 +27,7 @@
   },
   "homepage": "https://github.com/agentfront/mcp-from-openapi#readme",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "type": "commonjs",
   "main": "./dist/index.js",

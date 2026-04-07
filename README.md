@@ -5,7 +5,7 @@
 [![npm version](https://badge.fury.io/js/mcp-from-openapi.svg)](https://www.npmjs.com/package/mcp-from-openapi)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-yellow.svg)](https://opensource.org/license/apache-2-0)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-20+-green.svg)](https://nodejs.org/)
 
 ## What This Solves
 
@@ -154,7 +154,7 @@ function buildRequest(tool: McpOpenAPITool, input: Record<string, any>) {
 
 ## Requirements
 
-- Node.js >= 18.0.0
+- Node.js >= 20.0.0
 - TypeScript >= 5.0 (for TypeScript users)
 - Peer dependency: `zod@^4.0.0`
 
