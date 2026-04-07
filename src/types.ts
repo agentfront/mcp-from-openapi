@@ -480,6 +480,41 @@ export interface ServerInfo {
 }
 
 /**
+ * Controls how external $ref pointers are resolved during dereferencing.
+ * By default, only http/https protocols are allowed and internal/private
+ * IP addresses are blocked to prevent SSRF attacks.
+ */
+export interface RefResolutionOptions {
+  /**
+   * Protocols allowed for external $ref resolution.
+   * Any protocol string is accepted (http, https, ftp, ws, wss, etc.).
+   * @default ['http', 'https']
+   */
+  allowedProtocols?: string[];
+
+  /**
+   * Hostnames allowed for external $ref resolution (network protocols only).
+   * When set, only refs pointing to these hosts are resolved.
+   * When not set, all hosts are allowed except blocked internal ranges.
+   */
+  allowedHosts?: string[];
+
+  /**
+   * Additional hostnames/IPs to block. Applied on top of the built-in
+   * internal IP block list (localhost, 169.254.x.x, 10.x.x.x, etc.).
+   */
+  blockedHosts?: string[];
+
+  /**
+   * Disable the built-in internal/private IP block list.
+   * WARNING: Enabling this may expose your application to SSRF attacks
+   * against cloud metadata endpoints and internal services.
+   * @default false
+   */
+  allowInternalIPs?: boolean;
+}
+
+/**
  * Options for loading OpenAPI specifications
  */
 export interface LoadOptions {
@@ -517,6 +552,13 @@ export interface LoadOptions {
    * @default true
    */
   followRedirects?: boolean;
+
+  /**
+   * Controls external $ref resolution security.
+   * By default, file:// is blocked and internal IPs are blocked.
+   * @see RefResolutionOptions
+   */
+  refResolution?: RefResolutionOptions;
 }
 
 /**

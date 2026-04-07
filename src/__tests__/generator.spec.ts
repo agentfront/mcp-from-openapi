@@ -1594,3 +1594,227 @@ describe('ResponseBuilder', () => {
     expect(schema?.oneOf).toHaveLength(2);
   });
 });
+
+describe('SSRF Prevention - $ref resolution security', () => {
+  let derefSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    derefSpy = jest.spyOn(
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      require('@apidevtools/json-schema-ref-parser').default,
+      'dereference',
+    );
+  });
+
+  afterEach(() => {
+    derefSpy.mockRestore();
+  });
+
+  const minimalSpec: OpenAPIDocument = {
+    openapi: '3.0.0',
+    info: { title: 'Test', version: '1.0.0' },
+    paths: {
+      '/test': {
+        get: {
+          operationId: 'getTest',
+          summary: 'test',
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+    },
+  };
+
+  it('should block file:// protocol by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec);
+    await generator.generateTools();
+
+    const callArgs = derefSpy.mock.calls[0];
+    const options = callArgs[1];
+    expect(options?.resolve?.file).toBe(false);
+  });
+
+  it('should pass canRead filter for http resolver by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec);
+    await generator.generateTools();
+
+    const callArgs = derefSpy.mock.calls[0];
+    const options = callArgs[1];
+    expect(options?.resolve?.http?.canRead).toBeInstanceOf(Function);
+  });
+
+  it('should allow external HTTPS refs to public hosts by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec);
+    await generator.generateTools();
+
+    const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
+    expect(canRead({ url: 'https://api.example.com/schemas/user.json' })).toBe(true);
+  });
+
+  it('should allow external HTTP refs to public hosts by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec);
+    await generator.generateTools();
+
+    const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
+    expect(canRead({ url: 'http://api.example.com/schemas/user.json' })).toBe(true);
+  });
+
+  it('should block cloud metadata endpoint (169.254.169.254) by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec);
+    await generator.generateTools();
+
+    const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
+    expect(canRead({ url: 'http://169.254.169.254/latest/meta-data/iam/security-credentials/' })).toBe(false);
+  });
+
+  it('should block localhost by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec);
+    await generator.generateTools();
+
+    const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
+    expect(canRead({ url: 'http://localhost/admin' })).toBe(false);
+    expect(canRead({ url: 'http://127.0.0.1/admin' })).toBe(false);
+  });
+
+  it('should block private IP ranges by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec);
+    await generator.generateTools();
+
+    const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
+    expect(canRead({ url: 'http://10.0.0.1/internal' })).toBe(false);
+    expect(canRead({ url: 'http://172.16.0.1/internal' })).toBe(false);
+    expect(canRead({ url: 'http://192.168.1.1/internal' })).toBe(false);
+  });
+
+  it('should block Google cloud metadata hostname by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec);
+    await generator.generateTools();
+
+    const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
+    expect(canRead({ url: 'http://metadata.google.internal/computeMetadata/v1/' })).toBe(false);
+  });
+
+  it('should allow file:// when explicitly in allowedProtocols', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec, {
+      refResolution: { allowedProtocols: ['file', 'http', 'https'] },
+    });
+    await generator.generateTools();
+
+    const options = derefSpy.mock.calls[0][1];
+    expect(options?.resolve?.file).toBeUndefined(); // not blocked
+  });
+
+  it('should restrict to allowedHosts when configured', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec, {
+      refResolution: { allowedHosts: ['schemas.example.com'] },
+    });
+    await generator.generateTools();
+
+    const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
+    expect(canRead({ url: 'https://schemas.example.com/user.json' })).toBe(true);
+    expect(canRead({ url: 'https://evil.com/schema.json' })).toBe(false);
+  });
+
+  it('should support exotic protocols in allowedProtocols', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec, {
+      refResolution: { allowedProtocols: ['https', 'ftp'] },
+    });
+    await generator.generateTools();
+
+    const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
+    expect(canRead({ url: 'https://example.com/schema.json' })).toBe(true);
+    expect(canRead({ url: 'ftp://example.com/schema.json' })).toBe(true);
+    expect(canRead({ url: 'http://example.com/schema.json' })).toBe(false);
+  });
+
+  it('should block custom blockedHosts', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec, {
+      refResolution: { blockedHosts: ['evil.com', 'malicious.io'] },
+    });
+    await generator.generateTools();
+
+    const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
+    expect(canRead({ url: 'https://evil.com/schema.json' })).toBe(false);
+    expect(canRead({ url: 'https://malicious.io/schema.json' })).toBe(false);
+    expect(canRead({ url: 'https://good.com/schema.json' })).toBe(true);
+  });
+
+  it('should allow internal IPs when allowInternalIPs is true', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec, {
+      refResolution: { allowInternalIPs: true },
+    });
+    await generator.generateTools();
+
+    const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
+    expect(canRead({ url: 'http://169.254.169.254/latest/meta-data/' })).toBe(true);
+    expect(canRead({ url: 'http://127.0.0.1/admin' })).toBe(true);
+    expect(canRead({ url: 'http://10.0.0.1/internal' })).toBe(true);
+  });
+
+  it('should disable all external resolution when allowedProtocols is empty', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec, {
+      refResolution: { allowedProtocols: [] },
+    });
+    await generator.generateTools();
+
+    const options = derefSpy.mock.calls[0][1];
+    expect(options?.resolve?.external).toBe(false);
+  });
+
+  it('should still resolve internal #/ refs with default settings', async () => {
+    const specWithInternalRef: OpenAPIDocument = {
+      openapi: '3.0.0',
+      info: { title: 'Test', version: '1.0.0' },
+      paths: {
+        '/test': {
+          get: {
+            operationId: 'getTest',
+            summary: 'test',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: {
+                  'application/json': {
+                    schema: { $ref: '#/components/schemas/TestResponse' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          TestResponse: {
+            type: 'object',
+            properties: { id: { type: 'string' } },
+          },
+        },
+      },
+    };
+
+    // Don't spy - let actual dereference run to verify internal refs work
+    derefSpy.mockRestore();
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithInternalRef);
+    const tools = await generator.generateTools();
+    expect(tools).toHaveLength(1);
+    expect(tools[0].inputSchema).toBeDefined();
+  });
+
+  it('should still skip all dereferencing when dereference: false', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec, {
+      dereference: false,
+    });
+    await generator.generateTools();
+
+    expect(derefSpy).not.toHaveBeenCalled();
+  });
+
+  it('should return false for malformed URLs', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec);
+    await generator.generateTools();
+
+    const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
+    expect(canRead({ url: 'not-a-valid-url' })).toBe(false);
+    expect(canRead({ url: '' })).toBe(false);
+  });
+});
