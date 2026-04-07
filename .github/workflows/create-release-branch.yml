@@ -1,18 +1,24 @@
-name: Create release branch (next/{semver})
+name: Create release branch
 
 on:
   workflow_dispatch:
     inputs:
-      bump:
-        description: "Semver bump"
+      major_version:
+        description: "Major version (X in release/X.Y.x)"
         required: true
-        type: choice
-        options: [patch, minor, major]
-        default: patch
+        type: string
+      minor_version:
+        description: "Minor version (Y in release/X.Y.x)"
+        required: true
+        type: string
+      base_branch:
+        description: "Base branch to create from"
+        required: false
+        type: string
+        default: "main"
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   create:
@@ -20,10 +26,33 @@ jobs:
     environment: release
 
     steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAJOR="${{ inputs.major_version }}"
+          MINOR="${{ inputs.minor_version }}"
+
+          # Validate major version is a number
+          if ! [[ "$MAJOR" =~ ^[0-9]+$ ]]; then
+            echo "::error::Major version must be a positive integer. Got: $MAJOR"
+            exit 1
+          fi
+
+          # Validate minor version is a number
+          if ! [[ "$MINOR" =~ ^[0-9]+$ ]]; then
+            echo "::error::Minor version must be a positive integer. Got: $MINOR"
+            exit 1
+          fi
+
+          echo "Creating release branch for version $MAJOR.$MINOR.x"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.base_branch }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -36,161 +65,124 @@ jobs:
 
       - name: Configure git user
         run: |
-          git config user.name "agentfront[bot]"
-          git config user.email "agentfront[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Compute next version
-        id: next
+      - name: Check if branch already exists
+        id: check_branch
         shell: bash
         run: |
           set -euo pipefail
-          BUMP="${{ inputs.bump }}"
 
-          CURRENT=$(node -e "console.log(require('./package.json').version)")
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          MAJOR="${{ inputs.major_version }}"
+          MINOR="${{ inputs.minor_version }}"
+          BRANCH_NAME="release/${MAJOR}.${MINOR}.x"
 
-          if [ "$BUMP" = "major" ]; then
-            MAJOR=$((MAJOR + 1))
-            MINOR=0
-            PATCH=0
-          elif [ "$BUMP" = "minor" ]; then
-            MINOR=$((MINOR + 1))
-            PATCH=0
-          else
-            PATCH=$((PATCH + 1))
+          # Check if branch exists on remote
+          if git ls-remote --heads origin "$BRANCH_NAME" | grep -q .; then
+            echo "::error::Branch $BRANCH_NAME already exists on remote!"
+            exit 1
           fi
 
-          NEXT="$MAJOR.$MINOR.$PATCH"
-          echo "Current: $CURRENT, Next: $NEXT"
-          echo "value=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "branch_name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
 
-      - name: Get last release tag
-        id: last_tag
+      - name: Calculate initial version
+        id: version
         shell: bash
         run: |
-          LAST_TAG=$(git tag --list "v*" --sort=-version:refname | head -n1 || echo "")
-          if [ -z "$LAST_TAG" ]; then
-            LAST_TAG=$(git rev-list --max-parents=0 HEAD)
-          fi
-          echo "tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
-          echo "Last tag: $LAST_TAG"
+          set -euo pipefail
 
-      - name: Create branch next/${{ steps.next.outputs.value }}
+          MAJOR="${{ inputs.major_version }}"
+          MINOR="${{ inputs.minor_version }}"
+          INITIAL_VERSION="${MAJOR}.${MINOR}.0"
+
+          echo "initial_version=$INITIAL_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Initial version: $INITIAL_VERSION"
+
+      - name: Create release branch
+        id: branch
         shell: bash
         run: |
-          NEXT="${{ steps.next.outputs.value }}"
-          git switch -c "next/$NEXT"
+          set -euo pipefail
 
-      - name: Bump version in package.json
+          BRANCH_NAME="${{ steps.check_branch.outputs.branch_name }}"
+          BASE_BRANCH="${{ inputs.base_branch }}"
+
+          git fetch origin "$BASE_BRANCH" --tags
+          git switch -c "$BRANCH_NAME" "origin/$BASE_BRANCH"
+
+          echo "Created branch: $BRANCH_NAME"
+
+      - name: Set package version
         shell: bash
         run: |
-          NEXT="${{ steps.next.outputs.value }}"
+          set -euo pipefail
+
+          INITIAL_VERSION="${{ steps.version.outputs.initial_version }}"
+          echo "Setting version to $INITIAL_VERSION"
+
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.version = '$NEXT';
+            pkg.version = '$INITIAL_VERSION';
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 
-      - name: Generate changelog entry
+      - name: Update CHANGELOG.md
         shell: bash
         run: |
           set -euo pipefail
-          NEXT="${{ steps.next.outputs.value }}"
-          LAST_TAG="${{ steps.last_tag.outputs.tag }}"
+
+          INITIAL_VERSION="${{ steps.version.outputs.initial_version }}"
           TODAY=$(date -u +"%Y-%m-%d")
 
-          # Get commits since last tag
-          COMMITS=$(git log "$LAST_TAG"...HEAD --oneline --no-merges 2>/dev/null || echo "Initial release")
-
-          # Generate changelog entry
-          ENTRY="## [$NEXT] - $TODAY
-
-### Changes
-"
-          # Parse commits into categories
-          FEATURES=""
-          FIXES=""
-          OTHER=""
-
-          while IFS= read -r line; do
-            if [ -z "$line" ]; then continue; fi
-            commit_msg="${line#* }"
-            if [[ "$commit_msg" =~ ^feat ]]; then
-              FEATURES+="- ${commit_msg#feat: }
-"
-            elif [[ "$commit_msg" =~ ^fix ]]; then
-              FIXES+="- ${commit_msg#fix: }
-"
-            else
-              OTHER+="- $commit_msg
-"
-            fi
-          done <<< "$COMMITS"
-
-          if [ -n "$FEATURES" ]; then
-            ENTRY+="
-#### Added
-$FEATURES"
-          fi
-
-          if [ -n "$FIXES" ]; then
-            ENTRY+="
-#### Fixed
-$FIXES"
-          fi
-
-          if [ -n "$OTHER" ]; then
-            ENTRY+="
-#### Other
-$OTHER"
-          fi
-
-          # Prepend to CHANGELOG.md
           if [ -f "CHANGELOG.md" ]; then
-            echo "$ENTRY" > CHANGELOG.new.md
-            echo "" >> CHANGELOG.new.md
-            cat CHANGELOG.md >> CHANGELOG.new.md
-            mv CHANGELOG.new.md CHANGELOG.md
+            { echo "## [$INITIAL_VERSION] - $TODAY"; echo ""; cat CHANGELOG.md; } > CHANGELOG.tmp
+            mv CHANGELOG.tmp CHANGELOG.md
+            echo "Updated CHANGELOG.md"
           else
-            echo "# Changelog
-
-$ENTRY" > CHANGELOG.md
+            echo "## [$INITIAL_VERSION] - $TODAY" > CHANGELOG.md
+            echo "Created CHANGELOG.md"
           fi
 
-      - name: Commit release preparation
+      - name: Commit changes
         shell: bash
         run: |
-          NEXT="${{ steps.next.outputs.value }}"
-          git add -A
-          git commit -m "chore(release): prepare v$NEXT"
+          set -euo pipefail
+
+          INITIAL_VERSION="${{ steps.version.outputs.initial_version }}"
+          BRANCH_NAME="${{ steps.check_branch.outputs.branch_name }}"
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "chore(release): initialize $BRANCH_NAME at v$INITIAL_VERSION" \
+              -m "- Set package version to $INITIAL_VERSION"
+            echo "Created initialization commit"
+          else
+            echo "No changes to commit"
+          fi
 
       - name: Push branch
         shell: bash
         run: |
-          NEXT="${{ steps.next.outputs.value }}"
-          git push --set-upstream origin "next/$NEXT"
+          set -euo pipefail
 
-      - name: Open PR
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          NEXT="${{ steps.next.outputs.value }}"
-
-          gh pr create \
-            --base "main" \
-            --head "next/$NEXT" \
-            --title "v$NEXT" \
-            --body "Release v$NEXT
-
-## Checklist
-- [ ] Review changelog
-- [ ] Verify version bump is correct
-- [ ] Tests pass"
+          BRANCH_NAME="${{ steps.check_branch.outputs.branch_name }}"
+          git push --set-upstream origin "$BRANCH_NAME"
+          echo "Pushed $BRANCH_NAME to origin"
 
       - name: Summary
         run: |
-          echo "✅ Created branch: next/${{ steps.next.outputs.value }}"
-          echo "➡️  Bump: ${{ inputs.bump }}"
-          echo "📦 PR title: v${{ steps.next.outputs.value }}"
+          echo "## Release Branch Created" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | \`${{ steps.check_branch.outputs.branch_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Initial Version** | \`${{ steps.version.outputs.initial_version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Base Branch** | \`${{ inputs.base_branch }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. Create PRs targeting \`${{ steps.check_branch.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "2. When ready to publish, run the **Publish Release** workflow from this branch" >> $GITHUB_STEP_SUMMARY
+          echo "3. Subsequent releases from this branch will increment: ${{ steps.version.outputs.initial_version }} -> x.y.1 -> x.y.2 ..." >> $GITHUB_STEP_SUMMARY
