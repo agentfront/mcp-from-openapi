@@ -15,7 +15,7 @@ pnpm add mcp-from-openapi
 ```
 
 **Requirements:**
-- Node.js >= 18.0.0
+- Node.js >= 20.0.0
 - Peer dependency: `zod@^4.0.0`
 
 ---

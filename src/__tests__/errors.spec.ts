@@ -97,6 +97,13 @@ describe('ValidationError', () => {
     expect(error.errors).toEqual(validationErrors);
   });
 
+  it('should handle context without errors key', () => {
+    const error = new ValidationError('Validation failed', { someOther: 'data' });
+
+    expect(error.errors).toBeUndefined();
+    expect(error.context).toEqual({ someOther: 'data' });
+  });
+
   it('should be instance of OpenAPIToolError', () => {
     const error = new ValidationError('Validation failed');
 

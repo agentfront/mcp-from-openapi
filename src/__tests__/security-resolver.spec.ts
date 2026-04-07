@@ -398,6 +398,45 @@ describe('SecurityResolver', () => {
       expect(result.headers['Auth']).toBe('vapid-auth-value');
     });
 
+    it('should return undefined for unknown HTTP scheme in default case', async () => {
+      const mappers: ParameterMapper[] = [
+        {
+          inputKey: 'Auth',
+          key: 'Auth',
+          type: 'header',
+          security: {
+            scheme: 'customScheme',
+            type: 'http',
+            httpScheme: 'totally-custom-xyz',
+          },
+        },
+      ];
+
+      const result = await resolver.resolve(mappers, {});
+
+      expect(result.headers['Auth']).toBeUndefined();
+    });
+
+    it('should return undefined when custom HTTP scheme has no matching header', async () => {
+      const mappers: ParameterMapper[] = [
+        {
+          inputKey: 'Auth',
+          key: 'Auth',
+          type: 'header',
+          security: {
+            scheme: 'customScheme',
+            type: 'http',
+            httpScheme: 'vapid',
+          },
+        },
+      ];
+
+      // No customHeaders provided — resolveCustomHttpScheme returns undefined
+      const result = await resolver.resolve(mappers, {});
+
+      expect(result.headers['Auth']).toBeUndefined();
+    });
+
     it('should skip when auth value is not available', async () => {
       const mappers: ParameterMapper[] = [
         {
