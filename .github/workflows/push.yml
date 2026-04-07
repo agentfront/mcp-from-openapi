@@ -2,9 +2,19 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "next/**"
+      - "release/**"
   pull_request:
-    branches: [main]
+    branches:
+      - main
+      - "next/**"
+      - "release/**"
+
+permissions:
+  actions: read
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
