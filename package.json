@@ -53,6 +53,8 @@
     "build:types": "tsc -p tsconfig.lib.json --emitDeclarationOnly",
     "build": "yarn build:cjs && yarn build:esm && yarn build:types && cp package.json dist/ && node scripts/strip-dist-from-pkg.js dist/package.json && cp README.md CHANGELOG.md LICENSE dist/",
     "test": "jest",
+    "test:unit": "jest --testPathIgnorePatterns='integration'",
+    "test:integration": "jest --testPathPattern='integration'",
     "test:coverage": "jest --coverage",
     "clean": "rm -rf dist coverage",
     "prepublishOnly": "yarn clean && yarn build && yarn test"

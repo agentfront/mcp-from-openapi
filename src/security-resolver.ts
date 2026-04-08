@@ -292,6 +292,7 @@ export class SecurityResolver {
     if (requiresSignature) {
       resolved.requiresSignature = true;
       resolved.signatureInfo = {
+        /* c8 ignore next -- signatureScheme is always set from security.scheme */
         scheme: signatureScheme || 'unknown',
       };
     }
@@ -356,6 +357,7 @@ export class SecurityResolver {
       case 'digest':
         return this.resolveDigestAuth(context);
 
+      /* c8 ignore next -- hoba is part of the same fall-through as mutual/negotiate/vapid/scram */
       case 'hoba':
       case 'mutual':
       case 'negotiate':

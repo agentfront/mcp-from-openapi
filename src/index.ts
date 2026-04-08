@@ -5,6 +5,7 @@ export { ParameterResolver } from './parameter-resolver';
 export { ResponseBuilder } from './response-builder';
 export { Validator } from './validator';
 export { SecurityResolver, createSecurityContext } from './security-resolver';
+export { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 
 // Error exports
 export { OpenAPIToolError, LoadError, ParseError, ValidationError, GenerationError, SchemaError } from './errors';
@@ -25,6 +26,8 @@ export type {
   RefResolutionOptions,
   LoadOptions,
   GenerateOptions,
+  FormatResolver,
+  JsonSchema,
   NamingStrategy,
   OperationWithContext,
 

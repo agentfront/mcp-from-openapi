@@ -132,6 +132,21 @@ describe('SchemaBuilder', () => {
 
       expect((result as any).items.$ref).toBeUndefined();
     });
+
+    it('should handle schema with primitive nested values', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+        },
+        maxItems: 5,
+        title: 'test',
+      } as any;
+      const result = SchemaBuilder.removeRefs(schema);
+
+      expect(result.type).toBe('object');
+      expect((result as any).maxItems).toBe(5);
+    });
   });
 
   describe('withDescription', () => {

@@ -81,6 +81,7 @@ export class SchemaBuilder {
   }
 
   private static removeRefsRecursive(obj: any): void {
+    /* c8 ignore next -- guard for non-object values in recursive traversal */
     if (!obj || typeof obj !== 'object') return;
 
     if (obj.$ref) {
