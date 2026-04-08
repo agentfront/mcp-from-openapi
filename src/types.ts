@@ -1,7 +1,7 @@
 import type { JSONSchema } from 'zod/v4/core';
 
 /** JSON Schema type from Zod v4 */
-type JsonSchema = JSONSchema.JSONSchema;
+export type JsonSchema = JSONSchema.JSONSchema;
 import type { OpenAPIV3, OpenAPIV3_1 } from 'openapi-types';
 
 /**
@@ -631,7 +631,31 @@ export interface GenerateOptions {
    * @default false
    */
   includeSecurityInInput?: boolean;
+
+  /**
+   * Enable built-in format-to-schema resolution.
+   * Enriches schemas with concrete constraints (patterns, descriptions, min/max)
+   * based on OpenAPI format values (uuid, date-time, email, int32, etc.).
+   * @default false
+   */
+  resolveFormats?: boolean;
+
+  /**
+   * Custom format resolvers. Keys are format names, values are functions
+   * that receive the original schema and return an enriched schema.
+   *
+   * When used with `resolveFormats: true`, custom resolvers are merged with
+   * built-in resolvers (custom takes precedence for the same format).
+   * When used without `resolveFormats`, only custom resolvers are applied.
+   */
+  formatResolvers?: Record<string, FormatResolver>;
 }
+
+/**
+ * A function that enriches a JSON Schema based on its format field.
+ * Receives the schema and returns a new schema with additional constraints.
+ */
+export type FormatResolver = (schema: JsonSchema) => JsonSchema;
 
 /**
  * Naming strategy for resolving parameter conflicts

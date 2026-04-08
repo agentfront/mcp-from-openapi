@@ -455,6 +455,127 @@ describe('SecurityResolver', () => {
 
       expect(result.headers['Authorization']).toBeUndefined();
     });
+
+    it('should return undefined for basic auth with no credentials', async () => {
+      const mappers: ParameterMapper[] = [
+        {
+          inputKey: 'Auth',
+          key: 'Auth',
+          type: 'header',
+          security: {
+            scheme: 'basicAuth',
+            type: 'http',
+            httpScheme: 'basic',
+          },
+        },
+      ];
+
+      const result = await resolver.resolve(mappers, {}); // no basic in context
+
+      expect(result.headers['Auth']).toBeUndefined();
+    });
+
+    it('should return undefined for digest auth with no digest context', async () => {
+      const mappers: ParameterMapper[] = [
+        {
+          inputKey: 'Auth',
+          key: 'Auth',
+          type: 'header',
+          security: {
+            scheme: 'digestAuth',
+            type: 'http',
+            httpScheme: 'digest',
+          },
+        },
+      ];
+
+      const result = await resolver.resolve(mappers, {}); // no digest in context
+
+      expect(result.headers['Auth']).toBeUndefined();
+    });
+
+    it('should return undefined for oauth2 with no token', async () => {
+      const mappers: ParameterMapper[] = [
+        {
+          inputKey: 'Auth',
+          key: 'Auth',
+          type: 'header',
+          security: {
+            scheme: 'oauth',
+            type: 'oauth2',
+          },
+        },
+      ];
+
+      const result = await resolver.resolve(mappers, {}); // no oauth2Token
+
+      expect(result.headers['Auth']).toBeUndefined();
+    });
+
+    it('should handle mutual HTTP scheme via resolveCustomHttpScheme', async () => {
+      const mappers: ParameterMapper[] = [
+        {
+          inputKey: 'Auth',
+          key: 'Auth',
+          type: 'header',
+          security: {
+            scheme: 'mutualAuth',
+            type: 'http',
+            httpScheme: 'mutual',
+          },
+        },
+      ];
+
+      const context: SecurityContext = {
+        customHeaders: { 'X-MUTUAL': 'mutual-value' },
+      };
+
+      const result = await resolver.resolve(mappers, context);
+
+      expect(result.headers['Auth']).toBe('mutual-value');
+    });
+
+    it('should handle negotiate HTTP scheme via resolveCustomHttpScheme', async () => {
+      const mappers: ParameterMapper[] = [
+        {
+          inputKey: 'Auth',
+          key: 'Auth',
+          type: 'header',
+          security: {
+            scheme: 'negoAuth',
+            type: 'http',
+            httpScheme: 'negotiate',
+          },
+        },
+      ];
+
+      const result = await resolver.resolve(mappers, {}); // no customHeaders
+
+      expect(result.headers['Auth']).toBeUndefined();
+    });
+
+    it('should set signatureScheme to unknown when not available', async () => {
+      const mappers: ParameterMapper[] = [
+        {
+          inputKey: 'Auth',
+          key: 'Auth',
+          type: 'header',
+          security: {
+            scheme: 'hmac-auth',
+            type: 'http',
+            httpScheme: 'bearer',
+          },
+        },
+      ];
+
+      const result = await resolver.resolve(mappers, {
+        jwt: 'test-token',
+      });
+
+      // hmac-auth matches signature schemes, so requiresSignature should be true
+      expect(result.requiresSignature).toBe(true);
+      expect(result.signatureInfo?.scheme).toBe('hmac-auth');
+    });
   });
 
   describe('checkMissingSecurity', () => {

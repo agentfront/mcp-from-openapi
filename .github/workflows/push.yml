@@ -28,10 +28,10 @@ jobs:
       matrix:
         node-version: [20.x, 22.x, 24.x]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'yarn'
@@ -42,5 +42,26 @@ jobs:
       - name: Build
         run: yarn build
 
-      - name: Test
-        run: yarn test
+      - name: Test with coverage
+        run: yarn test:coverage --coverageReporters=text --coverageReporters=json-summary
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            echo "## Test Coverage (Node ${{ matrix.node-version }})" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Category | Statements | Branches | Functions | Lines |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|-----------|----------|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+            node -e "
+              const s = require('./coverage/coverage-summary.json').total;
+              const row = ['All files', s.statements.pct + '%', s.branches.pct + '%', s.functions.pct + '%', s.lines.pct + '%'];
+              console.log('| ' + row.join(' | ') + ' |');
+            " >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## Test Coverage (Node ${{ matrix.node-version }})" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "> Coverage data not available — the test step may have failed before generating coverage." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi

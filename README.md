@@ -138,19 +138,20 @@ function buildRequest(tool: McpOpenAPITool, input: Record<string, any>) {
 
 | Document | Description |
 |----------|-------------|
-| [Getting Started](docs/getting-started.md) | Loading specs, generating tools, building requests |
-| [Configuration](docs/configuration.md) | LoadOptions, GenerateOptions, RefResolutionOptions |
-| [Parameter Conflicts](docs/parameter-conflicts.md) | How conflict detection and resolution works |
-| [Response Schemas](docs/response-schemas.md) | Output schemas, status codes, oneOf unions |
-| [Security](docs/security.md) | SecurityResolver, all auth types, custom resolvers |
-| [SSRF Prevention](docs/ssrf-prevention.md) | Ref resolution security, blocked IPs and hosts |
-| [Naming Strategies](docs/naming-strategies.md) | Custom tool naming and conflict resolvers |
-| [SchemaBuilder](docs/schema-builder.md) | JSON Schema utility methods |
-| [Error Handling](docs/error-handling.md) | Error classes, context, and patterns |
-| [x-frontmcp Extension](docs/x-frontmcp.md) | Custom OpenAPI extension for MCP annotations |
-| [API Reference](docs/api-reference.md) | Complete types, interfaces, and exports |
-| [Examples](docs/examples.md) | MCP server, Zod, filtering, security, and more |
-| [Architecture](docs/architecture.md) | System overview, data flow, design patterns |
+| [Getting Started](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/getting-started.md) | Loading specs, generating tools, building requests |
+| [Configuration](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/configuration.md) | LoadOptions, GenerateOptions, RefResolutionOptions |
+| [Parameter Conflicts](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/parameter-conflicts.md) | How conflict detection and resolution works |
+| [Response Schemas](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/response-schemas.md) | Output schemas, status codes, oneOf unions |
+| [Security](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/security.md) | SecurityResolver, all auth types, custom resolvers |
+| [SSRF Prevention](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/ssrf-prevention.md) | Ref resolution security, blocked IPs and hosts |
+| [Format Resolution](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/FORMAT_RESOLUTION.md) | Format-to-schema enrichment (uuid, date-time, email, int32, etc.) |
+| [Naming Strategies](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/naming-strategies.md) | Custom tool naming and conflict resolvers |
+| [SchemaBuilder](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/schema-builder.md) | JSON Schema utility methods |
+| [Error Handling](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/error-handling.md) | Error classes, context, and patterns |
+| [x-frontmcp Extension](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/x-frontmcp.md) | Custom OpenAPI extension for MCP annotations |
+| [API Reference](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/api-reference.md) | Complete types, interfaces, and exports |
+| [Examples](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/examples.md) | MCP server, Zod, filtering, security, and more |
+| [Architecture](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/architecture.md) | System overview, data flow, design patterns |
 
 ## Requirements
 
@@ -169,4 +170,4 @@ Contributions are welcome! Please see our [issues page](https://github.com/agent
 
 ## License
 
-[Apache 2.0](LICENSE)
+[Apache 2.0](https://github.com/agentfront/mcp-from-openapi/blob/main/LICENSE)
