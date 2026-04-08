@@ -429,14 +429,14 @@ paths:
     });
 
     it('should load from relative file path', async () => {
-      const tmpFile = path.join(os.tmpdir(), `test-spec-${Date.now()}.json`);
-      fs.writeFileSync(tmpFile, JSON.stringify(minimalSpec));
+      const fileName = `test-spec-relative-${Date.now()}.json`;
+      const absolutePath = path.join(process.cwd(), fileName);
+      fs.writeFileSync(absolutePath, JSON.stringify(minimalSpec));
       try {
-        // Use absolute path directly (tests both branches of path.isAbsolute ternary)
-        const generator = await OpenAPIToolGenerator.fromFile(tmpFile);
+        const generator = await OpenAPIToolGenerator.fromFile(fileName);
         expect(generator.getDocument().info.title).toBe('File Test');
       } finally {
-        fs.unlinkSync(tmpFile);
+        fs.unlinkSync(absolutePath);
       }
     });
   });

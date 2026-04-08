@@ -59,4 +59,9 @@ jobs:
               console.log('| ' + row.join(' | ') + ' |');
             " >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## Test Coverage (Node ${{ matrix.node-version }})" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "> Coverage data not available — the test step may have failed before generating coverage." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
           fi

@@ -6,7 +6,7 @@
 
 ## Architecture
 
-```
+```text
 OpenAPI Spec (JSON/YAML/URL/File)
     |
     v
@@ -90,7 +90,7 @@ yarn clean             # Remove dist/ and coverage/
 
 ## Options Flow
 
-```
+```text
 LoadOptions (factory methods)
   -> constructor (normalizes defaults)
   -> initialize()
