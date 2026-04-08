@@ -42,5 +42,21 @@ jobs:
       - name: Build
         run: yarn build
 
-      - name: Test
-        run: yarn test
+      - name: Test with coverage
+        run: yarn test:coverage --coverageReporters=text --coverageReporters=json-summary
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            echo "## Test Coverage (Node ${{ matrix.node-version }})" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Category | Statements | Branches | Functions | Lines |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|-----------|----------|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+            node -e "
+              const s = require('./coverage/coverage-summary.json').total;
+              const row = ['All files', s.statements.pct + '%', s.branches.pct + '%', s.functions.pct + '%', s.lines.pct + '%'];
+              console.log('| ' + row.join(' | ') + ' |');
+            " >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi

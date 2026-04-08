@@ -116,4 +116,15 @@ GenerateOptions (generateTools/generateTool)
 
 ## Documentation
 
+- All docs live in `docs/` folder
 - `docs/FORMAT_RESOLUTION.md` — Format resolution feature docs (built-in resolvers, custom resolvers, standalone usage)
+
+### README Links for npm
+
+All links in `README.md` must use **absolute GitHub URLs** (not relative paths) because npm renders README on its own domain and relative links break. Use the format:
+
+```
+https://github.com/agentfront/mcp-from-openapi/blob/main/docs/<file>.md
+```
+
+When adding new docs or links to README, always use absolute URLs pointing to the `main` branch.
