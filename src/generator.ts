@@ -1,6 +1,9 @@
 import * as yaml from 'yaml';
-import * as path from 'path';
-import * as fs from 'fs/promises';
+// NOTE: `node:path` / `node:fs` are imported LAZILY inside `fromFile` (the only
+// consumer) so this module stays importable on V8-isolate runtimes (Cloudflare
+// Workers / Deno), where those builtins (and the `node:process` they pull) are
+// unavailable. `fromJSON` / `fromYAML` / generation / `SecurityResolver` never
+// touch the filesystem and therefore never load them.
 import type {
   OpenAPIDocument,
   LoadOptions,
@@ -100,6 +103,8 @@ export class OpenAPIToolGenerator {
    */
   static async fromFile(filePath: string, options: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
     try {
+      // Lazy-load Node builtins so the module is importable off-Node (Workers).
+      const [path, fs] = await Promise.all([import('path'), import('fs/promises')]);
       /* c8 ignore next -- both branches tested but V8 source-map misaligns ternary */
       const absolutePath = path.isAbsolute(filePath) ? filePath : path.resolve(process.cwd(), filePath);
       const content = await fs.readFile(absolutePath, 'utf-8');
@@ -192,6 +197,34 @@ export class OpenAPIToolGenerator {
   ];
 
   /**
+   * Decode an IPv4-mapped IPv6 host (`::ffff:169.254.169.254` or its hex form
+   * `::ffff:a9fe:a9fe`, optionally bracketed) to its embedded dotted-quad IPv4,
+   * or `null` if the host isn't IPv4-mapped. `new URL().hostname` normalizes
+   * `[::ffff:169.254.169.254]` to `[::ffff:a9fe:a9fe]`, which the plain
+   * dotted-quad blocklist patterns miss — letting an attacker reach a private /
+   * metadata IPv4 through the v6 mapping. We re-check the decoded v4.
+   */
+  private static mappedIPv4FromIPv6(hostname: string): string | null {
+    let h = hostname;
+    if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
+    const lower = h.toLowerCase();
+    const marker = lower.lastIndexOf('::ffff:');
+    if (marker === -1) return null;
+    const tail = lower.slice(marker + '::ffff:'.length);
+    // Dotted-quad embedded form, e.g. ::ffff:169.254.169.254
+    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(tail)) return tail;
+    // Two-hextet embedded form, e.g. ::ffff:a9fe:a9fe
+    const hex = tail.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (hex) {
+      const hi = parseInt(hex[1], 16);
+      const lo = parseInt(hex[2], 16);
+      if (Number.isNaN(hi) || Number.isNaN(lo)) return null;
+      return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+    }
+    return null;
+  }
+
+  /**
    * Check whether a hostname is blocked (internal/private IP or explicit blocklist).
    */
   private isBlockedHost(hostname: string, refOpts: Required<RefResolutionOptions>): boolean {
@@ -205,12 +238,19 @@ export class OpenAPIToolGenerator {
       return true;
     }
 
-    // Check built-in block list
-    for (const pattern of OpenAPIToolGenerator.BLOCKED_HOSTNAME_PATTERNS) {
-      if (typeof pattern === 'string') {
-        if (hostname === pattern) return true;
-      } else {
-        if (pattern.test(hostname)) return true;
+    // Check built-in block list against the literal hostname AND, if the host is
+    // an IPv4-mapped IPv6 address, against its decoded IPv4 (closes the
+    // ::ffff:169.254.169.254 metadata bypass).
+    const candidates = [hostname];
+    const mapped = OpenAPIToolGenerator.mappedIPv4FromIPv6(hostname);
+    if (mapped) candidates.push(mapped);
+    for (const candidate of candidates) {
+      for (const pattern of OpenAPIToolGenerator.BLOCKED_HOSTNAME_PATTERNS) {
+        if (typeof pattern === 'string') {
+          if (candidate === pattern) return true;
+        } else {
+          if (pattern.test(candidate)) return true;
+        }
       }
     }
 
@@ -250,6 +290,14 @@ export class OpenAPIToolGenerator {
       const hostAllowSet = new Set(refOpts.allowedHosts);
 
       resolveConfig['http'] = {
+        // SECURITY: never auto-follow HTTP redirects when resolving external
+        // `$ref`s. `canRead` (below) validates only the INITIAL URL; the
+        // resolver's default redirect-following (up to 5 hops) re-fetches the
+        // `Location` target WITHOUT re-invoking `canRead`, so an allowlisted host
+        // could 302 → `http://169.254.169.254/...` and smuggle a blocked target
+        // past the allowlist/blocklist. Setting `redirects: 0` refuses the first
+        // redirect; legitimate refs resolve in one hop.
+        redirects: 0,
         canRead: (file: { url: string }): boolean => {
           try {
             const parsed = new URL(file.url);
@@ -284,22 +332,83 @@ export class OpenAPIToolGenerator {
   }
 
   /**
+   * Does the document contain any EXTERNAL `$ref` (a ref that is not a local
+   * JSON-pointer beginning with `#`)? Only external refs require the full
+   * `$RefParser` (file/http resolvers, which pull Node builtins). A document
+   * with only internal refs can be dereferenced with the runtime-agnostic
+   * resolver below — so it works on V8 isolates (Cloudflare Workers) too.
+   */
+  private static hasExternalRefs(node: unknown, seen = new Set<unknown>()): boolean {
+    if (node === null || typeof node !== 'object') return false;
+    if (seen.has(node)) return false;
+    seen.add(node);
+    if (Array.isArray(node)) return node.some((n) => OpenAPIToolGenerator.hasExternalRefs(n, seen));
+    const ref = (node as { $ref?: unknown }).$ref;
+    if (typeof ref === 'string' && !ref.startsWith('#')) return true;
+    return Object.values(node as Record<string, unknown>).some((v) =>
+      OpenAPIToolGenerator.hasExternalRefs(v, seen),
+    );
+  }
+
+  /**
+   * Dereference local (`#/...`) `$ref`s without `$RefParser` — pure, dependency-
+   * free, runtime-agnostic. A pointer cache makes circular schemas resolve to a
+   * shared reference instead of recursing forever (same contract as `$RefParser`).
+   */
+  private static dereferenceInternal(root: OpenAPIDocument): OpenAPIDocument {
+    const cache = new Map<string, unknown>();
+    const resolvePointer = (ptr: string): unknown => {
+      const parts = ptr
+        .replace(/^#\/?/, '')
+        .split('/')
+        .filter((p) => p.length > 0)
+        .map((p) => p.replace(/~1/g, '/').replace(/~0/g, '~'));
+      let cur: unknown = root;
+      for (const p of parts) cur = (cur as Record<string, unknown> | undefined)?.[p];
+      return cur;
+    };
+    const walk = (node: unknown): unknown => {
+      if (node === null || typeof node !== 'object') return node;
+      if (Array.isArray(node)) return node.map(walk);
+      const ref = (node as { $ref?: unknown }).$ref;
+      if (typeof ref === 'string' && ref.startsWith('#')) {
+        const cached = cache.get(ref);
+        if (cached !== undefined) return cached;
+        const placeholder: Record<string, unknown> = {};
+        cache.set(ref, placeholder); // break cycles: self-refs see the placeholder
+        const resolved = walk(resolvePointer(ref));
+        if (resolved && typeof resolved === 'object') Object.assign(placeholder, resolved);
+        return placeholder;
+      }
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(node as Record<string, unknown>)) out[k] = walk(v);
+      return out;
+    };
+    return walk(root) as OpenAPIDocument;
+  }
+
+  /**
    * Initialize the generator (dereference if needed, then validate)
    */
   private async initialize(): Promise<void> {
     if (this.options.dereference && !this.dereferencedDocument) {
-      try {
-        const { default: $RefParser } = await import('@apidevtools/json-schema-ref-parser');
-        const refParserOptions = this.buildRefParserOptions();
-        this.dereferencedDocument = (await $RefParser.dereference(
-          JSON.parse(JSON.stringify(this.document)),
-          refParserOptions,
-        )) as OpenAPIDocument;
-      } catch (error: unknown) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        throw new ParseError(`Failed to dereference OpenAPI document: ${errorMessage}`, {
-          originalError: error,
-        });
+      const cloned = JSON.parse(JSON.stringify(this.document)) as OpenAPIDocument;
+      // Internal-only refs → dereference without `$RefParser` (no Node builtins,
+      // so this path runs on V8 isolates / Cloudflare Workers). External refs →
+      // fall back to `$RefParser` (Node-only file/http resolvers).
+      if (!OpenAPIToolGenerator.hasExternalRefs(cloned)) {
+        this.dereferencedDocument = OpenAPIToolGenerator.dereferenceInternal(cloned);
+      } else {
+        try {
+          const { default: $RefParser } = await import('@apidevtools/json-schema-ref-parser');
+          const refParserOptions = this.buildRefParserOptions();
+          this.dereferencedDocument = (await $RefParser.dereference(cloned, refParserOptions)) as OpenAPIDocument;
+        } catch (error: unknown) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          throw new ParseError(`Failed to dereference OpenAPI document: ${errorMessage}`, {
+            originalError: error,
+          });
+        }
       }
     }
 

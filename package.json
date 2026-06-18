@@ -4,6 +4,7 @@
   "description": "Production-ready library for converting OpenAPI specifications into MCP tool definitions",
   "author": "AgentFront <info@agentfront.dev>",
   "license": "Apache-2.0",
+  "packageManager": "yarn@4.14.1",
   "keywords": [
     "mcp",
     "model-context-protocol",

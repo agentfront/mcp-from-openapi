@@ -1929,17 +1929,27 @@ describe('SSRF Prevention - $ref resolution security', () => {
   let derefSpy: jest.SpyInstance;
 
   beforeEach(() => {
-    derefSpy = jest.spyOn(
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      require('@apidevtools/json-schema-ref-parser').default,
-      'dereference',
-    );
+    // Mock the resolver: these tests inspect the SSRF options passed to
+    // `$RefParser.dereference` (the `canRead`/resolve config) — they must not
+    // perform a real external fetch. Returning the doc unchanged captures the
+    // options without resolving. (Error-handling tests override per-call with
+    // `mockRejectedValueOnce`.)
+    derefSpy = jest
+      .spyOn(
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        require('@apidevtools/json-schema-ref-parser').default,
+        'dereference',
+      )
+      .mockImplementation(async (doc: unknown) => doc);
   });
 
   afterEach(() => {
     derefSpy.mockRestore();
   });
 
+  // SSRF protection applies only to EXTERNAL `$ref`s — so this fixture carries
+  // one, which routes dereference through `$RefParser` (internal-only docs use
+  // the dependency-free dereferencer and never touch `$RefParser`).
   const minimalSpec: OpenAPIDocument = {
     openapi: '3.0.0',
     info: { title: 'Test', version: '1.0.0' },
@@ -1950,6 +1960,11 @@ describe('SSRF Prevention - $ref resolution security', () => {
           summary: 'test',
           responses: { '200': { description: 'OK' } },
         },
+      },
+    },
+    components: {
+      schemas: {
+        External: { $ref: 'https://api.example.com/schemas/external.json' },
       },
     },
   };
@@ -2021,6 +2036,30 @@ describe('SSRF Prevention - $ref resolution security', () => {
 
     const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
     expect(canRead({ url: 'http://metadata.google.internal/computeMetadata/v1/' })).toBe(false);
+  });
+
+  it('should disable redirect-following on the http resolver (SSRF redirect-bypass guard)', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec);
+    await generator.generateTools();
+
+    // redirects:0 prevents the resolver from following a 3xx to a blocked target
+    // without re-running canRead.
+    expect(derefSpy.mock.calls[0][1]?.resolve?.http?.redirects).toBe(0);
+  });
+
+  it('should block IPv4-mapped IPv6 to cloud metadata / private ranges', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec);
+    await generator.generateTools();
+
+    const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
+    // Dotted-quad and hex forms of ::ffff:169.254.169.254 (URL normalizes the
+    // dotted form to the hex form) must both be blocked.
+    expect(canRead({ url: 'http://[::ffff:169.254.169.254]/latest/meta-data/' })).toBe(false);
+    expect(canRead({ url: 'http://[::ffff:a9fe:a9fe]/latest/meta-data/' })).toBe(false);
+    // IPv4-mapped private range too.
+    expect(canRead({ url: 'http://[::ffff:10.0.0.1]/internal' })).toBe(false);
+    // A mapped PUBLIC address is still allowed (no over-blocking).
+    expect(canRead({ url: 'http://[::ffff:8.8.8.8]/schema.json' })).toBe(true);
   });
 
   it('should allow file:// when explicitly in allowedProtocols', async () => {
@@ -2308,5 +2347,85 @@ describe('SSRF Prevention - $ref resolution security', () => {
     // Should have at least one tool (get) and warned about the other
     expect(tools.length).toBeGreaterThanOrEqual(1);
     warnSpy.mockRestore();
+  });
+});
+
+describe('Worker-safe dereference (internal $refs without $RefParser)', () => {
+  const internalRefSpec: OpenAPIDocument = {
+    openapi: '3.0.0',
+    info: { title: 'Internal', version: '1.0.0' },
+    paths: {
+      '/users/{id}': {
+        get: {
+          operationId: 'getUser',
+          summary: 'Get a user',
+          parameters: [{ $ref: '#/components/parameters/UserId' }],
+          responses: {
+            '200': {
+              description: 'OK',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/User' } } },
+            },
+          },
+        },
+      },
+    },
+    components: {
+      parameters: {
+        UserId: { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+      },
+      schemas: {
+        User: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } } },
+      },
+    },
+  };
+
+  it('resolves internal $refs WITHOUT invoking $RefParser (V8-isolate safe)', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const spy = jest.spyOn(require('@apidevtools/json-schema-ref-parser').default, 'dereference');
+    const generator = await OpenAPIToolGenerator.fromJSON(internalRefSpec);
+    const tools = await generator.generateTools();
+
+    // The whole point: no Node-coupled $RefParser on the internal-only path.
+    expect(spy).not.toHaveBeenCalled();
+
+    // …and the internal $refs were still resolved (param + response schema).
+    const tool = tools.find((t) => t.metadata.operationId === 'getUser');
+    expect(tool).toBeDefined();
+    expect((tool!.inputSchema as { properties?: Record<string, unknown> }).properties?.['id']).toBeDefined();
+    spy.mockRestore();
+  });
+
+  it('resolves circular internal $refs to a shared reference (no infinite recursion)', async () => {
+    const circular: OpenAPIDocument = {
+      openapi: '3.0.0',
+      info: { title: 'Circular', version: '1.0.0' },
+      paths: {
+        '/node': {
+          get: {
+            operationId: 'getNode',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: { 'application/json': { schema: { $ref: '#/components/schemas/Node' } } },
+              },
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          Node: {
+            type: 'object',
+            properties: { value: { type: 'string' }, next: { $ref: '#/components/schemas/Node' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(circular);
+    // The property this locks: the dependency-free dereferencer resolves a
+    // self-referential `$ref` to a shared object instead of recursing forever —
+    // so generation COMPLETES (returns an array) rather than hanging or throwing.
+    const tools = await generator.generateTools();
+    expect(Array.isArray(tools)).toBe(true);
   });
 });

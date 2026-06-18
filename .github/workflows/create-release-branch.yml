@@ -54,14 +54,10 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.base_branch }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - name: Setup Node + Yarn
+        uses: ./.github/actions/setup-node-yarn
         with:
           node-version-file: ".nvmrc"
-          cache: "yarn"
-
-      - name: Install deps
-        run: yarn install --frozen-lockfile
 
       - name: Configure git user
         run: |

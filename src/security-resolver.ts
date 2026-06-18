@@ -398,17 +398,24 @@ export class SecurityResolver {
     const digest = context.digest;
     if (!digest) return undefined;
 
+    // SECURITY: digest field values are interpolated into a single header line.
+    // Strip CR/LF (header/response-splitting) and backslash-escape `"` so a value
+    // containing a quote can't break out of its quoted field. `qop`/`nc` are
+    // unquoted tokens — strip CR/LF, quotes, and commas (the field separator).
+    const quoted = (v: string): string => String(v).replace(/[\r\n]/g, '').replace(/"/g, '\\"');
+    const token = (v: string): string => String(v).replace(/[\r\n",]/g, '');
+
     // Build digest auth header
     const parts: string[] = [
-      `username="${digest.username}"`,
-      digest.realm ? `realm="${digest.realm}"` : '',
-      digest.nonce ? `nonce="${digest.nonce}"` : '',
-      digest.uri ? `uri="${digest.uri}"` : '',
-      digest.response ? `response="${digest.response}"` : '',
-      digest.opaque ? `opaque="${digest.opaque}"` : '',
-      digest.qop ? `qop=${digest.qop}` : '',
-      digest.nc ? `nc=${digest.nc}` : '',
-      digest.cnonce ? `cnonce="${digest.cnonce}"` : '',
+      `username="${quoted(digest.username)}"`,
+      digest.realm ? `realm="${quoted(digest.realm)}"` : '',
+      digest.nonce ? `nonce="${quoted(digest.nonce)}"` : '',
+      digest.uri ? `uri="${quoted(digest.uri)}"` : '',
+      digest.response ? `response="${quoted(digest.response)}"` : '',
+      digest.opaque ? `opaque="${quoted(digest.opaque)}"` : '',
+      digest.qop ? `qop=${token(digest.qop)}` : '',
+      digest.nc ? `nc=${token(digest.nc)}` : '',
+      digest.cnonce ? `cnonce="${quoted(digest.cnonce)}"` : '',
     ].filter(Boolean);
 
     return `Digest ${parts.join(', ')}`;

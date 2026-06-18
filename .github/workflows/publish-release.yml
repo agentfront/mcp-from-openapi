@@ -65,18 +65,14 @@ jobs:
           echo "Branch: $BRANCH"
           echo "Release line: $RELEASE_LINE"
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - name: Setup Node + Yarn
+        uses: ./.github/actions/setup-node-yarn
         with:
           node-version-file: ".nvmrc"
-          cache: "yarn"
           registry-url: "https://registry.npmjs.org/"
 
       - name: Update npm CLI for trusted publishing
         run: npm install -g npm@latest
-
-      - name: Install dependencies
-        run: yarn install --frozen-lockfile
 
       - name: Compute version
         id: version

@@ -760,6 +760,38 @@ describe('SecurityResolver', () => {
 
       expect(result.headers['Authorization']).toBe('Digest username="user"');
     });
+
+    it('strips CRLF and escapes quotes in digest field values (header-injection guard)', async () => {
+      const mappers: ParameterMapper[] = [
+        {
+          inputKey: 'Authorization',
+          key: 'Authorization',
+          type: 'header',
+          security: { scheme: 'digestAuth', type: 'http', httpScheme: 'digest' },
+        },
+      ];
+
+      const context: SecurityContext = {
+        digest: {
+          username: 'ad"min',
+          password: 'pass',
+          realm: 'realm\r\nX-Injected: evil',
+          qop: 'auth,evil=1',
+          nc: '00000001\r\n',
+        },
+      };
+
+      const header = (await resolver.resolve(mappers, context)).headers['Authorization'];
+      // No raw CR/LF survives into the header line (header/response-splitting closed).
+      expect(header).not.toMatch(/[\r\n]/);
+      // Quote in username is escaped, not breaking out of the quoted field.
+      expect(header).toContain('username="ad\\"min"');
+      // The CRLF in realm is stripped → the injected text is now harmless data
+      // CONTAINED inside the quoted realm value, not a separate header line.
+      expect(header).toContain('realm="realmX-Injected: evil"');
+      // qop is an unquoted token: the comma (field separator) is stripped.
+      expect(header).toContain('qop=authevil=1');
+    });
   });
 
   describe('Edge Cases', () => {
