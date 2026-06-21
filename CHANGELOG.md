@@ -1,5 +1,7 @@
 ## [2.5.0] - 2026-06-21
 
+## [2.5.0] - 2026-06-21
+
 ### Security (SSRF hardening — GHSA-65h7-9wrw-629c)
 
 Closes the remaining SSRF bypasses left after 2.4.0, where the guard checked the
