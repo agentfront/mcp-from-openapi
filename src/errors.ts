@@ -26,6 +26,22 @@ export class LoadError extends OpenAPIToolError {
 }
 
 /**
+ * Error thrown when a spec URL or external `$ref` target is refused by the
+ * SSRF guard: it targets — or resolves to — a loopback / private / link-local /
+ * cloud-metadata address, uses a disallowed protocol, or is outside the
+ * configured allow-list.
+ *
+ * Subclasses {@link LoadError} so it propagates cleanly out of `fromURL` (whose
+ * catch re-throws `LoadError`) and so existing `instanceof LoadError` handling
+ * keeps working, while still being independently catchable.
+ */
+export class SsrfError extends LoadError {
+  constructor(message: string, context?: Record<string, any>) {
+    super(message, context);
+  }
+}
+
+/**
  * Error thrown when parsing an OpenAPI specification fails
  */
 export class ParseError extends OpenAPIToolError {
