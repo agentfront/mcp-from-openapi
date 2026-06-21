@@ -480,9 +480,15 @@ export interface ServerInfo {
 }
 
 /**
- * Controls how external $ref pointers are resolved during dereferencing.
- * By default, only http/https protocols are allowed and internal/private
- * IP addresses are blocked to prevent SSRF attacks.
+ * Controls how external `$ref` pointers are resolved during dereferencing, and
+ * the host policy applied to the initial spec-URL fetch in `fromURL`.
+ *
+ * By default only http/https protocols are allowed and internal/private targets
+ * are blocked to prevent SSRF. As of 2.5.0 the guard validates the **resolved
+ * IP** (it resolves DNS and rejects hostnames that map to internal addresses —
+ * e.g. `127.0.0.1.nip.io`), normalizes IPv4-mapped IPv6, and re-validates every
+ * HTTP redirect hop. `allowedHosts` / `blockedHosts` / `allowInternalIPs` apply
+ * to both the spec URL and external `$ref`s.
  */
 export interface RefResolutionOptions {
   /**
@@ -548,14 +554,18 @@ export interface LoadOptions {
   validate?: boolean;
 
   /**
-   * Whether to follow HTTP redirects
+   * Whether to follow HTTP redirects when fetching the spec URL. Each redirect
+   * hop is re-validated against the SSRF guard before being followed (a 3xx to
+   * an internal target is refused), so following is safe by default.
    * @default true
    */
   followRedirects?: boolean;
 
   /**
-   * Controls external $ref resolution security.
-   * By default, file:// is blocked and internal IPs are blocked.
+   * Controls spec-loading security: external `$ref` resolution AND the host
+   * policy for the initial spec-URL fetch. By default `file://` is blocked,
+   * internal/private targets are blocked, and hostnames are DNS-resolved and
+   * re-checked against the internal-address ranges.
    * @see RefResolutionOptions
    */
   refResolution?: RefResolutionOptions;

@@ -8,7 +8,21 @@ export { SecurityResolver, createSecurityContext } from './security-resolver';
 export { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 
 // Error exports
-export { OpenAPIToolError, LoadError, ParseError, ValidationError, GenerationError, SchemaError } from './errors';
+export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError } from './errors';
+
+// SSRF protection (shared by spec-URL loading and $ref resolution; usable by
+// consumers that fetch spec URLs themselves, e.g. pollers)
+export {
+  assertUrlSafe,
+  safeFetch,
+  isBlockedAddress,
+  isBlockedHostname,
+  decodeIpv4MappedIpv6,
+  normalizeSsrfOptions,
+  defaultLookup,
+  BLOCKED_HOSTNAMES,
+} from './ssrf';
+export type { ResolvedSsrfOptions, ResolvedAddress, SsrfHostLookup, SafeFetchOptions } from './ssrf';
 
 // Type exports
 export type {

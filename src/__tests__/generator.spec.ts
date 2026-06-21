@@ -201,6 +201,31 @@ paths:
       await expect(OpenAPIToolGenerator.fromURL('https://example.com/api.json')).rejects.toThrow(LoadError);
     });
 
+    it('should refuse a spec URL pointing at a literal internal IP (SSRF guard)', async () => {
+      // Literal internal IPs are rejected synchronously, before any fetch.
+      await expect(OpenAPIToolGenerator.fromURL('http://127.0.0.1:8080/openapi.json')).rejects.toThrow(/blocked/i);
+      await expect(OpenAPIToolGenerator.fromURL('http://169.254.169.254/openapi.json')).rejects.toThrow(LoadError);
+      await expect(OpenAPIToolGenerator.fromURL('http://[::1]/openapi.json')).rejects.toThrow(LoadError);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should refuse non-http(s) spec URLs', async () => {
+      await expect(OpenAPIToolGenerator.fromURL('file:///etc/passwd')).rejects.toThrow(LoadError);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should allow internal spec URLs when allowInternalIPs is set', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve(JSON.stringify({ openapi: '3.0.0', info: { title: 'Local', version: '1.0.0' }, paths: {} })),
+        headers: new Map([['content-type', 'application/json']]),
+      });
+      const generator = await OpenAPIToolGenerator.fromURL('http://127.0.0.1:8080/openapi.json', {
+        refResolution: { allowInternalIPs: true },
+      });
+      expect(generator.getDocument().info.title).toBe('Local');
+    });
+
     it('should throw LoadError when YAML parse fails from URL', async () => {
       mockFetch.mockResolvedValue({
         ok: true,
@@ -2045,6 +2070,16 @@ describe('SSRF Prevention - $ref resolution security', () => {
     // redirects:0 prevents the resolver from following a 3xx to a blocked target
     // without re-running canRead.
     expect(derefSpy.mock.calls[0][1]?.resolve?.http?.redirects).toBe(0);
+  });
+
+  it('should provide an SSRF-safe async read for the http resolver (DNS-validated $ref fetch)', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(minimalSpec);
+    await generator.generateTools();
+
+    // The custom `read` performs the actual $ref fetch through `safeFetch`,
+    // which resolves DNS and rejects names mapping to internal addresses —
+    // closing the `127.0.0.1.nip.io` bypass that the sync `canRead` can't catch.
+    expect(derefSpy.mock.calls[0][1]?.resolve?.http?.read).toBeInstanceOf(Function);
   });
 
   it('should block IPv4-mapped IPv6 to cloud metadata / private ranges', async () => {

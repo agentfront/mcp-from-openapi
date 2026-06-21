@@ -27,6 +27,7 @@ import { ResponseBuilder } from './response-builder';
 import { Validator } from './validator';
 import { LoadError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
+import { isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
 
 /**
  * Main class for generating MCP tools from OpenAPI specifications
@@ -57,16 +58,15 @@ export class OpenAPIToolGenerator {
    */
   static async fromURL(url: string, options: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), options.timeout ?? 30000);
-
-      const response = await fetch(url, {
+      // SECURITY: validate the spec URL — and every redirect hop — against the
+      // SSRF guard before fetching (resolves DNS and rejects internal targets),
+      // instead of letting the HTTP client follow 3xx blindly. See ssrf.ts.
+      const response = await safeFetch(url, {
         headers: options.headers,
-        signal: controller.signal,
-        redirect: options.followRedirects ?? true ? 'follow' : 'manual',
+        timeoutMs: options.timeout ?? 30000,
+        followRedirects: options.followRedirects ?? true,
+        ssrf: normalizeSsrfOptions(options.refResolution),
       });
-
-      clearTimeout(timeout);
 
       if (!response.ok) {
         throw new LoadError(`Failed to fetch OpenAPI spec from URL: ${response.status} ${response.statusText}`, {
@@ -175,87 +175,11 @@ export class OpenAPIToolGenerator {
     return validator.validate(this.document);
   }
 
-  /**
-   * Hostnames and IP patterns that are blocked by default to prevent SSRF.
-   * Covers RFC 1918/6598 private ranges, link-local, loopback, and cloud metadata endpoints.
-   */
-  private static readonly BLOCKED_HOSTNAME_PATTERNS: ReadonlyArray<string | RegExp> = [
-    'localhost',
-    'metadata.google.internal',
-    /^127\.\d+\.\d+\.\d+$/,           // 127.0.0.0/8 loopback
-    /^10\.\d+\.\d+\.\d+$/,            // 10.0.0.0/8 private
-    /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/, // 172.16.0.0/12 private
-    /^192\.168\.\d+\.\d+$/,           // 192.168.0.0/16 private
-    /^169\.254\.\d+\.\d+$/,           // 169.254.0.0/16 link-local / cloud metadata
-    /^0\.0\.0\.0$/,                    // unspecified
-    '::1',                             // IPv6 loopback
-    /^fd[0-9a-f]{2}:/i,               // fd00::/8 IPv6 ULA
-    /^fe80:/i,                         // fe80::/10 IPv6 link-local
-    /^\[::1\]$/,                       // bracketed IPv6 loopback
-    /^\[fd[0-9a-f]{2}:/i,             // bracketed IPv6 ULA
-    /^\[fe80:/i,                       // bracketed IPv6 link-local
-  ];
-
-  /**
-   * Decode an IPv4-mapped IPv6 host (`::ffff:169.254.169.254` or its hex form
-   * `::ffff:a9fe:a9fe`, optionally bracketed) to its embedded dotted-quad IPv4,
-   * or `null` if the host isn't IPv4-mapped. `new URL().hostname` normalizes
-   * `[::ffff:169.254.169.254]` to `[::ffff:a9fe:a9fe]`, which the plain
-   * dotted-quad blocklist patterns miss — letting an attacker reach a private /
-   * metadata IPv4 through the v6 mapping. We re-check the decoded v4.
-   */
-  private static mappedIPv4FromIPv6(hostname: string): string | null {
-    let h = hostname;
-    if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
-    const lower = h.toLowerCase();
-    const marker = lower.lastIndexOf('::ffff:');
-    if (marker === -1) return null;
-    const tail = lower.slice(marker + '::ffff:'.length);
-    // Dotted-quad embedded form, e.g. ::ffff:169.254.169.254
-    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(tail)) return tail;
-    // Two-hextet embedded form, e.g. ::ffff:a9fe:a9fe
-    const hex = tail.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-    if (hex) {
-      const hi = parseInt(hex[1], 16);
-      const lo = parseInt(hex[2], 16);
-      if (Number.isNaN(hi) || Number.isNaN(lo)) return null;
-      return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
-    }
-    return null;
-  }
-
-  /**
-   * Check whether a hostname is blocked (internal/private IP or explicit blocklist).
-   */
-  private isBlockedHost(hostname: string, refOpts: Required<RefResolutionOptions>): boolean {
-    if (refOpts.allowInternalIPs) {
-      // Only check user-provided blockedHosts
-      return refOpts.blockedHosts.includes(hostname);
-    }
-
-    // Check user-provided blockedHosts
-    if (refOpts.blockedHosts.includes(hostname)) {
-      return true;
-    }
-
-    // Check built-in block list against the literal hostname AND, if the host is
-    // an IPv4-mapped IPv6 address, against its decoded IPv4 (closes the
-    // ::ffff:169.254.169.254 metadata bypass).
-    const candidates = [hostname];
-    const mapped = OpenAPIToolGenerator.mappedIPv4FromIPv6(hostname);
-    if (mapped) candidates.push(mapped);
-    for (const candidate of candidates) {
-      for (const pattern of OpenAPIToolGenerator.BLOCKED_HOSTNAME_PATTERNS) {
-        if (typeof pattern === 'string') {
-          if (candidate === pattern) return true;
-        } else {
-          if (pattern.test(candidate)) return true;
-        }
-      }
-    }
-
-    return false;
-  }
+  // NOTE: internal/private-address blocking + IPv4-mapped-IPv6 decoding now live
+  // in `ssrf.ts` (`isBlockedHostname` / `isBlockedAddress` / `decodeIpv4MappedIpv6`),
+  // shared by the spec-URL fetch (`fromURL`) and the `$ref` resolver below, and
+  // augmented there with DNS resolution (closing the DNS-name-to-internal bypass)
+  // and per-hop redirect re-validation (`safeFetch`).
 
   /**
    * Build $RefParser options based on refResolution configuration.
@@ -291,13 +215,17 @@ export class OpenAPIToolGenerator {
 
       resolveConfig['http'] = {
         // SECURITY: never auto-follow HTTP redirects when resolving external
-        // `$ref`s. `canRead` (below) validates only the INITIAL URL; the
-        // resolver's default redirect-following (up to 5 hops) re-fetches the
-        // `Location` target WITHOUT re-invoking `canRead`, so an allowlisted host
-        // could 302 → `http://169.254.169.254/...` and smuggle a blocked target
-        // past the allowlist/blocklist. Setting `redirects: 0` refuses the first
-        // redirect; legitimate refs resolve in one hop.
+        // `$ref`s. `canRead` validates only the INITIAL URL; the resolver's
+        // default redirect-following (up to 5 hops) re-fetches the `Location`
+        // target WITHOUT re-invoking `canRead`, so an allowlisted host could
+        // 302 → `http://169.254.169.254/...` and smuggle a blocked target past
+        // the allow/deny lists. `redirects: 0` refuses the first redirect, and
+        // our custom `read` (below) additionally refuses redirects itself.
         redirects: 0,
+        // Synchronous gate: protocol, host allow-list, and literal/known
+        // internal hosts. DNS names that *resolve* to internal addresses pass
+        // here (canRead cannot be async) and are caught in `read` via DNS
+        // resolution — closing the `127.0.0.1.nip.io` bypass for `$ref`s too.
         canRead: (file: { url: string }): boolean => {
           try {
             const parsed = new URL(file.url);
@@ -313,8 +241,8 @@ export class OpenAPIToolGenerator {
               return false;
             }
 
-            // Check blocked hosts (internal IPs, etc.)
-            if (this.isBlockedHost(parsed.hostname, refOpts)) {
+            // Check blocked hosts (internal IPs, known internal names, etc.)
+            if (isBlockedHostname(parsed.hostname, refOpts)) {
               return false;
             }
 
@@ -322,6 +250,24 @@ export class OpenAPIToolGenerator {
           } catch {
             return false;
           }
+        },
+        // SSRF-safe fetch: resolves DNS and rejects names that map to internal
+        // addresses, and refuses redirects. NOTE: deliberately does NOT forward
+        // `this.options.headers` (the spec-load credentials) to third-party
+        // `$ref` hosts — that would leak the spec's auth token cross-origin.
+        read: async (file: { url: string }): Promise<string> => {
+          const response = await safeFetch(file.url, {
+            timeoutMs: this.options.timeout,
+            followRedirects: false,
+            ssrf: refOpts,
+          });
+          if (!response.ok) {
+            throw new LoadError(
+              `Failed to resolve external $ref "${file.url}": ${response.status} ${response.statusText}`,
+              { url: file.url, status: response.status },
+            );
+          }
+          return response.text();
         },
       };
     } else {
