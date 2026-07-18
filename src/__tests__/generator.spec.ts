@@ -563,6 +563,105 @@ paths:
       expect(tools[0].name).toBe('getUser');
     });
 
+    it('should generate a tool from an Xquik OpenAPI 3.1 operation', async () => {
+      const openapi: OpenAPIDocument = {
+        openapi: '3.1.0',
+        info: { title: 'Xquik API', version: '1.0' },
+        servers: [{ url: 'https://xquik.com' }],
+        security: [{ apiKey: [] }],
+        components: {
+          securitySchemes: {
+            apiKey: {
+              type: 'apiKey',
+              name: 'X-API-Key',
+              in: 'header',
+            },
+          },
+        },
+        paths: {
+          '/api/v1/x/tweets/search': {
+            get: {
+              operationId: 'searchTweets',
+              summary: 'Search recent public posts',
+              parameters: [
+                {
+                  name: 'q',
+                  in: 'query',
+                  required: true,
+                  schema: { type: 'string', minLength: 1 },
+                },
+                {
+                  name: 'limit',
+                  in: 'query',
+                  schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+                },
+              ],
+              responses: {
+                '200': {
+                  description: 'Search results',
+                  content: {
+                    'application/json': {
+                      schema: {
+                        type: 'object',
+                        required: ['data'],
+                        properties: {
+                          data: {
+                            type: 'array',
+                            items: {
+                              type: 'object',
+                              required: ['id', 'text'],
+                              properties: {
+                                id: { type: 'string' },
+                                text: { type: 'string' },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      };
+
+      const generator = await OpenAPIToolGenerator.fromJSON(openapi);
+      const tools = await generator.generateTools();
+      const tool = tools[0];
+
+      expect(tools).toHaveLength(1);
+      expect(tool).toMatchObject({
+        name: 'searchTweets',
+        description: 'Search recent public posts',
+        metadata: {
+          path: '/api/v1/x/tweets/search',
+          method: 'get',
+          operationId: 'searchTweets',
+        },
+      });
+      expect(tool.metadata.servers?.[0].url).toBe('https://xquik.com');
+      expect(tool.metadata.security).toHaveLength(1);
+      expect(tool.metadata.security?.[0]).toMatchObject({
+        scheme: 'apiKey',
+        type: 'apiKey',
+        name: 'X-API-Key',
+        in: 'header',
+      });
+      expect(tool.inputSchema.required).toContain('q');
+      expect(tool.inputSchema.properties).toHaveProperty('q');
+      expect(tool.inputSchema.properties).toHaveProperty('limit');
+      expect(tool.mapper).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ inputKey: 'q', key: 'q', type: 'query', required: true }),
+          expect.objectContaining({ inputKey: 'limit', key: 'limit', type: 'query' }),
+        ]),
+      );
+      expect(tool.outputSchema?.type).toBe('object');
+      expect(tool.outputSchema?.properties).toHaveProperty('data');
+    });
+
     it('should filter deprecated operations', async () => {
       const openapi: OpenAPIDocument = {
         ...simpleOpenAPI,
