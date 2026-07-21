@@ -20,17 +20,25 @@
  *     multicast / unspecified / reserved ranges and cloud-metadata endpoints;
  *   - resolves the hostname (Node, via `node:dns`) and rejects if **any**
  *     resolved address is internal — closing the DNS-name-to-internal bypass;
+ *   - **pins the connection to the validated IP**: on Node, {@link safeFetch}
+ *     connects through `node:http`/`node:https` with a custom `lookup` that
+ *     returns the exact address {@link assertUrlSafe} just validated, so the
+ *     guard and the socket share one DNS resolution. This closes the
+ *     DNS-rebinding TOCTOU where the client would otherwise re-resolve the
+ *     hostname at connect time and reach a different (internal) address. The
+ *     original hostname is preserved for the `Host` header and TLS SNI;
  *   - re-validates every redirect hop ({@link safeFetch}) instead of letting the
  *     HTTP client follow 3xx blindly.
  *
- * Node-aware: DNS resolution lazily imports `node:dns` and is a no-op on
- * runtimes without it (Web/edge), where the literal-address checks still apply.
+ * Node-aware: DNS resolution lazily imports `node:dns` and IP pinning lazily
+ * imports `node:http`/`node:https`. On runtimes without them (Web/edge) the
+ * literal-address checks still apply and the fetch falls back to the platform
+ * `fetch` (best-effort, without connection pinning) — combine with an
+ * `allowedHosts` allow-list and network egress controls there.
  *
- * Residual: this does DNS resolve-then-fetch without connection-level IP
- * pinning, so a sub-second DNS-rebinding race (flip the record between the
- * validating resolve and the client's connect-time resolve) is not fully
- * eliminated. For fully-untrusted inputs, combine with an `allowedHosts`
- * allow-list and network egress controls.
+ * Fails closed: a genuine resolver error rejects the URL rather than proceeding
+ * unvalidated; only a runtime that has no resolver at all (edge) skips the DNS
+ * step ({@link SsrfResolverUnavailableError}).
  */
 
 import type { RefResolutionOptions } from './types';
@@ -95,6 +103,7 @@ export function decodeIpv4MappedIpv6(hostname: string): string | null {
   if (hex) {
     const hi = parseInt(hex[1], 16);
     const lo = parseInt(hex[2], 16);
+    /* c8 ignore next -- defensive: the regex above guarantees valid hex, so parseInt never yields NaN */
     if (Number.isNaN(hi) || Number.isNaN(lo)) return null;
     return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
   }
@@ -129,6 +138,7 @@ function isBlockedIpv4(octets: [number, number, number, number]): boolean {
 /** Is this IPv6 host (bracketed or not, possibly zoned) in a blocked range? */
 function isBlockedIpv6(host: string): boolean {
   let h = host;
+  /* c8 ignore next -- defensive: the only caller (isBlockedAddress) already strips brackets */
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
   const zone = h.indexOf('%');
   if (zone !== -1) h = h.slice(0, zone);
@@ -190,9 +200,24 @@ export function isBlockedHostname(hostname: string, ssrf: ResolvedSsrfOptions): 
   return isBlockedAddress(hostname);
 }
 
-/** Default DNS resolver: lazily loads `node:dns`; rejects on non-Node runtimes. */
+/**
+ * Signals that no DNS resolver is available on the current runtime (e.g. a
+ * Web/edge isolate without `node:dns`). {@link assertUrlSafe} treats this as
+ * "cannot resolve, cannot pin" and proceeds on literal-address checks only,
+ * whereas a genuine resolver failure fails closed.
+ */
+export class SsrfResolverUnavailableError extends Error {}
+
+/** Default DNS resolver: lazily loads `node:dns`; signals unavailability off-Node. */
 export const defaultLookup: SsrfHostLookup = async (hostname) => {
-  const dns = await import('node:dns');
+  let dns: typeof import('node:dns');
+  try {
+    dns = await import('node:dns');
+    /* c8 ignore start -- only reached on runtimes without node:dns (Web/edge) */
+  } catch {
+    throw new SsrfResolverUnavailableError('DNS resolution is unavailable on this runtime');
+  }
+  /* c8 ignore stop */
   return dns.promises.lookup(hostname, { all: true });
 };
 
@@ -201,12 +226,22 @@ export const defaultLookup: SsrfHostLookup = async (hostname) => {
  * {@link SsrfError} if not. Enforces http/https, the `allowedHosts` allow-list,
  * the internal-address denylist, and — for DNS names — resolves and rejects if
  * any resolved address is internal.
+ *
+ * Returns the validated resolved addresses so the caller can **pin** the
+ * connection to them ({@link safeFetch}), guaranteeing the socket connects to
+ * the exact IP that was validated rather than re-resolving the hostname. An
+ * empty array means "no pinning needed" (a literal IP, `allowInternalIPs`, or a
+ * runtime without a resolver).
+ *
+ * Fails closed: a genuine resolver error (or a name that resolves to no
+ * address) rejects the URL. Only {@link SsrfResolverUnavailableError} — no
+ * resolver on this runtime — is treated as best-effort and returns `[]`.
  */
 export async function assertUrlSafe(
   url: string,
   ssrf: ResolvedSsrfOptions,
   lookup: SsrfHostLookup = defaultLookup,
-): Promise<void> {
+): Promise<ResolvedAddress[]> {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -228,31 +263,44 @@ export async function assertUrlSafe(
     if (ssrf.blockedHosts.includes(hostname)) {
       throw new SsrfError(`Host "${hostname}" is blocked`, { url });
     }
-    return;
+    return [];
   }
 
   if (isBlockedHostname(hostname, ssrf)) {
     throw new SsrfError(`Host "${hostname}" maps to a blocked internal address`, { url });
   }
 
+  // Literal IPs are already fully decided by isBlockedHostname above, and the
+  // socket connects to them directly (no DNS), so there is nothing to pin.
+  if (isIpLiteral(hostname)) {
+    return [];
+  }
+
   // For DNS names, resolve and reject if any resolved address is internal. This
-  // is what closes the `127.0.0.1.nip.io` class of bypass. (Literal IPs are
-  // already fully decided by isBlockedHostname above.)
-  if (!isIpLiteral(hostname)) {
-    let addresses: ResolvedAddress[];
-    try {
-      addresses = await lookup(hostname);
-    } catch {
-      // Unresolvable (NXDOMAIN/timeout) or no DNS module (edge). It cannot be
-      // fetched either, so there is no SSRF; let the real fetch surface it.
-      return;
+  // is what closes the `127.0.0.1.nip.io` class of bypass. The returned
+  // addresses are pinned by safeFetch so the connection can't be rebound.
+  let addresses: ResolvedAddress[];
+  try {
+    addresses = await lookup(hostname);
+  } catch (error) {
+    if (error instanceof SsrfResolverUnavailableError) {
+      return [];
     }
-    for (const { address } of addresses) {
-      if (isBlockedAddress(address)) {
-        throw new SsrfError(`Host "${hostname}" resolves to blocked address ${address}`, { url });
-      }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new SsrfError(`Host "${hostname}" could not be resolved for SSRF validation: ${message}`, { url });
+  }
+
+  if (addresses.length === 0) {
+    throw new SsrfError(`Host "${hostname}" did not resolve to any address`, { url });
+  }
+
+  for (const { address } of addresses) {
+    if (isBlockedAddress(address)) {
+      throw new SsrfError(`Host "${hostname}" resolves to blocked address ${address}`, { url });
     }
   }
+
+  return addresses;
 }
 
 /** Options for {@link safeFetch}. */
@@ -263,40 +311,179 @@ export interface SafeFetchOptions {
   followRedirects?: boolean;
   /** Max redirect hops before failing. @default 5 */
   maxRedirects?: number;
+  /** Max response body bytes before the request is aborted (Node transport). @default 10 MiB */
+  maxResponseBytes?: number;
   ssrf: ResolvedSsrfOptions;
   /** Injectable DNS resolver (tests). */
   lookup?: SsrfHostLookup;
-  /** Injectable fetch implementation (tests / custom runtimes). */
+  /**
+   * Injectable fetch implementation (tests / custom runtimes). Providing this
+   * bypasses the Node connection-pinning transport, so the implementation is
+   * responsible for connecting to the validated address itself.
+   */
   fetchImpl?: typeof fetch;
+}
+
+/** Lazily-loaded `node:http`/`node:https` modules. */
+export interface NodeHttpModules {
+  http: typeof import('node:http');
+  https: typeof import('node:https');
+}
+
+/** Default cap on response body size for the Node transport (10 MiB). */
+const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+
+/** A transport that issues one GET and returns the raw (unfollowed) response. */
+type SsrfTransport = (
+  url: string,
+  request: { headers?: Record<string, string>; signal: AbortSignal; pinned: ResolvedAddress[]; maxBytes?: number },
+) => Promise<Response>;
+
+/** Load the Node HTTP transport modules, or `null` on runtimes without them. */
+async function loadNodeHttpModules(): Promise<NodeHttpModules | null> {
+  try {
+    const [http, https] = await Promise.all([import('node:http'), import('node:https')]);
+    return { http, https };
+    /* c8 ignore start -- only reached on runtimes without node:http (Web/edge) */
+  } catch {
+    return null;
+  }
+  /* c8 ignore stop */
+}
+
+/** Select the Node transport module for a URL protocol. Exported for tests. */
+export function pickHttpModule(
+  protocol: string,
+  modules: NodeHttpModules,
+): NodeHttpModules['http'] | NodeHttpModules['https'] {
+  return protocol === 'https:' ? modules.https : modules.http;
+}
+
+/**
+ * A `node:net` lookup that always returns the pre-validated addresses, ignoring
+ * the queried hostname — pinning the socket to the exact IP {@link assertUrlSafe}
+ * validated so the connection cannot be re-resolved to a different (internal)
+ * address. Exported for tests.
+ */
+export function makePinnedLookup(pinned: ResolvedAddress[]) {
+  return (_hostname: string, options: unknown, callback?: unknown): void => {
+    const done = (typeof options === 'function' ? options : callback) as (
+      err: Error | null,
+      address: string | ResolvedAddress[],
+      family?: number,
+    ) => void;
+    const wantsAll = typeof options === 'object' && options !== null && (options as { all?: boolean }).all === true;
+    if (wantsAll) {
+      done(
+        null,
+        pinned.map(({ address, family }) => ({ address, family })),
+      );
+    } else {
+      done(null, pinned[0].address, pinned[0].family);
+    }
+  };
+}
+
+/** HTTP statuses that must not carry a response body (Fetch spec). */
+const NULL_BODY_STATUS: ReadonlySet<number> = new Set([101, 103, 204, 205, 304]);
+
+/**
+ * Node transport that pins the connection to the validated address(es) via a
+ * custom `lookup`, preserving the original hostname for the `Host` header and
+ * TLS SNI. Manual redirects only (no `lookup` re-resolution between hops).
+ * Exported for tests.
+ */
+export function nodePinnedTransport(modules: NodeHttpModules): SsrfTransport {
+  return (url, { headers, signal, pinned, maxBytes }) =>
+    new Promise<Response>((resolve, reject) => {
+      const limit = maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+      const lib = pickHttpModule(new URL(url).protocol, modules);
+      const requestOptions: Record<string, unknown> = {
+        method: 'GET',
+        signal,
+        headers: { ...headers, 'accept-encoding': 'identity' },
+      };
+      if (pinned.length > 0) {
+        requestOptions['lookup'] = makePinnedLookup(pinned);
+      }
+      const request = lib.request(url, requestOptions as import('node:http').RequestOptions, (response) => {
+        const chunks: Buffer[] = [];
+        let received = 0;
+        response.on('data', (chunk: Buffer) => {
+          received += chunk.length;
+          if (received > limit) {
+            request.destroy();
+            reject(new SsrfError(`Response body exceeds ${limit} bytes`, { url }));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on('end', () => {
+          const status = response.statusCode as number;
+          const responseHeaders = new Headers();
+          const entries = Object.entries(response.headers) as [string, string | string[]][];
+          for (const [key, value] of entries) {
+            if (Array.isArray(value)) {
+              for (const item of value) responseHeaders.append(key, item);
+            } else {
+              responseHeaders.append(key, value);
+            }
+          }
+          const body = NULL_BODY_STATUS.has(status) ? null : Buffer.concat(chunks);
+          resolve(new Response(body, { status, statusText: response.statusMessage, headers: responseHeaders }));
+        });
+        /* c8 ignore next -- defensive: a mid-stream socket error surfaces as a rejection */
+        response.on('error', reject);
+      });
+      request.on('error', reject);
+      request.end();
+    });
+}
+
+/** Fetch-based transport (injected impl or platform fetch). Cannot pin. */
+function fetchTransport(fetchImpl: typeof fetch): SsrfTransport {
+  return (url, { headers, signal }) => fetchImpl(url, { headers, signal, redirect: 'manual' });
+}
+
+/** Choose the transport: injected fetch, else Node pinned, else platform fetch. */
+async function selectTransport(opts: SafeFetchOptions, url: string): Promise<SsrfTransport> {
+  if (opts.fetchImpl) {
+    return fetchTransport(opts.fetchImpl);
+  }
+  const modules = await loadNodeHttpModules();
+  /* c8 ignore start -- non-Node fallback: unreachable in the Node test runtime */
+  if (!modules) {
+    const platformFetch = globalThis.fetch as typeof fetch | undefined;
+    if (typeof platformFetch === 'function') {
+      return fetchTransport(platformFetch);
+    }
+    throw new SsrfError('No fetch implementation available to load OpenAPI spec from URL', { url });
+  }
+  /* c8 ignore stop */
+  return nodePinnedTransport(modules);
 }
 
 /**
  * SSRF-safe `fetch`: validates the initial URL and **every redirect hop** with
- * {@link assertUrlSafe} before issuing the request, using manual redirect
- * handling so a 3xx to an internal target can't be followed without
- * re-validation. Returns the final {@link Response} (the caller checks
- * `response.ok` / reads the body).
+ * {@link assertUrlSafe} before issuing the request, then **pins** the connection
+ * to the validated IP (on Node) so the socket can't be rebound to an internal
+ * address. Uses manual redirect handling so a 3xx to an internal target can't be
+ * followed without re-validation. Returns the final {@link Response} (the caller
+ * checks `response.ok` / reads the body).
  */
 export async function safeFetch(url: string, opts: SafeFetchOptions): Promise<Response> {
   const { headers, timeoutMs = 30000, followRedirects = true, maxRedirects = 5, ssrf, lookup } = opts;
-  const fetchImpl = opts.fetchImpl ?? (globalThis.fetch as typeof fetch | undefined);
-  if (typeof fetchImpl !== 'function') {
-    throw new SsrfError('No fetch implementation available to load OpenAPI spec from URL', { url });
-  }
+  const transport = await selectTransport(opts, url);
 
   let current = url;
   for (let hop = 0; hop <= maxRedirects; hop++) {
-    await assertUrlSafe(current, ssrf, lookup);
+    const pinned = await assertUrlSafe(current, ssrf, lookup);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response: Response;
     try {
-      response = await fetchImpl(current, {
-        headers,
-        signal: controller.signal,
-        redirect: 'manual',
-      });
+      response = await transport(current, { headers, signal: controller.signal, pinned, maxBytes: opts.maxResponseBytes });
     } finally {
       clearTimeout(timer);
     }
@@ -312,7 +499,7 @@ export async function safeFetch(url: string, opts: SafeFetchOptions): Promise<Re
       return response; // malformed redirect — let the caller treat it as non-ok
     }
     current = new URL(location, current).toString();
-    // Loop re-validates `current` via assertUrlSafe before the next fetch.
+    // Loop re-validates + re-pins `current` via assertUrlSafe before the next fetch.
   }
 
   throw new SsrfError(`Too many redirects while loading OpenAPI spec (max ${maxRedirects})`, { url });
