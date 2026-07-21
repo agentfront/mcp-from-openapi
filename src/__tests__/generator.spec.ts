@@ -4,6 +4,27 @@ import { ResponseBuilder } from '../response-builder';
 import { ParseError, LoadError } from '../errors';
 import type { OpenAPIDocument } from '../types';
 
+type LoopbackHandler = (req: import('http').IncomingMessage, res: import('http').ServerResponse) => void;
+
+/**
+ * Shared loopback HTTP server for URL-loading / pinned-transport tests. A real 127.0.0.1 server
+ * (paired with `allowInternalIPs`) replaces `global.fetch` / `$RefParser.dereference` mocks so the
+ * tests exercise the actual SSRF guard and Node connection pinning. See CLAUDE.md "Testing Patterns".
+ */
+function createLoopbackServer(getHandler: () => LoopbackHandler): { listen: () => Promise<string>; close: () => Promise<void> } {
+  const http = require('http') as typeof import('http');
+  const server = http.createServer((req, res) => getHandler()(req, res));
+  return {
+    listen: () =>
+      new Promise<string>((resolve) =>
+        server.listen(0, '127.0.0.1', () =>
+          resolve(`http://127.0.0.1:${(server.address() as import('net').AddressInfo).port}`),
+        ),
+      ),
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
 describe('OpenAPIToolGenerator', () => {
   const simpleOpenAPI: OpenAPIDocument = {
     openapi: '3.0.0',
@@ -87,14 +108,12 @@ paths:
   });
 
   describe('URL Loading', () => {
-    // The SSRF guard pins the connection to the validated IP via node:http, so
-    // these tests drive a REAL loopback server (allowInternalIPs lets the guard
-    // accept 127.0.0.1) rather than mocking global.fetch, which the pinned
-    // transport bypasses.
-    const http = require('http') as typeof import('http');
-    let server: import('http').Server;
+    // The SSRF guard pins the connection to the validated IP via node:http, so these tests drive a
+    // REAL loopback server (allowInternalIPs lets the guard accept 127.0.0.1) rather than mocking
+    // global.fetch, which the pinned transport bypasses. See createLoopbackServer / CLAUDE.md.
+    let handler: LoopbackHandler;
+    const loopback = createLoopbackServer(() => handler);
     let baseUrl: string;
-    let handler: (req: import('http').IncomingMessage, res: import('http').ServerResponse) => void;
 
     const specJson = (title: string) =>
       JSON.stringify({
@@ -105,13 +124,11 @@ paths:
     const internal = (extra: Record<string, unknown> = {}) => ({ refResolution: { allowInternalIPs: true }, ...extra });
 
     beforeAll(async () => {
-      server = http.createServer((req, res) => handler(req, res));
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-      baseUrl = `http://127.0.0.1:${(server.address() as import('net').AddressInfo).port}`;
+      baseUrl = await loopback.listen();
     });
 
     afterAll(async () => {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await loopback.close();
     });
 
     afterEach(() => {
@@ -2374,19 +2391,16 @@ describe('Worker-safe dereference (internal $refs without $RefParser)', () => {
 });
 
 describe('External $ref resolution over the SSRF-safe pinned transport', () => {
-  const http = require('http') as typeof import('http');
-  let server: import('http').Server;
+  let handler: LoopbackHandler;
+  const loopback = createLoopbackServer(() => handler);
   let baseUrl: string;
-  let handler: (req: import('http').IncomingMessage, res: import('http').ServerResponse) => void;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => handler(req, res));
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-    baseUrl = `http://127.0.0.1:${(server.address() as import('net').AddressInfo).port}`;
+    baseUrl = await loopback.listen();
   });
 
   afterAll(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await loopback.close();
   });
 
   const specWithRef = (refUrl: string) => ({

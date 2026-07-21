@@ -311,6 +311,8 @@ export interface SafeFetchOptions {
   followRedirects?: boolean;
   /** Max redirect hops before failing. @default 5 */
   maxRedirects?: number;
+  /** Max response body bytes before the request is aborted (Node transport). @default 10 MiB */
+  maxResponseBytes?: number;
   ssrf: ResolvedSsrfOptions;
   /** Injectable DNS resolver (tests). */
   lookup?: SsrfHostLookup;
@@ -328,10 +330,13 @@ export interface NodeHttpModules {
   https: typeof import('node:https');
 }
 
+/** Default cap on response body size for the Node transport (10 MiB). */
+const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+
 /** A transport that issues one GET and returns the raw (unfollowed) response. */
 type SsrfTransport = (
   url: string,
-  request: { headers?: Record<string, string>; signal: AbortSignal; pinned: ResolvedAddress[] },
+  request: { headers?: Record<string, string>; signal: AbortSignal; pinned: ResolvedAddress[]; maxBytes?: number },
 ) => Promise<Response>;
 
 /** Load the Node HTTP transport modules, or `null` on runtimes without them. */
@@ -389,8 +394,9 @@ const NULL_BODY_STATUS: ReadonlySet<number> = new Set([101, 103, 204, 205, 304])
  * Exported for tests.
  */
 export function nodePinnedTransport(modules: NodeHttpModules): SsrfTransport {
-  return (url, { headers, signal, pinned }) =>
+  return (url, { headers, signal, pinned, maxBytes }) =>
     new Promise<Response>((resolve, reject) => {
+      const limit = maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
       const lib = pickHttpModule(new URL(url).protocol, modules);
       const requestOptions: Record<string, unknown> = {
         method: 'GET',
@@ -402,7 +408,16 @@ export function nodePinnedTransport(modules: NodeHttpModules): SsrfTransport {
       }
       const request = lib.request(url, requestOptions as import('node:http').RequestOptions, (response) => {
         const chunks: Buffer[] = [];
-        response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        let received = 0;
+        response.on('data', (chunk: Buffer) => {
+          received += chunk.length;
+          if (received > limit) {
+            request.destroy();
+            reject(new SsrfError(`Response body exceeds ${limit} bytes`, { url }));
+            return;
+          }
+          chunks.push(chunk);
+        });
         response.on('end', () => {
           const status = response.statusCode as number;
           const responseHeaders = new Headers();
@@ -468,7 +483,7 @@ export async function safeFetch(url: string, opts: SafeFetchOptions): Promise<Re
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response: Response;
     try {
-      response = await transport(current, { headers, signal: controller.signal, pinned });
+      response = await transport(current, { headers, signal: controller.signal, pinned, maxBytes: opts.maxResponseBytes });
     } finally {
       clearTimeout(timer);
     }

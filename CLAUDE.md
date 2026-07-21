@@ -78,9 +78,17 @@ yarn clean             # Remove dist/ and coverage/
 ### Testing Patterns
 
 - **Inline specs**: Tests create OpenAPI spec objects directly (no fixture files)
-- **Mock fetch**: URL loading tests mock `global.fetch` with `jest.fn()`
+- **Real loopback servers**: URL-loading and SSRF/connection-pinning tests drive a real
+  `127.0.0.1` HTTP server (via the shared `createLoopbackServer` helper) with
+  `refResolution.allowInternalIPs`, exercising the actual Node pinned transport + SSRF guard.
+  This replaces `global.fetch` mocks and `$RefParser.dereference` spies for those paths, because
+  the pinned transport bypasses `global.fetch`. Use `jest.spyOn(Response.prototype, …)` for
+  transport-error injection (SWC compiles named exports as non-configurable getters, so the
+  module's own exports can't be `jest.spyOn`-ed).
 - **Temp files**: File loading tests create temp files in `os.tmpdir()`, clean up in `finally`
-- **Spy on dereference**: SSRF tests spy on `$RefParser.dereference` to inspect options without making network calls
+- **Spy on dereference**: tests still spy on `$RefParser.dereference` to inspect the resolver
+  *config* (canRead/read/redirects) without network; the `read` path's actual fetch is validated
+  against a real loopback server instead.
 - **`c8 ignore next`**: Used for defensive branches unreachable through normal code paths (V8 coverage ignores)
 - **`transformIgnorePatterns`**: `@apidevtools/json-schema-ref-parser` is ESM-only and must be transformed by SWC
 

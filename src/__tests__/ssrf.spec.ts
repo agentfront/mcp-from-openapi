@@ -464,6 +464,16 @@ describe('ssrf: nodePinnedTransport (real server, connection pinning)', () => {
   it('rejects on a connection error', async () => {
     await expect(transport('http://127.0.0.1:1/x', { signal: freshSignal(), pinned: [] })).rejects.toBeDefined();
   });
+
+  it('aborts and rejects when the response body exceeds maxBytes', async () => {
+    serverHandler = (_req, res) => {
+      res.writeHead(200);
+      res.end('x'.repeat(1000));
+    };
+    await expect(
+      transport(`http://127.0.0.1:${serverPort}/big`, { signal: freshSignal(), pinned: [], maxBytes: 100 }),
+    ).rejects.toThrow(SsrfError);
+  });
 });
 
 describe('ssrf: safeFetch over the Node transport (real server)', () => {
