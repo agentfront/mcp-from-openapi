@@ -4,6 +4,27 @@ import { ResponseBuilder } from '../response-builder';
 import { ParseError, LoadError } from '../errors';
 import type { OpenAPIDocument } from '../types';
 
+type LoopbackHandler = (req: import('http').IncomingMessage, res: import('http').ServerResponse) => void;
+
+/**
+ * Shared loopback HTTP server for URL-loading / pinned-transport tests. A real 127.0.0.1 server
+ * (paired with `allowInternalIPs`) replaces `global.fetch` / `$RefParser.dereference` mocks so the
+ * tests exercise the actual SSRF guard and Node connection pinning. See CLAUDE.md "Testing Patterns".
+ */
+function createLoopbackServer(getHandler: () => LoopbackHandler): { listen: () => Promise<string>; close: () => Promise<void> } {
+  const http = require('http') as typeof import('http');
+  const server = http.createServer((req, res) => getHandler()(req, res));
+  return {
+    listen: () =>
+      new Promise<string>((resolve) =>
+        server.listen(0, '127.0.0.1', () =>
+          resolve(`http://127.0.0.1:${(server.address() as import('net').AddressInfo).port}`),
+        ),
+      ),
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
 describe('OpenAPIToolGenerator', () => {
   const simpleOpenAPI: OpenAPIDocument = {
     openapi: '3.0.0',
@@ -87,41 +108,39 @@ paths:
   });
 
   describe('URL Loading', () => {
-    const mockFetch = jest.fn();
-    const originalFetch = global.fetch;
+    // The SSRF guard pins the connection to the validated IP via node:http, so these tests drive a
+    // REAL loopback server (allowInternalIPs lets the guard accept 127.0.0.1) rather than mocking
+    // global.fetch, which the pinned transport bypasses. See createLoopbackServer / CLAUDE.md.
+    let handler: LoopbackHandler;
+    const loopback = createLoopbackServer(() => handler);
+    let baseUrl: string;
 
-    beforeEach(() => {
-      jest.useFakeTimers();
-      global.fetch = mockFetch;
-      mockFetch.mockReset();
+    const specJson = (title: string) =>
+      JSON.stringify({
+        openapi: '3.0.0',
+        info: { title, version: '1.0.0' },
+        paths: { '/test': { get: { operationId: 'test', responses: { '200': { description: 'OK' } } } } },
+      });
+    const internal = (extra: Record<string, unknown> = {}) => ({ refResolution: { allowInternalIPs: true }, ...extra });
+
+    beforeAll(async () => {
+      baseUrl = await loopback.listen();
+    });
+
+    afterAll(async () => {
+      await loopback.close();
     });
 
     afterEach(() => {
-      jest.useRealTimers();
-      global.fetch = originalFetch;
+      jest.restoreAllMocks();
     });
 
     it('should load from URL with JSON content', async () => {
-      const jsonSpec = JSON.stringify({
-        openapi: '3.0.0',
-        info: { title: 'URL API', version: '1.0.0' },
-        paths: {
-          '/test': {
-            get: {
-              operationId: 'test',
-              responses: { '200': { description: 'OK' } },
-            },
-          },
-        },
-      });
-
-      mockFetch.mockResolvedValue({
-        ok: true,
-        text: () => Promise.resolve(jsonSpec),
-        headers: new Map([['content-type', 'application/json']]),
-      });
-
-      const generator = await OpenAPIToolGenerator.fromURL('https://example.com/api.json');
+      handler = (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(specJson('URL API'));
+      };
+      const generator = await OpenAPIToolGenerator.fromURL(`${baseUrl}/api.json`, internal());
       expect(generator.getDocument().info.title).toBe('URL API');
     });
 
@@ -139,14 +158,11 @@ paths:
         '200':
           description: OK
 `;
-
-      mockFetch.mockResolvedValue({
-        ok: true,
-        text: () => Promise.resolve(yamlSpec),
-        headers: new Map([['content-type', 'application/yaml']]),
-      });
-
-      const generator = await OpenAPIToolGenerator.fromURL('https://example.com/api', { validate: false });
+      handler = (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/yaml' });
+        res.end(yamlSpec);
+      };
+      const generator = await OpenAPIToolGenerator.fromURL(`${baseUrl}/api`, internal({ validate: false }));
       expect(generator.getDocument().info.title).toBe('YAML API');
     });
 
@@ -164,92 +180,74 @@ paths:
         '200':
           description: OK
 `;
-
-      mockFetch.mockResolvedValue({
-        ok: true,
-        text: () => Promise.resolve(yamlSpec),
-        headers: new Map([['content-type', 'text/plain']]),
-      });
-
-      const generator = await OpenAPIToolGenerator.fromURL('https://example.com/api.yaml', { validate: false });
+      handler = (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end(yamlSpec);
+      };
+      const generator = await OpenAPIToolGenerator.fromURL(`${baseUrl}/api.yaml`, internal({ validate: false }));
       expect(generator.getDocument().info.title).toBe('YAML Ext API');
     });
 
     it('should throw LoadError on HTTP error', async () => {
-      mockFetch.mockResolvedValue({
-        ok: false,
-        status: 404,
-        statusText: 'Not Found',
-      });
-
-      await expect(OpenAPIToolGenerator.fromURL('https://example.com/api.json')).rejects.toThrow(LoadError);
-
-      // Verify error message contains status information
-      mockFetch.mockResolvedValue({
-        ok: false,
-        status: 404,
-        statusText: 'Not Found',
-      });
-      await expect(OpenAPIToolGenerator.fromURL('https://example.com/api.json')).rejects.toMatchObject({
+      handler = (_req, res) => {
+        res.writeHead(404, 'Not Found');
+        res.end();
+      };
+      await expect(OpenAPIToolGenerator.fromURL(`${baseUrl}/api.json`, internal())).rejects.toThrow(LoadError);
+      await expect(OpenAPIToolGenerator.fromURL(`${baseUrl}/api.json`, internal())).rejects.toMatchObject({
         message: expect.stringContaining('404'),
       });
     });
 
     it('should throw LoadError on network error', async () => {
-      mockFetch.mockRejectedValue(new Error('Network error'));
-
-      await expect(OpenAPIToolGenerator.fromURL('https://example.com/api.json')).rejects.toThrow(LoadError);
+      // Nothing listening on port 1 -> connection refused -> wrapped as LoadError.
+      await expect(OpenAPIToolGenerator.fromURL('http://127.0.0.1:1/api.json', internal())).rejects.toThrow(LoadError);
     });
 
     it('should refuse a spec URL pointing at a literal internal IP (SSRF guard)', async () => {
-      // Literal internal IPs are rejected synchronously, before any fetch.
+      // Literal internal IPs are rejected synchronously, before any connection.
       await expect(OpenAPIToolGenerator.fromURL('http://127.0.0.1:8080/openapi.json')).rejects.toThrow(/blocked/i);
       await expect(OpenAPIToolGenerator.fromURL('http://169.254.169.254/openapi.json')).rejects.toThrow(LoadError);
       await expect(OpenAPIToolGenerator.fromURL('http://[::1]/openapi.json')).rejects.toThrow(LoadError);
-      expect(mockFetch).not.toHaveBeenCalled();
     });
 
     it('should refuse non-http(s) spec URLs', async () => {
       await expect(OpenAPIToolGenerator.fromURL('file:///etc/passwd')).rejects.toThrow(LoadError);
-      expect(mockFetch).not.toHaveBeenCalled();
     });
 
     it('should allow internal spec URLs when allowInternalIPs is set', async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        text: () => Promise.resolve(JSON.stringify({ openapi: '3.0.0', info: { title: 'Local', version: '1.0.0' }, paths: {} })),
-        headers: new Map([['content-type', 'application/json']]),
-      });
-      const generator = await OpenAPIToolGenerator.fromURL('http://127.0.0.1:8080/openapi.json', {
-        refResolution: { allowInternalIPs: true },
-      });
+      handler = (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ openapi: '3.0.0', info: { title: 'Local', version: '1.0.0' }, paths: {} }));
+      };
+      const generator = await OpenAPIToolGenerator.fromURL(`${baseUrl}/openapi.json`, internal());
       expect(generator.getDocument().info.title).toBe('Local');
     });
 
     it('should throw LoadError when YAML parse fails from URL', async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        text: () => Promise.resolve('{ invalid yaml: [[['),
-        headers: new Map([['content-type', 'application/yaml']]),
-      });
-
-      await expect(OpenAPIToolGenerator.fromURL('https://example.com/api.yaml')).rejects.toThrow(LoadError);
+      handler = (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/yaml' });
+        res.end('{ invalid yaml: [[[');
+      };
+      await expect(OpenAPIToolGenerator.fromURL(`${baseUrl}/api.yaml`, internal())).rejects.toThrow(LoadError);
     });
 
     it('should throw LoadError when JSON parse fails from URL', async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        text: () => Promise.resolve('not valid json at all'),
-        headers: new Map([['content-type', 'application/json']]),
-      });
-
-      await expect(OpenAPIToolGenerator.fromURL('https://example.com/api.json')).rejects.toThrow(LoadError);
+      handler = (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('not valid json at all');
+      };
+      await expect(OpenAPIToolGenerator.fromURL(`${baseUrl}/api.json`, internal())).rejects.toThrow(LoadError);
     });
 
     it('should wrap non-Error thrown values as LoadError', async () => {
-      mockFetch.mockRejectedValue('string error');
-
-      const promise = OpenAPIToolGenerator.fromURL('https://example.com/api.json');
+      // A non-Error thrown while reading the body must still be wrapped.
+      handler = (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(specJson('X'));
+      };
+      jest.spyOn(Response.prototype, 'text').mockRejectedValueOnce('string error');
+      const promise = OpenAPIToolGenerator.fromURL(`${baseUrl}/api.json`, internal());
       await expect(promise).rejects.toThrow(LoadError);
       await expect(promise).rejects.toMatchObject({
         message: expect.stringContaining('string error'),
@@ -257,116 +255,43 @@ paths:
     });
 
     it('should handle timeout option', async () => {
-      const jsonSpec = JSON.stringify({
-        openapi: '3.0.0',
-        info: { title: 'Test', version: '1.0.0' },
-        paths: {
-          '/test': {
-            get: {
-              operationId: 'test',
-              responses: { '200': { description: 'OK' } },
-            },
-          },
-        },
-      });
-
-      mockFetch.mockResolvedValue({
-        ok: true,
-        text: () => Promise.resolve(jsonSpec),
-        headers: new Map([['content-type', 'application/json']]),
-      });
-
-      const generator = await OpenAPIToolGenerator.fromURL('https://example.com/api.json', {
-        timeout: 5000,
-      });
+      handler = (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(specJson('Test'));
+      };
+      const generator = await OpenAPIToolGenerator.fromURL(`${baseUrl}/api.json`, internal({ timeout: 5000 }));
       expect(generator).toBeInstanceOf(OpenAPIToolGenerator);
     });
 
-    it('should pass custom headers to fetch', async () => {
-      const jsonSpec = JSON.stringify({
-        openapi: '3.0.0',
-        info: { title: 'Test', version: '1.0.0' },
-        paths: {
-          '/test': {
-            get: {
-              operationId: 'test',
-              responses: { '200': { description: 'OK' } },
-            },
-          },
-        },
-      });
-
-      mockFetch.mockResolvedValue({
-        ok: true,
-        text: () => Promise.resolve(jsonSpec),
-        headers: new Map([['content-type', 'application/json']]),
-      });
-
-      await OpenAPIToolGenerator.fromURL('https://example.com/api.json', {
-        headers: { 'X-Custom': 'value' },
-      });
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'https://example.com/api.json',
-        expect.objectContaining({
-          headers: { 'X-Custom': 'value' },
-        }),
-      );
+    it('should pass custom headers through to the request', async () => {
+      let receivedAuth: string | undefined;
+      handler = (req, res) => {
+        receivedAuth = req.headers['x-custom'] as string | undefined;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(specJson('Test'));
+      };
+      await OpenAPIToolGenerator.fromURL(`${baseUrl}/api.json`, internal({ headers: { 'X-Custom': 'value' } }));
+      expect(receivedAuth).toBe('value');
     });
 
-    it('should handle followRedirects option', async () => {
-      const jsonSpec = JSON.stringify({
-        openapi: '3.0.0',
-        info: { title: 'Test', version: '1.0.0' },
-        paths: {
-          '/test': {
-            get: {
-              operationId: 'test',
-              responses: { '200': { description: 'OK' } },
-            },
-          },
-        },
-      });
-
-      mockFetch.mockResolvedValue({
-        ok: true,
-        text: () => Promise.resolve(jsonSpec),
-        headers: new Map([['content-type', 'application/json']]),
-      });
-
-      await OpenAPIToolGenerator.fromURL('https://example.com/api.json', {
-        followRedirects: false,
-      });
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'https://example.com/api.json',
-        expect.objectContaining({
-          redirect: 'manual',
-        }),
-      );
+    it('should not follow redirects when followRedirects is false', async () => {
+      handler = (_req, res) => {
+        res.writeHead(302, { location: `${baseUrl}/elsewhere` });
+        res.end();
+      };
+      // With following disabled the 3xx surfaces (non-ok) as a LoadError instead
+      // of being chased to another host.
+      await expect(
+        OpenAPIToolGenerator.fromURL(`${baseUrl}/api.json`, internal({ followRedirects: false })),
+      ).rejects.toThrow(LoadError);
     });
 
     it('should handle missing content-type header', async () => {
-      const jsonSpec = JSON.stringify({
-        openapi: '3.0.0',
-        info: { title: 'Test', version: '1.0.0' },
-        paths: {
-          '/test': {
-            get: {
-              operationId: 'test',
-              responses: { '200': { description: 'OK' } },
-            },
-          },
-        },
-      });
-
-      mockFetch.mockResolvedValue({
-        ok: true,
-        text: () => Promise.resolve(jsonSpec),
-        headers: new Map(), // No content-type
-      });
-
-      const generator = await OpenAPIToolGenerator.fromURL('https://example.com/api.json');
+      handler = (_req, res) => {
+        res.writeHead(200);
+        res.end(specJson('Test'));
+      };
+      const generator = await OpenAPIToolGenerator.fromURL(`${baseUrl}/api.json`, internal());
       expect(generator).toBeInstanceOf(OpenAPIToolGenerator);
     });
   });
@@ -2462,5 +2387,59 @@ describe('Worker-safe dereference (internal $refs without $RefParser)', () => {
     // so generation COMPLETES (returns an array) rather than hanging or throwing.
     const tools = await generator.generateTools();
     expect(Array.isArray(tools)).toBe(true);
+  });
+});
+
+describe('External $ref resolution over the SSRF-safe pinned transport', () => {
+  let handler: LoopbackHandler;
+  const loopback = createLoopbackServer(() => handler);
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    baseUrl = await loopback.listen();
+  });
+
+  afterAll(async () => {
+    await loopback.close();
+  });
+
+  const specWithRef = (refUrl: string) => ({
+    openapi: '3.0.0',
+    info: { title: 'Ref API', version: '1.0.0' },
+    paths: {
+      '/thing': {
+        get: {
+          operationId: 'getThing',
+          parameters: [{ name: 'q', in: 'query', schema: { $ref: refUrl } }],
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+    },
+  });
+
+  it('fetches an external $ref through safeFetch and inlines the resolved schema', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ type: 'string', maxLength: 42 }));
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithRef(`${baseUrl}/schema.json`), {
+      refResolution: { allowInternalIPs: true },
+      validate: false,
+    });
+    const tools = await generator.generateTools();
+    expect(tools).toHaveLength(1);
+    expect(JSON.stringify(tools[0].inputSchema)).toContain('42'); // the resolved maxLength
+  });
+
+  it('throws when the external $ref responds non-OK', async () => {
+    handler = (_req, res) => {
+      res.writeHead(404, 'Not Found');
+      res.end();
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithRef(`${baseUrl}/missing.json`), {
+      refResolution: { allowInternalIPs: true },
+      validate: false,
+    });
+    await expect(generator.generateTools()).rejects.toThrow(/dereference/i);
   });
 });
