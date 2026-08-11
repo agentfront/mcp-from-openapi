@@ -10,6 +10,7 @@ import {
   collapseNestedUnions,
   demoteFormats,
   enforceClosedObjects,
+  requireAllProperties,
 } from '../client-targets';
 import { OpenAPIToolGenerator } from '../generator';
 
@@ -361,10 +362,13 @@ describe('target option in the generator', () => {
     expect(when.description).toContain('May be null.');
     expect(when.format).toBeUndefined();
 
-    // output root oneOf (two status codes) collapsed with variants preserved
+    // output root oneOf (two status codes) collapsed to the first variant —
+    // Gemini never receives x-variants metadata
     const output = tool.outputSchema as any;
     expect(output.oneOf).toBeUndefined();
-    expect(output['x-variants']).toHaveLength(2);
+    expect(output['x-variants']).toBeUndefined();
+    expect(output.type).toBe('array');
+    expect(output.description).toContain('alternative schema variant');
   });
 
   it('leaves schemas untouched without a target', async () => {
@@ -372,7 +376,12 @@ describe('target option in the generator', () => {
     const tool = await generator.generateTool('/items', 'get');
     const when = (tool.inputSchema as any).properties.when;
 
-    expect(when.anyOf ?? when.type).toBeDefined();
+    // exact untransformed shape: nullable type union with format intact
+    expect(when).toEqual({
+      type: ['string', 'null'],
+      format: 'date',
+      'x-parameter-location': 'query',
+    });
     expect((tool.outputSchema as any).oneOf).toHaveLength(2);
   });
 });
@@ -447,10 +456,74 @@ describe('edge coverage', () => {
   });
 });
 
-describe('review fixes', () => {
+describe('external refs, enum nullability, gemini metadata, numeric formats', () => {
+  it('removes non-local $refs with a note, keeping siblings', () => {
+    const result = inlineLocalRefs({
+      properties: {
+        remote: { $ref: 'https://example.com/schemas/User.json', description: 'site doc' },
+        relative: { $ref: './common.yaml#/User' },
+      },
+    } as any) as any;
+
+    expect(result.properties.remote.$ref).toBeUndefined();
+    expect(result.properties.remote.description).toBe('site doc');
+    expect(result.properties.relative.$ref).toBeUndefined();
+    expect(result.properties.relative.description).toContain('External $ref');
+  });
+
+  it('extends enums with null in the openai nullable rewrite and skips const', () => {
+    const result = requireAllProperties({
+      type: 'object',
+      properties: {
+        pick: { type: 'string', enum: ['a', 'b'] },
+        pinned: { type: 'string', const: 'fixed' },
+        bare: { enum: [1, 2] },
+      },
+      required: [],
+    } as any) as any;
+
+    expect(result.properties.pick.type).toEqual(['string', 'null']);
+    expect(result.properties.pick.enum).toEqual(['a', 'b', null]);
+    expect(result.properties.pinned).toEqual({ type: 'string', const: 'fixed' }); // untouched
+    expect(result.properties.bare.enum).toEqual([1, 2, null]);
+    expect(result.required.sort()).toEqual(['bare', 'pick', 'pinned']);
+  });
+
+  it('gemini collapses root unions without emitting x-variants', () => {
+    const result = applyClientTarget(
+      { oneOf: [{ type: 'string', title: 'S' }, { type: 'integer', title: 'I' }] } as any,
+      'gemini',
+    ) as any;
+
+    expect(result['x-variants']).toBeUndefined();
+    expect(result.oneOf).toBeUndefined();
+    expect(result.type).toBe('string');
+    expect(result.description).toContain('I');
+  });
+
+  it('keeps numeric formats on numeric nodes and demotes them elsewhere', () => {
+    const result = demoteFormats({
+      type: 'object',
+      properties: {
+        count: { type: 'integer', format: 'int32' },
+        big: { type: ['integer', 'null'], format: 'int64' },
+        ratio: { type: 'number', format: 'double' },
+        maybeRatio: { type: ['number', 'null'], format: 'float' },
+        odd: { type: 'string', format: 'int64' },
+      },
+    } as any) as any;
+
+    expect(result.properties.count.format).toBe('int32');
+    expect(result.properties.big.format).toBe('int64');
+    expect(result.properties.ratio.format).toBe('double');
+    expect(result.properties.maybeRatio.format).toBe('float');
+    expect(result.properties.odd.format).toBeUndefined();
+    expect(result.properties.odd.description).toContain('format: int64');
+  });
+});
+
+describe('nested compositions and strict-mode rewrites', () => {
   it('mergeAllOf recursively merges nested allOf members without leaking composition keys', () => {
-    const { requireAllProperties } = require('../client-targets');
-    void requireAllProperties;
     const result = collapseRootCompositions({
       allOf: [
         { allOf: [{ type: 'object', properties: { a: { type: 'string' } } }] },
@@ -508,7 +581,6 @@ describe('review fixes', () => {
   });
 
   it('requireAllProperties makes optionals required-but-nullable (openai strict)', () => {
-    const { requireAllProperties } = require('../client-targets');
     const result = requireAllProperties({
       type: 'object',
       properties: {

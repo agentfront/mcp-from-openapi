@@ -147,7 +147,9 @@ Shape a tool for the official MCP SDK's `registerTool(name, config, handler)` â€
 
 ```typescript
 toSdkTool(tool: McpOpenAPITool): [string, SdkToolConfig]
-toSdkTool(tool: McpOpenAPITool, wrapper: { fromJsonSchema }): [string, SdkToolConfig]
+toSdkTool<TSchema>(tool: McpOpenAPITool, wrapper?: SdkSchemaWrapper<TSchema>): [string, SdkToolConfig<TSchema>]
+
+// SdkSchemaWrapper<TSchema> = { fromJsonSchema: (schema: JsonSchema) => TSchema }
 ```
 
 ### inferAnnotationsFromMethod / extractExtensionOverrides / resolveExtensionEnabled
@@ -198,7 +200,7 @@ const jsonSchema = toJsonSchema(openApiSchema);
 The main output type -- a generated MCP tool definition.
 
 ```typescript
-interface McpOpenAPITool {
+interface McpOpenAPITool<TMeta extends ToolMetadata = ToolMetadata> {
   name: string; // Normalized tool name (MCP name rules enforced)
   title?: string; // Display name (MCP Tool.title) from summary/extension
   description: string; // From operation summary/description (or extension override)
@@ -206,7 +208,7 @@ interface McpOpenAPITool {
   inputSchema: JsonSchema; // Combined input schema (all params)
   outputSchema?: JsonSchema; // Response schema (can be oneOf union)
   mapper: ParameterMapper[]; // Input -> request mapping
-  metadata: ToolMetadata; // Auth, servers, tags, etc.
+  metadata: TMeta; // Auth, servers, tags, etc. â€” extendable by frameworks
 }
 ```
 
@@ -242,6 +244,7 @@ interface ParameterMapper {
   required?: boolean;
   style?: string; // 'simple', 'form', 'matrix', etc.
   explode?: boolean; // Array/object explosion
+  allowReserved?: boolean; // Query only: RFC 3986 reserved characters stay unencoded
   serialization?: SerializationInfo; // Content-type, encoding rules, binary marker
   wholeBody?: boolean; // Input value IS the entire request body
   security?: SecurityParameterInfo; // Auth parameter metadata

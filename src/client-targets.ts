@@ -115,7 +115,14 @@ export function inlineLocalRefs(schema: JsonSchema): JsonSchema {
     const record = node as SchemaRecord;
 
     const ref = record['$ref'];
-    if (typeof ref === 'string' && ref.startsWith('#')) {
+    if (typeof ref === 'string' && !ref.startsWith('#')) {
+      // Non-local refs (URLs, relative files) cannot be resolved here — with
+      // secureDefaults external resolution is off, so they must not survive
+      // into schemas shipped to clients that reject $ref.
+      const { $ref: _external, ...siblings } = record;
+      return { description: `[External $ref ${ref} removed for client compatibility]`, ...siblings } as JsonSchema;
+    }
+    if (typeof ref === 'string') {
       // 2020-12 allows keywords alongside $ref; siblings win over the target
       const { $ref: _ref, ...siblings } = record;
       if (seenPointers.has(ref)) {
@@ -351,17 +358,30 @@ export function collapseNestedUnions(schema: JsonSchema): JsonSchema {
 /** Formats Gemini accepts on string schemas; everything else is demoted to the description. */
 const GEMINI_SUPPORTED_FORMATS = new Set(['date-time', 'enum']);
 
+/** Formats Gemini accepts on NUMERIC schemas (integer/number nodes only). */
+const GEMINI_NUMERIC_FORMATS = new Set(['int32', 'int64', 'float', 'double']);
+
+function isNumericNode(node: SchemaRecord): boolean {
+  const type = node['type'];
+  return (
+    type === 'integer' ||
+    type === 'number' ||
+    (Array.isArray(type) && (type.includes('integer') || type.includes('number')))
+  );
+}
+
 /** Demote unsupported `format` values into descriptions (Gemini). */
 export function demoteFormats(schema: JsonSchema, supported: Set<string> = GEMINI_SUPPORTED_FORMATS): JsonSchema {
   return walkSchema(schema, (node) => {
     const format = node['format'];
-    if (typeof format === 'string' && !supported.has(format)) {
-      const { format: _format, ...rest } = node;
-      const note = `(format: ${format})`;
-      rest['description'] = rest['description'] ? `${rest['description']} ${note}` : note;
-      return rest;
-    }
-    return node;
+    if (typeof format !== 'string' || supported.has(format)) return node;
+    // int32/int64/float/double are valid ONLY on numeric nodes — a string
+    // schema carrying `format: int64` still gets demoted.
+    if (GEMINI_NUMERIC_FORMATS.has(format) && isNumericNode(node)) return node;
+    const { format: _format, ...rest } = node;
+    const note = `(format: ${format})`;
+    rest['description'] = rest['description'] ? `${rest['description']} ${note}` : note;
+    return rest;
   });
 }
 
@@ -400,19 +420,31 @@ export function requireAllProperties(schema: JsonSchema): JsonSchema {
     const rewritten: SchemaRecord = {};
 
     for (const [name, propSchema] of Object.entries(properties)) {
-      if (originallyRequired.has(name) || !isSchemaObject(propSchema)) {
+      // const-constrained properties are left untouched: adding null would
+      // contradict the const, and const already admits exactly one value.
+      if (originallyRequired.has(name) || !isSchemaObject(propSchema) || (propSchema as SchemaRecord)['const'] !== undefined) {
         rewritten[name] = propSchema;
         continue;
       }
       const prop = propSchema as SchemaRecord;
+      // The null branch must stay satisfiable: an enum that omits null would
+      // override the widened type and make the property required again.
+      const withNullEnum = (next: SchemaRecord): SchemaRecord => {
+        const enumValues = next['enum'];
+        if (Array.isArray(enumValues) && !enumValues.includes(null)) {
+          return { ...next, enum: [...enumValues, null] };
+        }
+        return next;
+      };
       const type = prop['type'];
       if (typeof type === 'string' && type !== 'null') {
-        rewritten[name] = { ...prop, type: [type, 'null'] };
+        rewritten[name] = withNullEnum({ ...prop, type: [type, 'null'] });
       } else if (Array.isArray(type) && !type.includes('null')) {
-        rewritten[name] = { ...prop, type: [...type, 'null'] };
+        rewritten[name] = withNullEnum({ ...prop, type: [...type, 'null'] });
       } else {
-        // no declared type (or already nullable): accepts null as-is
-        rewritten[name] = prop;
+        // no declared type (or already nullable): null validates the widened
+        // type, but an enum still needs the null member
+        rewritten[name] = withNullEnum(prop);
       }
     }
 
@@ -427,14 +459,20 @@ export function requireAllProperties(schema: JsonSchema): JsonSchema {
 export function applyClientTarget(schema: JsonSchema, target: ClientTarget): JsonSchema {
   let result = inlineLocalRefs(schema);
   result = ensureArrayItems(result);
-  result = collapseRootCompositions(result);
 
+  if (target === 'gemini') {
+    // Gemini never sees `x-variants`: its nested collapse handles the root
+    // union too, keeping the first variant and documenting the rest — raw
+    // preserved-variant metadata would be rejected by its schema subset.
+    result = collapseNestedUnions(result);
+    result = demoteFormats(result);
+    return result;
+  }
+
+  result = collapseRootCompositions(result);
   if (target === 'openai') {
     result = enforceClosedObjects(result);
     result = requireAllProperties(result);
-  } else if (target === 'gemini') {
-    result = collapseNestedUnions(result);
-    result = demoteFormats(result);
   }
 
   return result;

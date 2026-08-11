@@ -30,22 +30,22 @@ OpenAPIToolGenerator (src/generator.ts)
 
 ## Key Files
 
-| File | Purpose |
-|------|---------|
-| `src/generator.ts` | Main entry point. Factory methods (`fromJSON`, `fromYAML`, `fromURL`, `fromFile`), tool generation, tool-name normalization/dedup, SSRF protection, `$ref` dereferencing |
-| `src/types.ts` | All type definitions, `toJsonSchema()` conversion (incl. `nullable`/`example`/`xml` normalization), `isReferenceObject()` guard |
-| `src/annotations.ts` | HTTP-method annotation inference + `x-mcp` extension family overrides (`x-speakeasy-mcp` < `x-mcp` < `x-frontmcp`); `resolveExtensionEnabled` (root < path < operation) |
-| `src/request-builder.ts` | `buildHttpRequest` — pure request assembly with full OpenAPI style/explode serialization, multipart/binary bodies, injection guards |
-| `src/client-targets.ts` | Per-client schema dialect transforms (`claude`/`openai`/`gemini`/`strict`), composable and exported standalone |
-| `src/sdk.ts` | `toSdkTool` — registerTool-shaped output for the official MCP SDK (no SDK dependency) |
-| `src/parameter-resolver.ts` | Resolves OpenAPI parameters + requestBody into flat inputSchema with conflict resolution; flattens `allOf` bodies, flags `wholeBody`/`binary` |
-| `src/response-builder.ts` | Builds outputSchema from OpenAPI responses with content-type and status code preferences |
-| `src/format-resolver.ts` | Format-to-schema resolution. Built-in resolvers for uuid, date-time, email, int32, etc. |
-| `src/schema-builder.ts` | Static utilities: merge, union, clone, flatten, simplify, withFormat, etc. |
-| `src/security-resolver.ts` | Resolves security schemes (Bearer, Basic, Digest, API Key, OAuth2, OpenID Connect) |
-| `src/validator.ts` | Validates OpenAPI document structure |
-| `src/errors.ts` | Error class hierarchy: LoadError, ParseError, ValidationError, GenerationError, SchemaError |
-| `src/index.ts` | Barrel file for public exports |
+| File                        | Purpose                                                                                                                                                                  |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/generator.ts`          | Main entry point. Factory methods (`fromJSON`, `fromYAML`, `fromURL`, `fromFile`), tool generation, tool-name normalization/dedup, SSRF protection, `$ref` dereferencing |
+| `src/types.ts`              | All type definitions, `toJsonSchema()` conversion (incl. `nullable`/`example`/`xml` normalization), `isReferenceObject()` guard                                          |
+| `src/annotations.ts`        | HTTP-method annotation inference + `x-mcp` extension family overrides (`x-speakeasy-mcp` < `x-mcp` < `x-frontmcp`); `resolveExtensionEnabled` (root < path < operation)  |
+| `src/request-builder.ts`    | `buildHttpRequest` — pure request assembly with full OpenAPI style/explode serialization, multipart/binary bodies, injection guards                                      |
+| `src/client-targets.ts`     | Per-client schema dialect transforms (`claude`/`openai`/`gemini`/`strict`), composable and exported standalone                                                           |
+| `src/sdk.ts`                | `toSdkTool` — registerTool-shaped output for the official MCP SDK (no SDK dependency)                                                                                    |
+| `src/parameter-resolver.ts` | Resolves OpenAPI parameters + requestBody into flat inputSchema with conflict resolution; flattens `allOf` bodies, flags `wholeBody`/`binary`                            |
+| `src/response-builder.ts`   | Builds outputSchema from OpenAPI responses with content-type and status code preferences                                                                                 |
+| `src/format-resolver.ts`    | Format-to-schema resolution. Built-in resolvers for uuid, date-time, email, int32, etc.                                                                                  |
+| `src/schema-builder.ts`     | Static utilities: merge, union, clone, flatten, simplify, withFormat, etc.                                                                                               |
+| `src/security-resolver.ts`  | Resolves security schemes (Bearer, Basic, Digest, API Key, OAuth2, OpenID Connect)                                                                                       |
+| `src/validator.ts`          | Validates OpenAPI document structure                                                                                                                                     |
+| `src/errors.ts`             | Error class hierarchy: LoadError, ParseError, ValidationError, GenerationError, SchemaError                                                                              |
+| `src/index.ts`              | Barrel file for public exports                                                                                                                                           |
 
 ## Development Commands
 
@@ -91,7 +91,7 @@ yarn clean             # Remove dist/ and coverage/
   module's own exports can't be `jest.spyOn`-ed).
 - **Temp files**: File loading tests create temp files in `os.tmpdir()`, clean up in `finally`
 - **Spy on dereference**: tests still spy on `$RefParser.dereference` to inspect the resolver
-  *config* (canRead/read/redirects) without network; the `read` path's actual fetch is validated
+  _config_ (canRead/read/redirects) without network; the `read` path's actual fetch is validated
   against a real loopback server instead.
 - **`c8 ignore next`**: Used for defensive branches unreachable through normal code paths (V8 coverage ignores)
 - **`transformIgnorePatterns`**: `@apidevtools/json-schema-ref-parser` is ESM-only and must be transformed by SWC
@@ -131,7 +131,7 @@ GenerateOptions (generateTools/generateTool)
 - `buildHttpRequest` is the canonical request assembly (pure, no fetch); `RequestBuildError` for all failures
 - `target` client-dialect transforms run LAST in generateTool (after formats and depth truncation)
 - `secureDefaults: true` = redirects off + external refs off (explicit options still win)
-- Format resolution is a post-processing step applied to final inputSchema/outputSchema; `maxSchemaDepth` truncation (default 10) runs last
+- Format resolution is a post-processing step applied to final inputSchema/outputSchema; `maxSchemaDepth` truncation (default 10) runs after it, BEFORE client target transforms
 
 ## Documentation
 

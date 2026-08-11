@@ -3886,6 +3886,18 @@ describe('secureDefaults per-key refResolution merge', () => {
       { secureDefaults: true, refResolution: { allowedProtocols: ['https'] } },
     );
 
-    expect(generator).toBeInstanceOf(OpenAPIToolGenerator);
+    // the normalized options must carry the explicit override verbatim
+    expect((generator as any).options.refResolution.allowedProtocols).toEqual(['https']);
+    expect((generator as any).options.followRedirects).toBe(false);
+  });
+
+  it('treats an explicitly undefined allowedProtocols as unset (lockdown preserved)', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      { openapi: '3.0.0', info: { title: 'T', version: '1' }, paths: {} } as any,
+      // programmatic option building: the key exists but the value is undefined
+      { secureDefaults: true, refResolution: { allowedProtocols: undefined } },
+    );
+
+    expect((generator as any).options.refResolution.allowedProtocols).toEqual([]);
   });
 });

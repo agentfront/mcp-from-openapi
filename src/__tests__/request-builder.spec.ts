@@ -407,7 +407,7 @@ describe('buildHttpRequest', () => {
           serialization: { contentType: 'application/x-www-form-urlencoded' },
         },
       ]);
-      const encResult = buildHttpRequest(makeToolWithPathless(urlencoded), { body: { keep: 1, drop: undefined } });
+      const encResult = buildHttpRequest(withUploadPath(urlencoded), { body: { keep: 1, drop: undefined } });
       expect(encResult.body).toBe('keep=1');
 
       const multipart = makeTool([
@@ -419,7 +419,7 @@ describe('buildHttpRequest', () => {
           serialization: { contentType: 'multipart/form-data' },
         },
       ]);
-      const formResult = buildHttpRequest(makeToolWithPathless(multipart), { body: { keep: 'x', drop: undefined } });
+      const formResult = buildHttpRequest(withUploadPath(multipart), { body: { keep: 'x', drop: undefined } });
       expect((formResult.body as FormData).get('keep')).toBe('x');
       expect((formResult.body as FormData).has('drop')).toBe(false);
     });
@@ -435,7 +435,7 @@ describe('buildHttpRequest', () => {
         },
       ]);
 
-      expect(() => buildHttpRequest(makeToolWithPathless(tool), { body: 'raw' })).toThrow(/must be objects/);
+      expect(() => buildHttpRequest(withUploadPath(tool), { body: 'raw' })).toThrow(/must be objects/);
     });
 
     it('multipart bodies build FormData without a content-type header', () => {
@@ -495,7 +495,7 @@ describe('buildHttpRequest', () => {
         },
       ]);
 
-      expect(() => buildHttpRequest(makeToolWithPathless(tool), { body: [1] })).toThrow(/must be objects/);
+      expect(() => buildHttpRequest(withUploadPath(tool), { body: [1] })).toThrow(/must be objects/);
     });
 
     it('binary whole bodies pass through untouched', () => {
@@ -509,7 +509,7 @@ describe('buildHttpRequest', () => {
           serialization: { contentType: 'application/octet-stream', binary: true },
         },
       ]);
-      const result = buildHttpRequest(makeToolWithPathless(tool), { body: payload });
+      const result = buildHttpRequest(withUploadPath(tool), { body: payload });
 
       expect(result.body).toBe(payload);
       expect(result.headers['content-type']).toBe('application/octet-stream');
@@ -526,7 +526,7 @@ describe('buildHttpRequest', () => {
             serialization: { contentType: 'text/plain' },
           },
         ]);
-        return buildHttpRequest(makeToolWithPathless(tool), { body: value });
+        return buildHttpRequest(withUploadPath(tool), { body: value });
       };
 
       expect(textTool('hello').body).toBe('hello');
@@ -688,12 +688,60 @@ describe('buildHttpRequest', () => {
   });
 });
 
-/** Strip the path template so pathless whole-body tools resolve cleanly */
-function makeToolWithPathless(tool: McpOpenAPITool): McpOpenAPITool {
+/** Replace the templated path with a static /upload so whole-body tools resolve cleanly */
+function withUploadPath(tool: McpOpenAPITool): McpOpenAPITool {
   return { ...tool, metadata: { ...tool.metadata, path: '/upload' } };
 }
 
-describe('review fixes', () => {
+describe('header names and content-type casing', () => {
+  it('rejects spec-supplied header names that are not RFC 7230 tokens', () => {
+    const tool = makeTool([
+      { inputKey: 'id', type: 'path', key: 'id', required: true },
+      { inputKey: 'h', type: 'header', key: 'bad name' },
+    ]);
+
+    expect(() => buildHttpRequest(tool, { id: '1', h: 'v' })).toThrow(/Invalid header name/);
+
+    const injected = makeTool([
+      { inputKey: 'id', type: 'path', key: 'id', required: true },
+      { inputKey: 'h', type: 'header', key: 'X-Evil\r\nX-Injected' },
+    ]);
+    expect(() => buildHttpRequest(injected, { id: '1', h: 'v' })).toThrow(/Invalid header name/);
+  });
+
+  it('reuses a spec-declared Content-Type header key instead of duplicating it', () => {
+    const tool = makeTool([
+      { inputKey: 'id', type: 'path', key: 'id', required: true },
+      { inputKey: 'ct', type: 'header', key: 'Content-Type' },
+      { inputKey: 'x', type: 'body', key: 'x', serialization: { contentType: 'application/json' } },
+    ]);
+    const result = buildHttpRequest(tool, { id: '1', ct: 'application/custom', x: 1 });
+
+    const contentTypeKeys = Object.keys(result.headers).filter((h) => h.toLowerCase() === 'content-type');
+    expect(contentTypeKeys).toEqual(['Content-Type']); // single key, original casing
+    expect(result.headers['Content-Type']).toBe('application/json'); // body serialization wins
+  });
+
+  it('keeps an explicit Content-Type header for binary bodies', () => {
+    const tool = makeTool([
+      { inputKey: 'ct', type: 'header', key: 'Content-Type' },
+      {
+        inputKey: 'body',
+        type: 'body',
+        key: 'body',
+        wholeBody: true,
+        serialization: { contentType: 'application/octet-stream', binary: true },
+      },
+    ]);
+    const result = buildHttpRequest(withUploadPath(tool), { ct: 'image/png', body: new Uint8Array([1]) });
+
+    const contentTypeKeys = Object.keys(result.headers).filter((h) => h.toLowerCase() === 'content-type');
+    expect(contentTypeKeys).toEqual(['Content-Type']);
+    expect(result.headers['Content-Type']).toBe('image/png'); // explicit header preserved
+  });
+});
+
+describe('serialization defaults and hardening', () => {
   const queryTool = (mapper: Partial<ParameterMapper>) =>
     makeTool([
       { inputKey: 'id', type: 'path', key: 'id', required: true },

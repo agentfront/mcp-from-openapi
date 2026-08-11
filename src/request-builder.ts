@@ -193,6 +193,11 @@ function serializeHeaderValue(mapper: ParameterMapper, value: unknown): string {
 }
 
 function assertHeaderSafe(name: string, value: string): void {
+  // Header NAMES come from the spec (mapper.key) — untrusted under
+  // secureDefaults, so they get the RFC 7230 token check too.
+  if (!/^[\w!#$%&'*+\-.^`|~]+$/.test(name)) {
+    throw new RequestBuildError(`Invalid header name '${name}' (RFC 7230 token required)`, { header: name });
+  }
   // eslint-disable-next-line no-control-regex
   if (/[\r\n\x00]/.test(value)) {
     throw new RequestBuildError(`Header '${name}' value contains control characters (possible header injection)`, {
@@ -228,6 +233,9 @@ function assertCookieValue(name: string, value: string): void {
  * digest (RFC 7616 username/realm/nonce/... fields) cannot be synthesized from
  * a raw credential, so their values pass through verbatim: provide the full
  * header value, or resolve credentials with SecurityResolver instead.
+ *
+ * NOTE: `basic` values are prefixed only, never encoded — supply the base64
+ * `user:pass` token (as SecurityResolver produces), not raw credentials.
  */
 function formatSecurityValue(mapper: ParameterMapper, value: string): string {
   const security = mapper.security!;
@@ -402,14 +410,18 @@ export function buildHttpRequest(
     headers['Cookie'] = cookieEntries.map(([k, v]) => `${k}=${v}`).join('; ');
   }
 
-  // Serialize the body per content type
+  // Serialize the body per content type. Resolve any existing content-type
+  // header case-insensitively first — a spec-declared `Content-Type` header
+  // parameter must not end up duplicated alongside a lowercase variant.
+  const contentTypeKey = Object.keys(headers).find((h) => h.toLowerCase() === 'content-type') ?? 'content-type';
+  const hasExplicitContentType = contentTypeKey in headers;
   let body: unknown;
   if (hasBody && rawBody !== undefined) {
     const ct = contentType!;
     if (binaryBody) {
       // Raw binary: pass through untouched (string, Uint8Array, Blob, ...)
       body = rawBody;
-      headers['content-type'] = headers['content-type'] ?? ct;
+      if (!hasExplicitContentType) headers[contentTypeKey] = ct;
     } else if (ct.toLowerCase() === 'application/x-www-form-urlencoded') {
       const params = new URLSearchParams();
       if (!isPlainObject(rawBody)) {
@@ -426,7 +438,7 @@ export function buildHttpRequest(
         }
       }
       body = params.toString();
-      headers['content-type'] = ct;
+      headers[contentTypeKey] = ct;
     } else if (ct.toLowerCase() === 'multipart/form-data') {
       /* c8 ignore next 3 -- FormData exists on Node >= 18; guard for exotic runtimes */
       if (typeof FormData === 'undefined') {
@@ -454,11 +466,11 @@ export function buildHttpRequest(
       // Do NOT set content-type: the HTTP client must add the boundary.
     } else if (JSON_CONTENT.test(ct)) {
       body = JSON.stringify(rawBody);
-      headers['content-type'] = ct;
+      headers[contentTypeKey] = ct;
     } else {
       // text/plain, application/xml, ... : caller-provided string content
       body = isPlainObject(rawBody) || Array.isArray(rawBody) ? JSON.stringify(rawBody) : String(rawBody);
-      headers['content-type'] = ct;
+      headers[contentTypeKey] = ct;
     }
   }
 
