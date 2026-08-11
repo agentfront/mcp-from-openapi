@@ -24,6 +24,7 @@ import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import { isReferenceObject } from './types';
 import { ParameterResolver } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
+import { SchemaBuilder } from './schema-builder';
 import { Validator } from './validator';
 import { LoadError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
@@ -429,7 +430,9 @@ export class OpenAPIToolGenerator {
     }
 
     // Resolve parameters
-    const parameterResolver = new ParameterResolver(options.namingStrategy);
+    const parameterResolver = new ParameterResolver(options.namingStrategy, {
+      includeExamples: options.includeExamples,
+    });
 
     // Filter out ReferenceObjects from parameters
     let pathParameters: ParameterObject[] | undefined = undefined;
@@ -472,8 +475,15 @@ export class OpenAPIToolGenerator {
       ...options.formatResolvers,
     };
     const hasFormatResolvers = Object.keys(formatResolvers).length > 0;
-    const resolvedInputSchema = hasFormatResolvers ? resolveSchemaFormats(inputSchema, formatResolvers) : inputSchema;
-    const resolvedOutputSchema = hasFormatResolvers && outputSchema ? resolveSchemaFormats(outputSchema, formatResolvers) : outputSchema;
+    let resolvedInputSchema = hasFormatResolvers ? resolveSchemaFormats(inputSchema, formatResolvers) : inputSchema;
+    let resolvedOutputSchema = hasFormatResolvers && outputSchema ? resolveSchemaFormats(outputSchema, formatResolvers) : outputSchema;
+
+    // Bound schema nesting depth (applied last so the final schemas are bounded)
+    const maxSchemaDepth = options.maxSchemaDepth ?? 10;
+    resolvedInputSchema = SchemaBuilder.truncateDepth(resolvedInputSchema, maxSchemaDepth);
+    if (resolvedOutputSchema) {
+      resolvedOutputSchema = SchemaBuilder.truncateDepth(resolvedOutputSchema, maxSchemaDepth);
+    }
 
     return {
       name,

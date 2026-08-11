@@ -657,13 +657,18 @@ export interface GenerateOptions {
   includeAllResponses?: boolean;
 
   /**
-   * Maximum depth for dereferencing schemas
+   * Maximum schema nesting depth retained in generated input/output schemas.
+   * Structures nested deeper than this are truncated: child schemas are
+   * stripped and a truncation note is appended to the node's description.
    * @default 10
    */
   maxSchemaDepth?: number;
 
   /**
-   * Whether to include examples in schemas
+   * Include OpenAPI parameter-level and media-type-level `example`/`examples`
+   * values in generated schemas (as JSON Schema `examples` arrays). These
+   * override schema-level examples where present. Schema-level `example`
+   * keywords are always normalized to `examples` regardless of this option.
    * @default false
    */
   includeExamples?: boolean;

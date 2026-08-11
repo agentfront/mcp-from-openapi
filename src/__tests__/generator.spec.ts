@@ -2542,3 +2542,178 @@ describe('External $ref resolution over the SSRF-safe pinned transport', () => {
     await expect(generator.generateTools()).rejects.toThrow(/dereference/i);
   });
 });
+
+describe('includeExamples option', () => {
+  const specWithExamples: any = {
+    openapi: '3.0.0',
+    info: { title: 'Examples API', version: '1.0.0' },
+    paths: {
+      '/search': {
+        get: {
+          operationId: 'search',
+          parameters: [
+            {
+              name: 'q',
+              in: 'query',
+              schema: { type: 'string' },
+              example: 'hello world',
+            },
+            {
+              name: 'limit',
+              in: 'query',
+              schema: { type: 'integer', example: 5 },
+              examples: {
+                small: { value: 10 },
+                large: { value: 100 },
+              },
+            },
+          ],
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+      '/import': {
+        post: {
+          operationId: 'importItems',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { type: 'array', items: { type: 'string' } },
+                example: ['a', 'b'],
+              },
+            },
+          },
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+    },
+  };
+
+  it('should omit parameter-level examples by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithExamples);
+    const tool = await generator.generateTool('/search', 'get');
+    const props = (tool.inputSchema as any).properties;
+
+    expect(props.q.examples).toBeUndefined();
+  });
+
+  it('should include singular parameter examples when enabled', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithExamples);
+    const tool = await generator.generateTool('/search', 'get', { includeExamples: true });
+    const props = (tool.inputSchema as any).properties;
+
+    expect(props.q.examples).toEqual(['hello world']);
+  });
+
+  it('should prefer the parameter examples map over schema-level example', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithExamples);
+    const tool = await generator.generateTool('/search', 'get', { includeExamples: true });
+    const props = (tool.inputSchema as any).properties;
+
+    expect(props.limit.examples).toEqual([10, 100]);
+  });
+
+  it('should attach media-type examples to non-object whole-body parameters', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithExamples);
+    const tool = await generator.generateTool('/import', 'post', { includeExamples: true });
+    const props = (tool.inputSchema as any).properties;
+
+    expect(props.body.examples).toEqual([['a', 'b']]);
+  });
+
+  it('should still normalize schema-level example to examples without the option', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithExamples);
+    const tool = await generator.generateTool('/search', 'get');
+    const props = (tool.inputSchema as any).properties;
+
+    // schema-level example on `limit` is normalized by toJsonSchema regardless
+    expect(props.limit.examples).toEqual([5]);
+  });
+});
+
+describe('maxSchemaDepth option', () => {
+  const nested = (depth: number): any => {
+    let schema: any = { type: 'string' };
+    for (let i = 0; i < depth; i++) {
+      schema = { type: 'object', properties: { [`level${depth - i}`]: schema } };
+    }
+    return schema;
+  };
+
+  const specWithDeepBody: any = {
+    openapi: '3.0.0',
+    info: { title: 'Deep API', version: '1.0.0' },
+    paths: {
+      '/deep': {
+        post: {
+          operationId: 'createDeep',
+          requestBody: {
+            content: {
+              'application/json': {
+                schema: { type: 'object', properties: { root: nested(15) } },
+              },
+            },
+          },
+          responses: {
+            '200': {
+              description: 'OK',
+              content: { 'application/json': { schema: nested(15) } },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const depthOf = (schema: any): number => {
+    let depth = 0;
+    let node = schema;
+    while (node && typeof node === 'object' && node.properties) {
+      depth++;
+      node = Object.values(node.properties)[0];
+    }
+    return depth;
+  };
+
+  it('should truncate schemas deeper than the default of 10', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithDeepBody);
+    const tool = await generator.generateTool('/deep', 'post');
+
+    expect(depthOf(tool.inputSchema)).toBeLessThanOrEqual(10);
+    expect(depthOf(tool.outputSchema)).toBeLessThanOrEqual(10);
+    expect(JSON.stringify(tool.inputSchema)).toContain('Truncated');
+    expect(JSON.stringify(tool.outputSchema)).toContain('Truncated');
+  });
+
+  it('should respect a custom maxSchemaDepth', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithDeepBody);
+    const tool = await generator.generateTool('/deep', 'post', { maxSchemaDepth: 3 });
+
+    expect(depthOf(tool.inputSchema)).toBeLessThanOrEqual(3);
+    expect(depthOf(tool.outputSchema)).toBeLessThanOrEqual(3);
+  });
+
+  it('should not modify schemas shallower than maxSchemaDepth', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Shallow API', version: '1.0.0' },
+      paths: {
+        '/shallow': {
+          get: {
+            operationId: 'getShallow',
+            parameters: [{ name: 'id', in: 'query', schema: { type: 'string' } }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/shallow', 'get');
+
+    expect(JSON.stringify(tool.inputSchema)).not.toContain('Truncated');
+    expect((tool.inputSchema as any).properties.id).toEqual({
+      type: 'string',
+      'x-parameter-location': 'query',
+    });
+  });
+});

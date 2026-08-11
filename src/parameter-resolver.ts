@@ -17,15 +17,28 @@ import type {
 import { toJsonSchema, isReferenceObject } from './types';
 
 /**
+ * Options controlling parameter resolution behavior
+ */
+export interface ParameterResolverOptions {
+  /**
+   * Include parameter-level and media-type-level example(s) in the
+   * generated input schema (as JSON Schema `examples` arrays).
+   */
+  includeExamples?: boolean;
+}
+
+/**
  * Resolves parameters and handles naming conflicts
  */
 export class ParameterResolver {
   private namingStrategy: NamingStrategy;
+  private includeExamples: boolean;
 
-  constructor(namingStrategy?: NamingStrategy) {
+  constructor(namingStrategy?: NamingStrategy, options?: ParameterResolverOptions) {
     this.namingStrategy = namingStrategy ?? {
       conflictResolver: this.defaultConflictResolver,
     };
+    this.includeExamples = options?.includeExamples ?? false;
   }
 
   /**
@@ -74,6 +87,7 @@ export class ParameterResolver {
         explode: param.explode,
         allowReserved: param.allowReserved,
         deprecated: param.deprecated,
+        examples: this.includeExamples ? collectExampleValues(param.example, param.examples) : undefined,
       };
 
       if (!parametersByName.has(param.name)) {
@@ -88,8 +102,11 @@ export class ParameterResolver {
       const mediaType = requestBody.content[contentType];
 
       if (mediaType?.schema) {
+        const mediaExamples = this.includeExamples
+          ? collectExampleValues(mediaType.example, mediaType.examples)
+          : undefined;
         /* c8 ignore next -- both sides of ?? tested: true by required body tests, false by optional body tests */
-        this.extractBodyParameters(mediaType.schema, parametersByName, requestBody.required ?? false, contentType);
+        this.extractBodyParameters(mediaType.schema, parametersByName, requestBody.required ?? false, contentType, mediaExamples);
       }
     }
 
@@ -170,6 +187,7 @@ export class ParameterResolver {
     parametersByName: Map<string, ParameterInfo[]>,
     required: boolean,
     contentType: string,
+    mediaExamples?: unknown[],
     prefix = '',
   ): void {
     if (!schema || typeof schema !== 'object') return;
@@ -212,6 +230,7 @@ export class ParameterResolver {
         location: 'body',
         required,
         schema,
+        examples: mediaExamples,
         serialization: {
           contentType,
         },
@@ -232,6 +251,13 @@ export class ParameterResolver {
 
     if (param.description) {
       schema.description = param.description;
+    }
+
+    // Parameter/media-type-level example(s) are more specific than schema-level
+    // ones (OpenAPI: "the example SHOULD override the example provided by the
+    // schema"), so they replace any schema-derived `examples`.
+    if (param.examples && param.examples.length > 0) {
+      schema.examples = param.examples as JsonSchema['examples'];
     }
 
     if (param.deprecated) {
@@ -386,8 +412,37 @@ interface ParameterInfo {
   explode?: boolean;
   allowReserved?: boolean;
   deprecated?: boolean;
+  examples?: unknown[];
   serialization?: {
     contentType?: string;
     encoding?: Record<string, any>;
   };
+}
+
+/**
+ * Collect concrete example values from OpenAPI `example` / `examples` fields
+ * (parameter or media-type level). The `examples` map wins over the singular
+ * `example` (they are mutually exclusive per OpenAPI); `$ref` entries are
+ * skipped because example refs are not dereferenced into values here.
+ * Returns undefined when nothing usable is present.
+ *
+ * Internal helper shared with ResponseBuilder (not part of the public barrel).
+ */
+export function collectExampleValues(
+  example: unknown,
+  examples?: Record<string, unknown> | unknown[],
+): unknown[] | undefined {
+  if (examples && !Array.isArray(examples)) {
+    const values = Object.values(examples)
+      .filter((entry) => entry !== null && typeof entry === 'object' && !isReferenceObject(entry))
+      .map((entry) => (entry as { value?: unknown }).value)
+      .filter((value) => value !== undefined);
+    if (values.length > 0) {
+      return values;
+    }
+  }
+  if (example !== undefined) {
+    return [example];
+  }
+  return undefined;
 }

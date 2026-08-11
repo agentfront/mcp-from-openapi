@@ -479,4 +479,67 @@ describe('ResponseBuilder', () => {
       expect([400, 500]).toContain((result as any)['x-status-code']);
     });
   });
+
+  describe('includeExamples', () => {
+    const responseWith = (mediaExtras: Record<string, unknown>) => ({
+      '200': {
+        description: 'Success',
+        content: {
+          'application/json': {
+            schema: { type: 'object', properties: { id: { type: 'string' } } },
+            ...mediaExtras,
+          },
+        },
+      },
+    });
+
+    it('should ignore media-type examples by default', () => {
+      const builder = new ResponseBuilder();
+      const result = builder.build(responseWith({ example: { id: '1' } }));
+
+      expect((result as any).examples).toBeUndefined();
+    });
+
+    it('should include a singular media-type example when enabled', () => {
+      const builder = new ResponseBuilder({ includeExamples: true });
+      const result = builder.build(responseWith({ example: { id: '1' } }));
+
+      expect((result as any).examples).toEqual([{ id: '1' }]);
+    });
+
+    it('should include named media-type examples when enabled', () => {
+      const builder = new ResponseBuilder({ includeExamples: true });
+      const result = builder.build(
+        responseWith({
+          examples: {
+            first: { value: { id: '1' } },
+            second: { value: { id: '2' } },
+            ref: { $ref: '#/components/examples/Skipped' },
+            noValue: { summary: 'no value key' },
+          },
+        }),
+      );
+
+      expect((result as any).examples).toEqual([{ id: '1' }, { id: '2' }]);
+    });
+
+    it('should override schema-level examples with media-type examples', () => {
+      const builder = new ResponseBuilder({ includeExamples: true });
+      const result = builder.build(
+        responseWith({
+          schema: { type: 'string', example: 'from-schema' },
+          example: 'from-media-type',
+        }),
+      );
+
+      expect((result as any).examples).toEqual(['from-media-type']);
+    });
+
+    it('should keep schema-derived examples when the media type has none', () => {
+      const builder = new ResponseBuilder({ includeExamples: true });
+      const result = builder.build(responseWith({ schema: { type: 'string', example: 'from-schema' } }));
+
+      expect((result as any).examples).toEqual(['from-schema']);
+    });
+  });
 });
