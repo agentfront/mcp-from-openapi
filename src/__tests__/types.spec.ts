@@ -555,3 +555,70 @@ describe('toJsonSchema', () => {
     });
   });
 });
+
+describe('toJsonSchema 2020-12 keyword traversal', () => {
+  const nullableString = { type: 'string', nullable: true, example: 'v', xml: { name: 'n' } } as any;
+  const expectNormalized = (node: any) => {
+    expect(node.type).toEqual(['string', 'null']);
+    expect(node.nullable).toBeUndefined();
+    expect(node.examples).toEqual(['v']);
+    expect(node.example).toBeUndefined();
+    expect(node.xml).toBeUndefined();
+  };
+
+  it('should normalize schemas under map-of-schemas keywords', () => {
+    const result = toJsonSchema({
+      type: 'object',
+      patternProperties: { '^x-': nullableString },
+      $defs: { Node: nullableString },
+      definitions: { Legacy: nullableString },
+      dependentSchemas: { flag: nullableString },
+    } as any) as any;
+
+    expectNormalized(result.patternProperties['^x-']);
+    expectNormalized(result.$defs.Node);
+    expectNormalized(result.definitions.Legacy);
+    expectNormalized(result.dependentSchemas.flag);
+  });
+
+  it('should normalize schemas under single-schema keywords', () => {
+    const result = toJsonSchema({
+      contains: nullableString,
+      propertyNames: { pattern: '^a' },
+      if: nullableString,
+      then: nullableString,
+      else: nullableString,
+      contentSchema: nullableString,
+      unevaluatedItems: nullableString,
+      unevaluatedProperties: false,
+    } as any) as any;
+
+    expectNormalized(result.contains);
+    expectNormalized(result.if);
+    expectNormalized(result.then);
+    expectNormalized(result.else);
+    expectNormalized(result.contentSchema);
+    expectNormalized(result.unevaluatedItems);
+    expect(result.propertyNames).toEqual({ pattern: '^a' });
+    expect(result.unevaluatedProperties).toBe(false); // boolean form untouched
+  });
+
+  it('should normalize schemas under prefixItems', () => {
+    const result = toJsonSchema({
+      type: 'array',
+      prefixItems: [nullableString, { type: 'number' }],
+    } as any) as any;
+
+    expectNormalized(result.prefixItems[0]);
+    expect(result.prefixItems[1]).toEqual({ type: 'number' });
+  });
+
+  it('should hoist examples onto the nullable anyOf wrapper', () => {
+    const result = toJsonSchema({ enum: ['a', 'b'], nullable: true, example: 'a' } as any) as any;
+
+    expect(result.examples).toEqual(['a']);
+    expect(result.anyOf[0].examples).toBeUndefined();
+    expect(result.anyOf[0].enum).toEqual(['a', 'b']);
+    expect(result.anyOf[1]).toEqual({ type: 'null' });
+  });
+});

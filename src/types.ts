@@ -187,11 +187,45 @@ export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema
     result['not'] = toJsonSchema(result['not'] as SchemaObject | ReferenceObject);
   }
 
+  // Remaining JSON Schema 2020-12 structural keywords, so nested `nullable`/
+  // `example`/`xml` under them receive the same normalization as the root.
+  // Map-of-schemas keywords:
+  for (const key of ['patternProperties', '$defs', 'definitions', 'dependentSchemas'] as const) {
+    const value = result[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const mapped: Record<string, JsonSchema> = {};
+      for (const [name, sub] of Object.entries(value as Record<string, SchemaObject | ReferenceObject>)) {
+        mapped[name] = toJsonSchema(sub);
+      }
+      result[key] = mapped;
+    }
+  }
+  // Single-schema keywords (`unevaluated*` may be boolean — object guard skips those):
+  for (const key of [
+    'contains',
+    'propertyNames',
+    'if',
+    'then',
+    'else',
+    'contentSchema',
+    'unevaluatedItems',
+    'unevaluatedProperties',
+  ] as const) {
+    const value = result[key];
+    if (value && typeof value === 'object') {
+      result[key] = toJsonSchema(value as SchemaObject | ReferenceObject);
+    }
+  }
+  // Array-of-schemas keyword:
+  if (Array.isArray(result['prefixItems'])) {
+    result['prefixItems'] = (result['prefixItems'] as (SchemaObject | ReferenceObject)[]).map(toJsonSchema);
+  }
+
   if (wrapNullable) {
-    // Hoist pure annotation keywords onto the wrapper so descriptions stay
-    // visible at the top level instead of being buried inside anyOf[0].
+    // Hoist pure annotation keywords onto the wrapper so descriptions and
+    // examples stay visible at the top level instead of buried in anyOf[0].
     const wrapper: Record<string, unknown> = {};
-    for (const key of ['title', 'description', 'deprecated'] as const) {
+    for (const key of ['title', 'description', 'deprecated', 'examples'] as const) {
       if (result[key] !== undefined) {
         wrapper[key] = result[key];
         delete result[key];
@@ -482,15 +516,10 @@ export interface ToolMetadata {
  */
 export interface FrontMcpExtensionData {
   /**
-   * Tool annotations for AI behavior hints.
+   * Tool annotations for AI behavior hints (same contract as the tool-level
+   * `annotations` field).
    */
-  annotations?: {
-    title?: string;
-    readOnlyHint?: boolean;
-    destructiveHint?: boolean;
-    idempotentHint?: boolean;
-    openWorldHint?: boolean;
-  };
+  annotations?: ToolAnnotations;
 
   /**
    * Cache configuration for response caching.
