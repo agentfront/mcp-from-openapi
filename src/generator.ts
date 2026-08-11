@@ -19,13 +19,14 @@ import type {
   OperationWithContext,
   ToolMetadata,
   ServerObject,
+  PathItemObject,
 } from './types';
 import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import { isReferenceObject } from './types';
 import { ParameterResolver } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
 import { SchemaBuilder } from './schema-builder';
-import { extractExtensionOverrides, inferAnnotationsFromMethod } from './annotations';
+import { extractExtensionOverrides, inferAnnotationsFromMethod, resolveExtensionEnabled } from './annotations';
 import { Validator } from './validator';
 import { GenerationError, LoadError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
@@ -43,6 +44,34 @@ const DEFAULT_MAX_TOOL_NAME_LENGTH = 64;
  * entire name space is exhausted fails loudly instead of looping forever.
  */
 const MAX_NAME_DEDUP_ATTEMPTS = 256;
+
+/**
+ * Convert a path glob to a RegExp: `*` matches within one path segment,
+ * `**` across segments, `?` a single non-slash character.
+ */
+function globToRegExp(glob: string): RegExp {
+  let pattern = '^';
+  for (let i = 0; i < glob.length; i++) {
+    const char = glob[i];
+    if (char === '*') {
+      if (glob[i + 1] === '*') {
+        pattern += '.*';
+        i++;
+      } else {
+        pattern += '[^/]*';
+      }
+    } else if (char === '?') {
+      pattern += '[^/]';
+    } else {
+      pattern += char.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  return new RegExp(`${pattern}$`);
+}
+
+function matchesAnyGlob(path: string, globs: string[]): boolean {
+  return globs.some((glob) => globToRegExp(glob).test(path));
+}
 
 /**
  * 32-bit FNV-1a hash rendered as 8 hex chars. Used for stable, content-derived
@@ -462,7 +491,7 @@ export class OpenAPIToolGenerator {
         if (!operation) continue;
 
         // Apply filters
-        if (!this.shouldIncludeOperation(operation, pathStr, method, options)) {
+        if (!this.shouldIncludeOperation(operation, pathStr, method, options, document, pathItem)) {
           continue;
         }
 
@@ -624,14 +653,43 @@ export class OpenAPIToolGenerator {
     path: string,
     method: string,
     options: GenerateOptions,
+    document: OpenAPIDocument,
+    pathItem: PathItemObject,
   ): boolean {
-    // Explicit extension exclusion (x-mcp: false, x-speakeasy-mcp: disabled)
-    if (extractExtensionOverrides(operation).disabled) {
+    // Extension enable/exclude with root < path < operation precedence
+    // (x-mcp at every level; the whole family at the operation level)
+    if (!resolveExtensionEnabled(document, pathItem, operation)) {
       return false;
     }
 
     // Check deprecated
     if (operation.deprecated && !options.includeDeprecated) {
+      return false;
+    }
+
+    // Method filters
+    const lowerMethod = method.toLowerCase() as HTTPMethod;
+    if (options.includeMethods && !options.includeMethods.includes(lowerMethod)) {
+      return false;
+    }
+    if (options.excludeMethods?.includes(lowerMethod)) {
+      return false;
+    }
+
+    // Path glob filters
+    if (options.includePaths && !matchesAnyGlob(path, options.includePaths)) {
+      return false;
+    }
+    if (options.excludePaths && matchesAnyGlob(path, options.excludePaths)) {
+      return false;
+    }
+
+    // Tag filters
+    const tags = operation.tags ?? [];
+    if (options.includeTags && !tags.some((tag) => options.includeTags!.includes(tag))) {
+      return false;
+    }
+    if (options.excludeTags && tags.some((tag) => options.excludeTags!.includes(tag))) {
       return false;
     }
 
@@ -644,6 +702,19 @@ export class OpenAPIToolGenerator {
 
     if (options.excludeOperations && operation.operationId) {
       if (options.excludeOperations.includes(operation.operationId)) {
+        return false;
+      }
+    }
+
+    // Read-only safety switch: effective annotations must say read-only.
+    // Uses inference + extension overrides even when inferAnnotations is off —
+    // the filter's semantics must not depend on output formatting options.
+    if (options.readOnlyOnly) {
+      const effective = {
+        ...inferAnnotationsFromMethod(lowerMethod),
+        ...extractExtensionOverrides(operation).annotations,
+      };
+      if (effective.readOnlyHint !== true) {
         return false;
       }
     }

@@ -6,7 +6,7 @@ export { ResponseBuilder } from './response-builder';
 export { Validator } from './validator';
 export { SecurityResolver, createSecurityContext } from './security-resolver';
 export { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
-export { inferAnnotationsFromMethod, extractExtensionOverrides } from './annotations';
+export { inferAnnotationsFromMethod, extractExtensionOverrides, resolveExtensionEnabled } from './annotations';
 export type { ExtensionToolOverrides } from './annotations';
 
 // Request building

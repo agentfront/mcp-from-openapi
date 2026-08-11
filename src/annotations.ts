@@ -84,6 +84,45 @@ function mergeOverrides(base: ExtensionToolOverrides, layer: ExtensionToolOverri
   };
 }
 
+/** Read the `x-mcp` extension off any spec node (document, path item, operation). */
+function readXMcp(node: object): unknown {
+  return (node as { 'x-mcp'?: unknown })['x-mcp'];
+}
+
+/** Parse an `x-mcp` value (boolean shorthand or object form) into enabled/undefined. */
+function parseXMcpEnabled(ext: unknown): boolean | undefined {
+  if (ext === false) return false;
+  if (ext === true) return true;
+  if (ext && typeof ext === 'object' && typeof (ext as { enabled?: unknown }).enabled === 'boolean') {
+    return (ext as { enabled: boolean }).enabled;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve whether an operation is enabled for tool generation, honoring the
+ * `x-mcp` extension at every level with harsha-compatible precedence:
+ * root (document) < path item < operation. A root-level `x-mcp: false` flips
+ * the whole spec to opt-in; a path or operation level `x-mcp: true` (or
+ * `{ enabled: true }`) re-enables its subtree. At the operation level the
+ * whole extension family participates (`x-speakeasy-mcp: { disabled }` too),
+ * with the family's own precedence.
+ */
+export function resolveExtensionEnabled(document: object, pathItem: object, operation: OperationObject): boolean {
+  let enabled = true;
+
+  const rootSetting = parseXMcpEnabled(readXMcp(document));
+  if (rootSetting !== undefined) enabled = rootSetting;
+
+  const pathSetting = parseXMcpEnabled(readXMcp(pathItem));
+  if (pathSetting !== undefined) enabled = pathSetting;
+
+  const operationDisabled = extractExtensionOverrides(operation).disabled;
+  if (operationDisabled !== undefined) enabled = !operationDisabled;
+
+  return enabled;
+}
+
 /**
  * Extract tool overrides from the `x-mcp` extension family on an operation.
  *

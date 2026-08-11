@@ -749,6 +749,45 @@ export interface GenerateOptions {
   filterFn?: (operation: OperationWithContext) => boolean;
 
   /**
+   * Include only operations carrying at least one of these OpenAPI tags
+   */
+  includeTags?: string[];
+
+  /**
+   * Exclude operations carrying any of these OpenAPI tags
+   */
+  excludeTags?: string[];
+
+  /**
+   * Include only these HTTP methods
+   */
+  includeMethods?: HTTPMethod[];
+
+  /**
+   * Exclude these HTTP methods
+   */
+  excludeMethods?: HTTPMethod[];
+
+  /**
+   * Include only paths matching at least one of these globs.
+   * `*` matches within a path segment, `**` across segments, `?` one character
+   * (e.g. `/users/*`, `/admin/**`).
+   */
+  includePaths?: string[];
+
+  /**
+   * Exclude paths matching any of these globs
+   */
+  excludePaths?: string[];
+
+  /**
+   * Safety switch: include only operations whose effective annotations say
+   * `readOnlyHint: true` (HTTP-method inference merged with extension
+   * overrides, regardless of `inferAnnotations`).
+   */
+  readOnlyOnly?: boolean;
+
+  /**
    * Naming strategy for resolving conflicts
    */
   namingStrategy?: NamingStrategy;

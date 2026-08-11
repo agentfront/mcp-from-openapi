@@ -3546,3 +3546,168 @@ describe('Collision dedup exhaustion', () => {
     }
   });
 });
+
+describe('Curation filtering (Tier 2)', () => {
+  const filterSpec: any = {
+    openapi: '3.0.0',
+    info: { title: 'Filter API', version: '1.0.0' },
+    paths: {
+      '/users': {
+        get: { operationId: 'listUsers', tags: ['users', 'public'], responses: { '200': { description: 'OK' } } },
+        post: { operationId: 'createUser', tags: ['users', 'admin'], responses: { '201': { description: 'OK' } } },
+      },
+      '/users/{id}': {
+        get: {
+          operationId: 'getUser',
+          tags: ['users', 'public'],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: { '200': { description: 'OK' } },
+        },
+        delete: {
+          operationId: 'deleteUser',
+          tags: ['users', 'admin'],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: { '204': { description: 'OK' } },
+        },
+      },
+      '/admin/settings': {
+        get: { operationId: 'getSettings', tags: ['admin'], responses: { '200': { description: 'OK' } } },
+      },
+      '/health': {
+        get: { operationId: 'health', responses: { '200': { description: 'OK' } } },
+      },
+    },
+  };
+
+  const namesFor = async (options: any): Promise<string[]> => {
+    const generator = await OpenAPIToolGenerator.fromJSON(filterSpec);
+    return (await generator.generateTools(options)).map((t) => t.name);
+  };
+
+  it('filters by includeTags / excludeTags', async () => {
+    expect(await namesFor({ includeTags: ['public'] })).toEqual(['listUsers', 'getUser']);
+    expect(await namesFor({ excludeTags: ['admin'] })).toEqual(['health', 'listUsers', 'getUser']);
+  });
+
+  it('filters by includeMethods / excludeMethods', async () => {
+    expect(await namesFor({ includeMethods: ['delete'] })).toEqual(['deleteUser']);
+    expect(await namesFor({ excludeMethods: ['get'] })).toEqual(['createUser', 'deleteUser']);
+  });
+
+  it('filters by path globs', async () => {
+    expect(await namesFor({ includePaths: ['/users/*'] })).toEqual(['getUser', 'deleteUser']);
+    expect(await namesFor({ excludePaths: ['/admin/**', '/health'] })).toEqual([
+      'listUsers',
+      'createUser',
+      'getUser',
+      'deleteUser',
+    ]);
+  });
+
+  it('glob semantics: * stays within a segment, ** crosses, ? is one char', async () => {
+    // /users/* matches /users/{id} but not /users (no trailing segment)
+    expect(await namesFor({ includePaths: ['/users/*'] })).not.toContain('listUsers');
+    // ** matches everything below
+    expect(await namesFor({ includePaths: ['/users/**'] })).toEqual(['getUser', 'deleteUser']);
+    // ? matches exactly one character
+    expect(await namesFor({ includePaths: ['/healt?'] })).toEqual(['health']);
+  });
+
+  it('applies readOnlyOnly as a safety switch', async () => {
+    expect(await namesFor({ readOnlyOnly: true })).toEqual(['getSettings', 'health', 'listUsers', 'getUser']);
+  });
+
+  it('readOnlyOnly honors extension overrides in both directions', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'RO API', version: '1.0.0' },
+      paths: {
+        '/reports': {
+          // POST that an extension declares read-only (e.g. a search endpoint)
+          post: {
+            operationId: 'searchReports',
+            'x-mcp': { annotations: { readOnlyHint: true } },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+        '/cache': {
+          // GET that an extension declares NOT read-only
+          get: {
+            operationId: 'rotateCache',
+            'x-mcp': { annotations: { readOnlyHint: false } },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const names = (await generator.generateTools({ readOnlyOnly: true })).map((t) => t.name);
+
+    expect(names).toEqual(['searchReports']);
+  });
+
+  it('combines filters (intersection semantics)', async () => {
+    expect(await namesFor({ includeTags: ['users'], includeMethods: ['get'], excludePaths: ['/users/*'] })).toEqual([
+      'listUsers',
+    ]);
+  });
+
+  it('still applies filterFn last', async () => {
+    expect(
+      await namesFor({ includeTags: ['users'], filterFn: (op: any) => op.operationId !== 'createUser' }),
+    ).toEqual(['listUsers', 'getUser', 'deleteUser']);
+  });
+});
+
+describe('x-mcp precedence across root, path, and operation', () => {
+  it('root x-mcp:false makes generation opt-in; path and operation levels re-enable', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'OptIn API', version: '1.0.0' },
+      'x-mcp': false,
+      paths: {
+        '/excluded': {
+          get: { operationId: 'excludedByRoot', responses: { '200': { description: 'OK' } } },
+        },
+        '/path-enabled': {
+          'x-mcp': true,
+          get: { operationId: 'enabledByPath', responses: { '200': { description: 'OK' } } },
+          post: {
+            operationId: 'reDisabledByOp',
+            'x-mcp': false,
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+        '/op-enabled': {
+          get: {
+            operationId: 'enabledByOp',
+            'x-mcp': { enabled: true },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const names = (await generator.generateTools()).map((t) => t.name);
+
+    expect(names).toEqual(['enabledByOp', 'enabledByPath']);
+  });
+
+  it('path-level x-mcp:false disables its operations unless the operation re-enables', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'PathOff API', version: '1.0.0' },
+      paths: {
+        '/internal': {
+          'x-mcp': { enabled: false },
+          get: { operationId: 'hiddenOp', responses: { '200': { description: 'OK' } } },
+          post: { operationId: 'visibleOp', 'x-mcp': true, responses: { '200': { description: 'OK' } } },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const names = (await generator.generateTools()).map((t) => t.name);
+
+    expect(names).toEqual(['visibleOp']);
+  });
+});
