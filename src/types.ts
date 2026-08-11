@@ -91,10 +91,15 @@ export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema
   delete result['xml'];
 
   // OpenAPI 3.0 `nullable: true` -> JSON Schema type union with 'null'.
-  // Without a `type` there is nothing to union; the keyword is dropped either way.
-  if (nullable === true && result['type'] !== undefined) {
+  // Type-less nullable schemas (compositions, enum-only) can't take a type
+  // union — they are wrapped in `anyOf: [<schema>, { type: 'null' }]` at the
+  // end of processing instead, so nullability is never silently lost.
+  let wrapNullable = false;
+  if (nullable === true) {
     const type = result['type'];
-    if (Array.isArray(type)) {
+    if (type === undefined) {
+      wrapNullable = true;
+    } else if (Array.isArray(type)) {
       if (!type.includes('null')) {
         result['type'] = [...type, 'null'];
       }
@@ -180,6 +185,10 @@ export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema
 
   if (result['not']) {
     result['not'] = toJsonSchema(result['not'] as SchemaObject | ReferenceObject);
+  }
+
+  if (wrapNullable) {
+    return { anyOf: [result, { type: 'null' }] } as JsonSchema;
   }
 
   return result as JsonSchema;
@@ -722,6 +731,7 @@ export interface GenerateOptions {
    * Maximum schema nesting depth retained in generated input/output schemas.
    * Structures nested deeper than this are truncated: child schemas are
    * stripped and a truncation note is appended to the node's description.
+   * Clamped to a minimum of 1 so the root schema always keeps its properties.
    * @default 10
    */
   maxSchemaDepth?: number;

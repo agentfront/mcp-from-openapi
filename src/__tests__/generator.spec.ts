@@ -3229,7 +3229,7 @@ describe('Deep request-body handling', () => {
     expect(bodyMapper?.serialization?.contentType).toBe('application/octet-stream');
   });
 
-  it('should mark OpenAPI 3.1 contentMediaType schemas as binary', async () => {
+  it('should mark OpenAPI 3.1 contentMediaType schemas as binary only when type is omitted', async () => {
     const generator = await OpenAPIToolGenerator.fromJSON(
       bodySpec({
         content: {
@@ -3237,8 +3237,12 @@ describe('Deep request-body handling', () => {
             schema: {
               type: 'object',
               properties: {
-                image: { type: 'string', contentMediaType: 'image/png' },
+                // 3.1 raw binary: contentMediaType with NO declared type
+                image: { contentMediaType: 'image/png' },
+                // base64-encoded content is a string payload, not raw binary
                 doc: { type: 'string', contentMediaType: 'text/plain', contentEncoding: 'base64' },
+                // an ordinary string that HAPPENS to carry embedded content
+                html: { type: 'string', contentMediaType: 'text/html' },
               },
             },
           },
@@ -3246,12 +3250,99 @@ describe('Deep request-body handling', () => {
       }),
     );
     const tool = await generator.generateTool('/submit', 'post');
-    const imageMapper = tool.mapper.find((m) => m.inputKey === 'image');
-    const docMapper = tool.mapper.find((m) => m.inputKey === 'doc');
 
-    expect(imageMapper?.serialization?.binary).toBe(true);
-    // base64-encoded content is a string payload, not raw binary
-    expect(docMapper?.serialization?.binary).toBeUndefined();
+    expect(tool.mapper.find((m) => m.inputKey === 'image')?.serialization?.binary).toBe(true);
+    expect(tool.mapper.find((m) => m.inputKey === 'doc')?.serialization?.binary).toBeUndefined();
+    expect(tool.mapper.find((m) => m.inputKey === 'html')?.serialization?.binary).toBeUndefined();
+  });
+
+  it('should keep required fields contributed by properties-less allOf members', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              allOf: [
+                { type: 'object', properties: { x: { type: 'string' }, y: { type: 'string' } } },
+                { required: ['x'] }, // base-$ref + required-tightening pattern
+              ],
+            },
+          },
+        },
+      }),
+      { dereference: false },
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+
+    expect((tool.inputSchema as any).required).toEqual(['x']);
+  });
+
+  it('should keep the body whole when an allOf member is a union', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              allOf: [
+                { type: 'object', properties: { a: { type: 'string' } } },
+                {
+                  oneOf: [
+                    { type: 'object', properties: { b: { type: 'string' } }, required: ['b'] },
+                    { type: 'object', properties: { c: { type: 'string' } }, required: ['c'] },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      }),
+      { dereference: false },
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const props = (tool.inputSchema as any).properties;
+    const bodyMapper = tool.mapper.find((m) => m.type === 'body');
+
+    // the union constraint survives intact instead of being flattened away
+    expect(Object.keys(props)).toEqual(['body']);
+    expect(props.body.allOf).toHaveLength(2);
+    expect(props.body.allOf[1].oneOf).toHaveLength(2);
+    expect(bodyMapper?.wholeBody).toBe(true);
+  });
+
+  it('should distribute media-type examples onto flattened body properties', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/json': {
+            schema: { type: 'object', properties: { name: { type: 'string' }, age: { type: 'integer' } } },
+            example: { name: 'Ada' }, // no age key on purpose
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post', { includeExamples: true });
+    const props = (tool.inputSchema as any).properties;
+
+    expect(props.name.examples).toEqual(['Ada']);
+    expect(props.age.examples).toBeUndefined();
+  });
+
+  it('should ignore non-object media-type examples for flattened bodies', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/json': {
+            schema: { type: 'object', properties: { name: { type: 'string' } } },
+            example: 'not-an-object',
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post', { includeExamples: true });
+
+    expect(((tool.inputSchema as any).properties.name as any).examples).toBeUndefined();
   });
 });
 
@@ -3313,5 +3404,64 @@ describe('Whole-body parameters in edge positions', () => {
     const bodyEntry = tool.mapper.find((m) => m.type === 'body');
 
     expect(bodyEntry?.serialization?.encoding).toEqual({ part: { contentType: 'text/plain' } });
+  });
+});
+
+describe('Collision dedup recheck', () => {
+  // replicate the library's FNV-1a suffix so the test can pre-take the renamed slot
+  const fnv1aHex = (input: string): string => {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < input.length; i++) {
+      hash ^= input.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+  };
+
+  it('should re-resolve when the deduplicated name is itself already taken', async () => {
+    // '/a' pre-takes the exact name that deduping POST /b would produce
+    const stolen = `foo_${fnv1aHex('post /b')}`;
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Dup API', version: '1.0.0' },
+      paths: {
+        '/a': { get: { operationId: stolen, responses: { '200': { description: 'OK' } } } },
+        '/b': {
+          get: { operationId: 'foo', responses: { '200': { description: 'OK' } } },
+          post: { operationId: 'foo', responses: { '200': { description: 'OK' } } },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const names = (await generator.generateTools()).map((t) => t.name);
+
+    expect(names).toHaveLength(3);
+    expect(new Set(names).size).toBe(3); // no silent duplicates
+    expect(names).toContain(stolen);
+    expect(names).toContain('foo');
+  });
+});
+
+describe('maxSchemaDepth floor', () => {
+  it('should clamp maxSchemaDepth 0 to 1 so the root inputSchema keeps its properties', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Floor API', version: '1.0.0' },
+      paths: {
+        '/things': {
+          get: {
+            operationId: 'listThings',
+            parameters: [{ name: 'id', in: 'query', required: true, schema: { type: 'string' } }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/things', 'get', { maxSchemaDepth: 0 });
+
+    // the mapper lists `id`, so the root schema must still declare it
+    expect((tool.inputSchema as any).properties.id).toBeDefined();
+    expect((tool.inputSchema as any).required).toEqual(['id']);
   });
 });

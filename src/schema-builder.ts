@@ -345,6 +345,32 @@ export class SchemaBuilder {
     return this.truncateDepthRecursive(schema, 0, maxDepth);
   }
 
+  /** Keys whose value is a map of schemas (JSON Schema 2020-12) */
+  private static readonly TRUNCATE_MAP_KEYS = [
+    'properties',
+    'patternProperties',
+    '$defs',
+    'definitions',
+    'dependentSchemas',
+  ] as const;
+
+  /** Keys whose value is a single schema (or, for `items`, a tuple array) */
+  private static readonly TRUNCATE_SCHEMA_KEYS = [
+    'items',
+    'additionalProperties',
+    'not',
+    'if',
+    'then',
+    'else',
+    'propertyNames',
+    'contains',
+    'unevaluatedProperties',
+    'unevaluatedItems',
+  ] as const;
+
+  /** Keys whose value is an array of schemas */
+  private static readonly TRUNCATE_LIST_KEYS = ['allOf', 'anyOf', 'oneOf', 'prefixItems'] as const;
+
   // Copy-on-walk: never mutates the input, only copies nodes that have schema
   // children, and — because the walk is depth-bounded — terminates even on
   // circular schema graphs (which `clone()`'s JSON round-trip would reject).
@@ -352,63 +378,58 @@ export class SchemaBuilder {
     /* c8 ignore next -- guard for boolean/degenerate schemas in recursive traversal */
     if (!node || typeof node !== 'object') return node;
 
-    const childKeys = ['properties', 'items', 'additionalProperties', 'allOf', 'anyOf', 'oneOf', 'not'] as const;
+    const record = node as Record<string, unknown>;
+    const childKeys = [...this.TRUNCATE_MAP_KEYS, ...this.TRUNCATE_SCHEMA_KEYS, ...this.TRUNCATE_LIST_KEYS];
     const hasChildren = childKeys.some((key) => {
-      const value = (node as Record<string, unknown>)[key];
+      const value = record[key];
       return value !== null && typeof value === 'object';
     });
 
     if (!hasChildren) return node;
 
     const copy = { ...node } as JsonSchema;
+    const copyRecord = copy as Record<string, unknown>;
 
     if (depth >= maxDepth) {
       for (const key of childKeys) {
-        const value = (copy as Record<string, unknown>)[key];
+        const value = copyRecord[key];
         if (value !== null && typeof value === 'object') {
-          delete (copy as Record<string, unknown>)[key];
+          delete copyRecord[key];
         }
       }
       // `required` refers to stripped properties; drop it alongside them
-      delete (copy as Record<string, unknown>)['required'];
+      delete copyRecord['required'];
       const note = '[Truncated: nested schema exceeds maxSchemaDepth]';
       copy.description = copy.description ? `${copy.description} ${note}` : note;
       return copy;
     }
 
-    if (copy.properties && typeof copy.properties === 'object') {
-      const props: Record<string, JsonSchema> = {};
-      for (const [key, value] of Object.entries(copy.properties)) {
-        props[key] = this.truncateDepthRecursive(value as JsonSchema, depth + 1, maxDepth);
-      }
-      copy.properties = props;
-    }
-
-    if (copy.items && typeof copy.items === 'object') {
-      if (Array.isArray(copy.items)) {
-        copy.items = copy.items.map((item) =>
-          this.truncateDepthRecursive(item as JsonSchema, depth + 1, maxDepth),
-        ) as JsonSchema['items'];
-      } else {
-        copy.items = this.truncateDepthRecursive(copy.items as JsonSchema, depth + 1, maxDepth);
+    for (const key of this.TRUNCATE_MAP_KEYS) {
+      const value = copyRecord[key];
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        const mapped: Record<string, JsonSchema> = {};
+        for (const [name, sub] of Object.entries(value as Record<string, JsonSchema>)) {
+          mapped[name] = this.truncateDepthRecursive(sub, depth + 1, maxDepth);
+        }
+        copyRecord[key] = mapped;
       }
     }
 
-    if (copy.additionalProperties && typeof copy.additionalProperties === 'object') {
-      copy.additionalProperties = this.truncateDepthRecursive(copy.additionalProperties as JsonSchema, depth + 1, maxDepth);
-    }
-
-    for (const key of ['allOf', 'anyOf', 'oneOf'] as const) {
-      const members = copy[key];
-      if (Array.isArray(members)) {
-        copy[key] = members.map((member) =>
-          this.truncateDepthRecursive(member as JsonSchema, depth + 1, maxDepth),
-        ) as JsonSchema[];
+    for (const key of this.TRUNCATE_SCHEMA_KEYS) {
+      const value = copyRecord[key];
+      if (value !== null && typeof value === 'object') {
+        // `items` may be a tuple array (pre-2020-12 style)
+        copyRecord[key] = Array.isArray(value)
+          ? value.map((item) => this.truncateDepthRecursive(item as JsonSchema, depth + 1, maxDepth))
+          : this.truncateDepthRecursive(value as JsonSchema, depth + 1, maxDepth);
       }
     }
 
-    if (copy.not && typeof copy.not === 'object') {
-      copy.not = this.truncateDepthRecursive(copy.not as JsonSchema, depth + 1, maxDepth);
+    for (const key of this.TRUNCATE_LIST_KEYS) {
+      const value = copyRecord[key];
+      if (Array.isArray(value)) {
+        copyRecord[key] = value.map((member) => this.truncateDepthRecursive(member as JsonSchema, depth + 1, maxDepth));
+      }
     }
 
     return copy;

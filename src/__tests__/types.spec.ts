@@ -366,12 +366,32 @@ describe('toJsonSchema', () => {
       expect((result as any).nullable).toBeUndefined();
     });
 
-    it('should drop nullable:true when no type is present', () => {
+    it('should wrap type-less nullable schemas in an anyOf with null', () => {
       const schema = { nullable: true, description: 'anything' } as any;
-      const result = toJsonSchema(schema);
+      const result = toJsonSchema(schema) as any;
 
-      expect(result.type).toBeUndefined();
       expect((result as any).nullable).toBeUndefined();
+      expect(result.anyOf).toHaveLength(2);
+      expect(result.anyOf[0].description).toBe('anything');
+      expect(result.anyOf[1]).toEqual({ type: 'null' });
+    });
+
+    it('should preserve nullability of compositions via anyOf wrapping', () => {
+      const schema = { oneOf: [{ type: 'string' }, { type: 'integer' }], nullable: true } as any;
+      const result = toJsonSchema(schema) as any;
+
+      expect(result.anyOf).toHaveLength(2);
+      expect(result.anyOf[0].oneOf).toHaveLength(2);
+      expect(result.anyOf[1]).toEqual({ type: 'null' });
+      expect(result.nullable).toBeUndefined();
+    });
+
+    it('should preserve nullability of enum-only schemas via anyOf wrapping', () => {
+      const schema = { enum: ['a', 'b'], nullable: true } as any;
+      const result = toJsonSchema(schema) as any;
+
+      expect(result.anyOf[0].enum).toEqual(['a', 'b']);
+      expect(result.anyOf[1]).toEqual({ type: 'null' });
     });
 
     it('should append null to an existing type array', () => {

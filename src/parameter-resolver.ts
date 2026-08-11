@@ -212,12 +212,22 @@ export class ParameterResolver {
 
         if (typeof propSchema === 'object') {
           const propEncoding = encoding?.[propName];
+          // Distribute media-type-level whole-body examples onto the
+          // flattened properties: { example: { name: 'Ada' } } -> name: ['Ada']
+          const propExamples = mediaExamples
+            ?.map((ex) =>
+              ex !== null && typeof ex === 'object' && !Array.isArray(ex)
+                ? (ex as Record<string, unknown>)[propName]
+                : undefined,
+            )
+            .filter((value) => value !== undefined);
           const info: ParameterInfo = {
             name: fullName,
             location: 'body',
             required: isRequired,
             schema: propSchema as JsonSchema,
             description: (propSchema as any).description,
+            examples: propExamples && propExamples.length > 0 ? propExamples : undefined,
             serialization: {
               contentType,
               ...(propEncoding && { encoding: { [propName]: propEncoding } }),
@@ -445,30 +455,30 @@ interface FlattenedObjectBody {
 }
 
 /**
- * Flatten an object body schema — including `allOf` compositions — into a
- * single property map. Returns undefined when the body cannot be represented
- * as named properties: root `oneOf`/`anyOf` unions (variant fields would
- * collide and blur which variant is meant), non-object schemas (arrays,
- * primitives, binary), and free-form objects without properties.
+ * Recursively collect the property map and required set of an object schema,
+ * merging `allOf` members (in order). Returns 'union' when the schema — or ANY
+ * allOf member, at any depth — carries a root `oneOf`/`anyOf`: such bodies
+ * cannot be flattened into named properties without deleting the union
+ * constraint, so the caller must keep the body whole.
  */
-function flattenObjectBody(schema: JsonSchema): FlattenedObjectBody | undefined {
+function collectObjectMembers(schema: JsonSchema): { properties: Record<string, JsonSchema>; required: Set<string> } | 'union' {
   /* c8 ignore next -- defensive: toJsonSchema always yields objects, so non-object nodes cannot reach here */
-  if (!schema || typeof schema !== 'object') return undefined;
+  if (!schema || typeof schema !== 'object') return { properties: {}, required: new Set() };
 
-  // Root unions stay whole: flattening variants would mix their fields
-  if (Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf)) return undefined;
+  if (Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf)) return 'union';
 
   const properties: Record<string, JsonSchema> = {};
   const required = new Set<string>();
 
-  // allOf members merge first (in order), direct properties win last
+  // allOf members merge first (in order) — a member with only a `required`
+  // list (the common base-$ref + required-tightening pattern) still
+  // contributes its required fields. Direct properties/required win last.
   if (Array.isArray(schema.allOf)) {
     for (const member of schema.allOf) {
-      const flattenedMember = flattenObjectBody(member as JsonSchema);
-      if (flattenedMember) {
-        Object.assign(properties, flattenedMember.properties);
-        flattenedMember.required.forEach((field) => required.add(field));
-      }
+      const collected = collectObjectMembers(member as JsonSchema);
+      if (collected === 'union') return 'union';
+      Object.assign(properties, collected.properties);
+      collected.required.forEach((field) => required.add(field));
     }
   }
 
@@ -479,20 +489,38 @@ function flattenObjectBody(schema: JsonSchema): FlattenedObjectBody | undefined 
     schema.required.forEach((field) => required.add(field));
   }
 
-  return Object.keys(properties).length > 0 ? { properties, required } : undefined;
+  return { properties, required };
+}
+
+/**
+ * Flatten an object body schema — including `allOf` compositions — into a
+ * single property map. Returns undefined when the body cannot be represented
+ * as named properties: `oneOf`/`anyOf` unions at the root OR inside any allOf
+ * member (flattening would delete the union constraint), non-object schemas
+ * (arrays, primitives, binary), and free-form objects without properties.
+ */
+function flattenObjectBody(schema: JsonSchema): FlattenedObjectBody | undefined {
+  const collected = collectObjectMembers(schema);
+  if (collected === 'union') return undefined;
+  return Object.keys(collected.properties).length > 0 ? collected : undefined;
 }
 
 /**
  * Does the schema declare raw binary content (a file part / binary body)?
- * OpenAPI 3.0 uses `format: binary`; 3.1 leans on `contentMediaType` without
- * `contentEncoding` for raw binary.
+ * OpenAPI 3.0 uses `format: binary`; 3.1 omits `type` and uses
+ * `contentMediaType` alone for raw binary — a schema with `type: 'string'`
+ * and `contentMediaType` is an embedded *string* payload, not a file part.
  */
 function isBinarySchema(schema: JsonSchema): boolean {
   /* c8 ignore next -- defensive: callers guard with `typeof === 'object'` before invoking */
   if (!schema || typeof schema !== 'object') return false;
   const record = schema as Record<string, unknown>;
   if (record['format'] === 'binary') return true;
-  return typeof record['contentMediaType'] === 'string' && record['contentEncoding'] === undefined;
+  return (
+    typeof record['contentMediaType'] === 'string' &&
+    record['contentEncoding'] === undefined &&
+    record['type'] === undefined
+  );
 }
 
 /**

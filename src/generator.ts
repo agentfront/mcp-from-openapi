@@ -438,7 +438,8 @@ export class OpenAPIToolGenerator {
     // unit (locale-independent), methods in the fixed canonical order below.
     // Stable output across spec re-serializations keeps clients' prompt
     // caches effective.
-    const sortedPaths = Object.entries(document.paths).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    // (object keys are unique, so the comparator never sees equal paths)
+    const sortedPaths = Object.entries(document.paths).sort(([a], [b]) => (a < b ? -1 : 1));
 
     for (const [pathStr, pathItem] of sortedPaths) {
       if (!pathItem || '$ref' in pathItem) continue;
@@ -461,11 +462,16 @@ export class OpenAPIToolGenerator {
           // per operation, so the suffixed name is deterministic across runs.
           if (usedNames.has(tool.name)) {
             const maxLength = options.maxToolNameLength ?? DEFAULT_MAX_TOOL_NAME_LENGTH;
-            const deduped = normalizeToolName(
-              `${tool.name}_${fnv1aHex(`${method} ${pathStr}`)}`,
-              maxLength,
-              `${method} ${pathStr}`,
-            );
+            // Recheck after renaming: the suffixed name can itself be taken
+            // (e.g. an operationId that mimics a suffixed name, or truncated
+            // hash-only names under tiny caps). Extending the seed reseeds
+            // the hash deterministically until a free name is found.
+            let seed = `${method} ${pathStr}`;
+            let deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
+            while (usedNames.has(deduped)) {
+              seed += '#';
+              deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
+            }
             tool = { ...tool, name: deduped };
           }
           usedNames.add(tool.name);
@@ -566,8 +572,10 @@ export class OpenAPIToolGenerator {
     let resolvedInputSchema = hasFormatResolvers ? resolveSchemaFormats(inputSchema, formatResolvers) : inputSchema;
     let resolvedOutputSchema = hasFormatResolvers && outputSchema ? resolveSchemaFormats(outputSchema, formatResolvers) : outputSchema;
 
-    // Bound schema nesting depth (applied last so the final schemas are bounded)
-    const maxSchemaDepth = options.maxSchemaDepth ?? 10;
+    // Bound schema nesting depth (applied last so the final schemas are
+    // bounded). Floor of 1: depth 0 would strip the ROOT inputSchema's
+    // properties while the mapper still lists every parameter.
+    const maxSchemaDepth = Math.max(1, options.maxSchemaDepth ?? 10);
     resolvedInputSchema = SchemaBuilder.truncateDepth(resolvedInputSchema, maxSchemaDepth);
     if (resolvedOutputSchema) {
       resolvedOutputSchema = SchemaBuilder.truncateDepth(resolvedOutputSchema, maxSchemaDepth);
