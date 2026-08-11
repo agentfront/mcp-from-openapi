@@ -3465,3 +3465,26 @@ describe('maxSchemaDepth floor', () => {
     expect((tool.inputSchema as any).required).toEqual(['id']);
   });
 });
+
+describe('hasExternalRefs cycle guard', () => {
+  // The public API JSON-round-trips documents before this walk (cycles throw,
+  // shared refs get duplicated), so the guard is exercised directly: it is the
+  // property that keeps the walk terminating on shared/cyclic object graphs.
+  const hasExternalRefs = (node: unknown) => (OpenAPIToolGenerator as any).hasExternalRefs(node);
+
+  it('terminates on cyclic documents', () => {
+    const node: any = { a: { type: 'string' } };
+    node.self = node;
+
+    expect(hasExternalRefs(node)).toBe(false);
+  });
+
+  it('visits shared nodes once and still detects external refs elsewhere', () => {
+    const shared: any = { $ref: '#/components/schemas/X' };
+    expect(hasExternalRefs({ one: shared, two: shared })).toBe(false);
+
+    const cyclic: any = { ref: { $ref: 'https://example.com/schema.json' } };
+    cyclic.self = cyclic;
+    expect(hasExternalRefs(cyclic)).toBe(true);
+  });
+});

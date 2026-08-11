@@ -42,4 +42,15 @@ module.exports = {
     '!src/**/*.test.ts',
     '!src/**/__tests__/**',
   ],
+  // Hard gate: `yarn test:coverage` (run in CI on every push) fails if any
+  // metric regresses. Defensive branches unreachable through the public API
+  // are annotated with `/* c8 ignore */` rather than lowering these numbers.
+  coverageThreshold: {
+    global: {
+      statements: 100,
+      branches: 100,
+      functions: 100,
+      lines: 100,
+    },
+  },
 };
