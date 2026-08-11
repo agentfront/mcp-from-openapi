@@ -23,6 +23,10 @@ export type { ClientTarget } from './client-targets';
 export { buildHttpRequest } from './request-builder';
 export type { BuildHttpRequestOptions, BuiltHttpRequest } from './request-builder';
 
+// MCP SDK integration
+export { toSdkTool } from './sdk';
+export type { SdkToolConfig, SdkSchemaWrapper } from './sdk';
+
 // Error exports
 export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError, RequestBuildError } from './errors';
 
