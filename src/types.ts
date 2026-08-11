@@ -355,6 +355,12 @@ export interface ParameterMapper {
   explode?: boolean;
 
   /**
+   * Whether RFC 3986 reserved characters may appear unencoded in the value
+   * (query parameters only, OpenAPI `allowReserved`)
+   */
+  allowReserved?: boolean;
+
+  /**
    * Custom serialization info
    */
   serialization?: SerializationInfo;

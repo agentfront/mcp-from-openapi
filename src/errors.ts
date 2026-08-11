@@ -72,6 +72,16 @@ export class GenerationError extends OpenAPIToolError {
 }
 
 /**
+ * Error thrown when an HTTP request cannot be built from a tool's mapper
+ * (missing required parameters, unserializable values, injection attempts)
+ */
+export class RequestBuildError extends OpenAPIToolError {
+  constructor(message: string, context?: Record<string, any>) {
+    super(message, context);
+  }
+}
+
+/**
  * Error thrown when a schema is invalid
  */
 export class SchemaError extends OpenAPIToolError {

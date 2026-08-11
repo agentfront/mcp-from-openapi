@@ -133,6 +133,7 @@ export class ParameterResolver {
           required: param.required,
           style: param.style,
           explode: param.explode,
+          allowReserved: param.allowReserved,
           serialization: param.serialization,
           ...(param.wholeBody && { wholeBody: true }),
         });
@@ -153,6 +154,7 @@ export class ParameterResolver {
             required: param.required,
             style: param.style,
             explode: param.explode,
+            allowReserved: param.allowReserved,
             serialization: param.serialization,
             ...(param.wholeBody && { wholeBody: true }),
           });

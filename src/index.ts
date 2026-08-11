@@ -9,8 +9,12 @@ export { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolve
 export { inferAnnotationsFromMethod, extractExtensionOverrides } from './annotations';
 export type { ExtensionToolOverrides } from './annotations';
 
+// Request building
+export { buildHttpRequest } from './request-builder';
+export type { BuildHttpRequestOptions, BuiltHttpRequest } from './request-builder';
+
 // Error exports
-export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError } from './errors';
+export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError, RequestBuildError } from './errors';
 
 // SSRF protection (shared by spec-URL loading and $ref resolution; usable by
 // consumers that fetch spec URLs themselves, e.g. pollers)
