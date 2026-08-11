@@ -11,39 +11,39 @@ Passed to factory methods (`fromURL`, `fromFile`, `fromYAML`, `fromJSON`).
 ```typescript
 const generator = await OpenAPIToolGenerator.fromURL(url, {
   dereference: true,
-  baseUrl: 'https://staging.api.example.com',
-  headers: { Authorization: 'Bearer token' },
+  baseUrl: "https://staging.api.example.com",
+  headers: { Authorization: "Bearer token" },
   timeout: 15000,
   validate: true,
   followRedirects: true,
   refResolution: {
-    allowedProtocols: ['https'],
-    blockedHosts: ['evil.com'],
+    allowedProtocols: ["https"],
+    blockedHosts: ["evil.com"],
   },
 });
 ```
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `dereference` | `boolean` | `true` | Resolve all `$ref` pointers in the spec |
-| `baseUrl` | `string` | `''` | Override server URLs from the spec |
-| `headers` | `Record<string, string>` | `{}` | Custom HTTP headers for URL loading |
-| `timeout` | `number` | `30000` | HTTP request timeout in milliseconds |
-| `validate` | `boolean` | `true` | Validate the OpenAPI document on load |
-| `followRedirects` | `boolean` | `true` | Follow HTTP redirects when loading from URL |
-| `refResolution` | `RefResolutionOptions` | `{}` | Security settings for `$ref` resolution |
-| `secureDefaults` | `boolean` | `false` | One-flag strict posture for untrusted specs: redirects off, external `$ref` resolution disabled. Explicit `followRedirects`/`refResolution` values still win |
+| Option            | Type                     | Default | Description                                                                                                                                                                                         |
+| ----------------- | ------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dereference`     | `boolean`                | `true`  | Resolve all `$ref` pointers in the spec                                                                                                                                                             |
+| `baseUrl`         | `string`                 | `''`    | Override server URLs from the spec                                                                                                                                                                  |
+| `headers`         | `Record<string, string>` | `{}`    | Custom HTTP headers for URL loading                                                                                                                                                                 |
+| `timeout`         | `number`                 | `30000` | HTTP request timeout in milliseconds                                                                                                                                                                |
+| `validate`        | `boolean`                | `true`  | Validate the OpenAPI document on load                                                                                                                                                               |
+| `followRedirects` | `boolean`                | `true`  | Follow HTTP redirects when loading from URL                                                                                                                                                         |
+| `refResolution`   | `RefResolutionOptions`   | `{}`    | Security settings for `$ref` resolution                                                                                                                                                             |
+| `secureDefaults`  | `boolean`                | `false` | One-flag strict posture for untrusted specs: redirects off, external `$ref` resolution disabled. Explicit values win **per key** — tightening one `refResolution` knob keeps the rest of the preset |
 
 ### RefResolutionOptions
 
 Controls how external `$ref` pointers are resolved during dereferencing. See [SSRF Prevention](./ssrf-prevention.md) for details.
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
+| Option             | Type       | Default             | Description                         |
+| ------------------ | ---------- | ------------------- | ----------------------------------- |
 | `allowedProtocols` | `string[]` | `['http', 'https']` | Protocols allowed for external refs |
-| `allowedHosts` | `string[]` | `[]` (all allowed) | Whitelist specific hostnames |
-| `blockedHosts` | `string[]` | `[]` | Additional hostnames to block |
-| `allowInternalIPs` | `boolean` | `false` | Disable built-in SSRF protection |
+| `allowedHosts`     | `string[]` | `[]` (all allowed)  | Whitelist specific hostnames        |
+| `blockedHosts`     | `string[]` | `[]`                | Additional hostnames to block       |
+| `allowInternalIPs` | `boolean`  | `false`             | Disable built-in SSRF protection    |
 
 ---
 
@@ -53,8 +53,8 @@ Passed to `generateTools()` and `generateTool()`.
 
 ```typescript
 const tools = await generator.generateTools({
-  includeOperations: ['getUser', 'createUser'],
-  excludeOperations: ['deleteUser'],
+  includeOperations: ["getUser", "createUser"],
+  excludeOperations: ["deleteUser"],
   includeDeprecated: false,
   includeAllResponses: true,
   preferredStatusCodes: [200, 201],
@@ -64,25 +64,25 @@ const tools = await generator.generateTools({
 });
 ```
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `includeOperations` | `string[]` | - | Only include these operation IDs |
-| `excludeOperations` | `string[]` | - | Exclude these operation IDs |
-| `filterFn` | `(op: OperationWithContext) => boolean` | - | Custom filter function |
-| `namingStrategy` | `NamingStrategy` | - | Custom naming for conflicts and tool names |
-| `preferredStatusCodes` | `number[]` | `[200, 201, 204, 202, 203, 206]` | Preferred response codes (in order) |
-| `includeDeprecated` | `boolean` | `false` | Include deprecated operations |
-| `includeAllResponses` | `boolean` | `true` | Include all status codes as oneOf union |
-| `maxSchemaDepth` | `number` | `10` | Maximum schema nesting depth; deeper structures are truncated with a note |
-| `includeExamples` | `boolean` | `false` | Include parameter/media-type example values in schemas |
-| `includeSecurityInInput` | `boolean` | `false` | Add security params to inputSchema |
-| `inferAnnotations` | `boolean` | `true` | Infer MCP tool annotations from HTTP method semantics |
-| `maxToolNameLength` | `number` | `64` | Tool name length cap (clamped to MCP's 128 max); longer names get a hash suffix |
-| `includeTags` / `excludeTags` | `string[]` | - | Filter operations by OpenAPI tags |
-| `includeMethods` / `excludeMethods` | `HTTPMethod[]` | - | Filter operations by HTTP method |
-| `includePaths` / `excludePaths` | `string[]` | - | Filter by path globs (`*` per segment, `**` across, `?` one char) |
-| `readOnlyOnly` | `boolean` | `false` | Safety switch: only operations whose effective annotations are read-only |
-| `target` | `'claude' \| 'openai' \| 'gemini' \| 'strict'` | - | Per-client schema dialect transforms — see [Client Targets](./client-targets.md) |
+| Option                              | Type                                           | Default                          | Description                                                                      |
+| ----------------------------------- | ---------------------------------------------- | -------------------------------- | -------------------------------------------------------------------------------- |
+| `includeOperations`                 | `string[]`                                     | -                                | Only include these operation IDs                                                 |
+| `excludeOperations`                 | `string[]`                                     | -                                | Exclude these operation IDs                                                      |
+| `filterFn`                          | `(op: OperationWithContext) => boolean`        | -                                | Custom filter function                                                           |
+| `namingStrategy`                    | `NamingStrategy`                               | -                                | Custom naming for conflicts and tool names                                       |
+| `preferredStatusCodes`              | `number[]`                                     | `[200, 201, 204, 202, 203, 206]` | Preferred response codes (in order)                                              |
+| `includeDeprecated`                 | `boolean`                                      | `false`                          | Include deprecated operations                                                    |
+| `includeAllResponses`               | `boolean`                                      | `true`                           | Include all status codes as oneOf union                                          |
+| `maxSchemaDepth`                    | `number`                                       | `10`                             | Maximum schema nesting depth; deeper structures are truncated with a note        |
+| `includeExamples`                   | `boolean`                                      | `false`                          | Include parameter/media-type example values in schemas                           |
+| `includeSecurityInInput`            | `boolean \| string[]`                          | `false`                          | Add security params to inputSchema; an array selects specific schemes            |
+| `inferAnnotations`                  | `boolean`                                      | `true`                           | Infer MCP tool annotations from HTTP method semantics                            |
+| `maxToolNameLength`                 | `number`                                       | `64`                             | Tool name length cap (clamped to MCP's 128 max); longer names get a hash suffix  |
+| `includeTags` / `excludeTags`       | `string[]`                                     | -                                | Filter operations by OpenAPI tags                                                |
+| `includeMethods` / `excludeMethods` | `HTTPMethod[]`                                 | -                                | Filter operations by HTTP method                                                 |
+| `includePaths` / `excludePaths`     | `string[]`                                     | -                                | Filter by path globs (`*` per segment, `**` across, `?` one char)                |
+| `readOnlyOnly`                      | `boolean`                                      | `false`                          | Safety switch: only operations whose effective annotations are read-only         |
+| `target`                            | `'claude' \| 'openai' \| 'gemini' \| 'strict'` | -                                | Per-client schema dialect transforms — see [Client Targets](./client-targets.md) |
 
 ### Filtering Operations
 
@@ -90,9 +90,9 @@ Filter which operations become tools by tag, method, path glob, operation ID, an
 
 ```typescript
 const tools = await generator.generateTools({
-  includeTags: ['public'],
-  excludeMethods: ['delete'],
-  excludePaths: ['/admin/**', '/internal/*'],
+  includeTags: ["public"],
+  excludeMethods: ["delete"],
+  excludePaths: ["/admin/**", "/internal/*"],
   readOnlyOnly: true, // only read-only operations survive
 });
 ```
@@ -106,12 +106,12 @@ The original mechanisms still apply:
 ```typescript
 // Include only specific operations
 const tools = await generator.generateTools({
-  includeOperations: ['getUser', 'createUser'],
+  includeOperations: ["getUser", "createUser"],
 });
 
 // Exclude specific operations
 const tools = await generator.generateTools({
-  excludeOperations: ['deleteUser', 'adminReset'],
+  excludeOperations: ["deleteUser", "adminReset"],
 });
 ```
 
@@ -122,17 +122,17 @@ The `filterFn` receives an `OperationWithContext` -- the OpenAPI operation objec
 ```typescript
 // Only GET operations
 const tools = await generator.generateTools({
-  filterFn: (op) => op.method === 'get',
+  filterFn: (op) => op.method === "get",
 });
 
 // Only operations tagged "public"
 const tools = await generator.generateTools({
-  filterFn: (op) => op.tags?.includes('public') ?? false,
+  filterFn: (op) => op.tags?.includes("public") ?? false,
 });
 
 // Combine: GET operations on /users paths
 const tools = await generator.generateTools({
-  filterFn: (op) => op.method === 'get' && op.path.startsWith('/users'),
+  filterFn: (op) => op.method === "get" && op.path.startsWith("/users"),
 });
 ```
 
@@ -150,11 +150,11 @@ Note: **schema-level** `example` keywords are always normalized to `examples` ar
 
 When `true` (default), each tool gets MCP [tool annotations](./annotations.md) derived from HTTP method semantics (RFC 9110 safety/idempotency):
 
-| Method | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
-|--------|---------------|-------------------|------------------|-----------------|
-| GET, HEAD, OPTIONS, TRACE | `true` | `false` | `true` | `false` |
-| PUT, DELETE | `false` | `true` | `true` | `false` |
-| POST, PATCH | `false` | `true` | `false` | `false` |
+| Method                    | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+| ------------------------- | -------------- | ----------------- | ---------------- | --------------- |
+| GET, HEAD, OPTIONS, TRACE | `true`         | `false`           | `true`           | `false`         |
+| PUT, DELETE               | `false`        | `true`            | `true`           | `false`         |
+| POST, PATCH               | `false`        | `true`            | `false`          | `false`         |
 
 Extension overrides (`x-speakeasy-mcp`, `x-mcp`, `x-frontmcp`) are merged on top and still apply when inference is disabled. See [Annotations & Extensions](./annotations.md).
 
@@ -167,6 +167,8 @@ Tool names are always normalized to MCP's rules (`[A-Za-z0-9_.-]`, 1-128 chars) 
 By default (`false`), security parameters appear **only** in the mapper with a `security` field. Frameworks resolve auth from environment variables, context, or vaults -- not from user input.
 
 When set to `true`, security parameters are also added to the `inputSchema` as required string properties, allowing callers to pass auth values directly as tool inputs.
+
+When set to a **string array**, only the named schemes appear in the `inputSchema` (the rest stay mapper-only): `includeSecurityInInput: ['ApiKeyAuth']`. All schemes are always present in the mapper regardless.
 
 ### includeAllResponses
 
@@ -187,7 +189,7 @@ const tools = await generator.generateTools({
       return `${location.toUpperCase()}_${paramName}`;
     },
     toolNameGenerator: (path, method, operationId) => {
-      return operationId ?? `${method}_${path.replace(/\//g, '_')}`;
+      return operationId ?? `${method}_${path.replace(/\//g, "_")}`;
     },
   },
 });
