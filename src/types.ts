@@ -186,6 +186,37 @@ export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema
 }
 
 /**
+ * MCP tool annotations — behavior hints for clients (MCP spec 2025-03-26).
+ * Hints are advisory: clients must not treat them as security guarantees.
+ */
+export interface ToolAnnotations {
+  /**
+   * Legacy display-name slot inside annotations. Prefer the tool-level `title`.
+   */
+  title?: string;
+
+  /**
+   * Tool only reads data, never modifies state.
+   */
+  readOnlyHint?: boolean;
+
+  /**
+   * Tool may perform destructive updates (delete, overwrite).
+   */
+  destructiveHint?: boolean;
+
+  /**
+   * Calling repeatedly with the same arguments has no additional effect.
+   */
+  idempotentHint?: boolean;
+
+  /**
+   * Tool interacts with an open world of external entities.
+   */
+  openWorldHint?: boolean;
+}
+
+/**
  * Main MCP Tool definition generated from OpenAPI
  */
 export interface McpOpenAPITool {
@@ -195,9 +226,23 @@ export interface McpOpenAPITool {
   name: string;
 
   /**
+   * Human-readable display name (MCP `Tool.title`, spec 2025-06-18).
+   * From extension overrides or the operation summary.
+   */
+  title?: string;
+
+  /**
    * Tool description (from operation summary/description)
    */
   description: string;
+
+  /**
+   * MCP tool annotations. Inferred from HTTP method semantics by default
+   * (see `GenerateOptions.inferAnnotations`) and overridable via the
+   * `x-speakeasy-mcp` / `x-mcp` / `x-frontmcp` extensions (in ascending
+   * precedence).
+   */
+  annotations?: ToolAnnotations;
 
   /**
    * Combined input schema including all parameters
@@ -680,6 +725,17 @@ export interface GenerateOptions {
    * @default false
    */
   includeSecurityInInput?: boolean;
+
+  /**
+   * Infer MCP tool annotations from HTTP method semantics:
+   * GET/HEAD/OPTIONS/TRACE -> read-only + idempotent; PUT/DELETE ->
+   * destructive + idempotent; POST/PATCH -> destructive, not idempotent.
+   * `openWorldHint` defaults to false (a known API backend is a closed world).
+   * Extension overrides (`x-speakeasy-mcp`, `x-mcp`, `x-frontmcp`) are applied
+   * on top of the inferred values regardless of this flag.
+   * @default true
+   */
+  inferAnnotations?: boolean;
 
   /**
    * Maximum length for generated tool names. Names longer than this are

@@ -25,6 +25,7 @@ import { isReferenceObject } from './types';
 import { ParameterResolver } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
 import { SchemaBuilder } from './schema-builder';
+import { extractExtensionOverrides, inferAnnotationsFromMethod } from './annotations';
 import { Validator } from './validator';
 import { LoadError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
@@ -524,11 +525,28 @@ export class OpenAPIToolGenerator {
     const responseBuilder = new ResponseBuilder(options);
     const outputSchema = responseBuilder.build(operation.responses);
 
-    // Generate tool name
-    const name = this.generateToolName(pathStr, method as HTTPMethod, operation.operationId, options);
+    // Extension overrides (x-speakeasy-mcp < x-mcp < x-frontmcp)
+    const overrides = extractExtensionOverrides(operation);
+
+    // Generate tool name (an extension name override takes the operationId's
+    // place, including as the value passed to a custom toolNameGenerator)
+    const name = this.generateToolName(pathStr, method as HTTPMethod, overrides.name ?? operation.operationId, options);
 
     // Generate description
-    const description = operation.summary || operation.description || `${method.toUpperCase()} ${pathStr}`;
+    const description =
+      overrides.description ?? (operation.summary || operation.description || `${method.toUpperCase()} ${pathStr}`);
+
+    // Display title (MCP Tool.title): extension override, else operation summary
+    const title = overrides.title ?? operation.summary;
+
+    // Annotations: HTTP-method inference (opt-out) + extension overrides on top.
+    // Lowercase first — the public generateTool(path, method) accepts any case.
+    const inferred =
+      options.inferAnnotations !== false
+        ? inferAnnotationsFromMethod(method.toLowerCase() as HTTPMethod)
+        : undefined;
+    const annotations =
+      inferred || overrides.annotations ? { ...inferred, ...overrides.annotations } : undefined;
 
     // Extract metadata
     const metadata = this.extractMetadata(pathStr, method as HTTPMethod, operation, document, outputSchema);
@@ -551,7 +569,9 @@ export class OpenAPIToolGenerator {
 
     return {
       name,
+      ...(title !== undefined && { title }),
       description,
+      ...(annotations && { annotations }),
       inputSchema: resolvedInputSchema,
       outputSchema: resolvedOutputSchema,
       mapper,
@@ -568,6 +588,11 @@ export class OpenAPIToolGenerator {
     method: string,
     options: GenerateOptions,
   ): boolean {
+    // Explicit extension exclusion (x-mcp: false, x-speakeasy-mcp: disabled)
+    if (extractExtensionOverrides(operation).disabled) {
+      return false;
+    }
+
     // Check deprecated
     if (operation.deprecated && !options.includeDeprecated) {
       return false;

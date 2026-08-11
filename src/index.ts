@@ -6,6 +6,8 @@ export { ResponseBuilder } from './response-builder';
 export { Validator } from './validator';
 export { SecurityResolver, createSecurityContext } from './security-resolver';
 export { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
+export { inferAnnotationsFromMethod, extractExtensionOverrides } from './annotations';
+export type { ExtensionToolOverrides } from './annotations';
 
 // Error exports
 export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError } from './errors';
@@ -28,6 +30,7 @@ export type { ResolvedSsrfOptions, ResolvedAddress, SsrfHostLookup, SafeFetchOpt
 export type {
   // Main MCP types
   McpOpenAPITool,
+  ToolAnnotations,
   ParameterMapper,
   ToolMetadata,
   FrontMcpExtensionData,

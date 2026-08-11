@@ -2844,3 +2844,153 @@ describe('Tool name normalization (MCP name rules)', () => {
     expect(new Set(tools.map((t) => t.name)).size).toBe(2);
   });
 });
+
+describe('Tool title and annotations', () => {
+  const annotatedSpec: any = {
+    openapi: '3.0.0',
+    info: { title: 'Annotated API', version: '1.0.0' },
+    paths: {
+      '/items': {
+        get: {
+          operationId: 'listItems',
+          summary: 'List all items',
+          responses: { '200': { description: 'OK' } },
+        },
+        post: {
+          operationId: 'createItem',
+          responses: { '201': { description: 'Created' } },
+        },
+        delete: {
+          operationId: 'clearItems',
+          responses: { '204': { description: 'Cleared' } },
+        },
+      },
+      '/hidden': {
+        get: {
+          operationId: 'hiddenOp',
+          'x-mcp': false,
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+      '/legacy-hidden': {
+        get: {
+          operationId: 'legacyHiddenOp',
+          'x-speakeasy-mcp': { disabled: true },
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+      '/customized': {
+        post: {
+          operationId: 'rawName',
+          summary: 'Original summary',
+          'x-mcp': {
+            name: 'custom name!',
+            title: 'Custom Title',
+            description: 'Agent-facing description',
+            annotations: { destructiveHint: false, idempotentHint: true },
+          },
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+    },
+  };
+
+  it('should infer annotations from the HTTP method by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+
+    const get = await generator.generateTool('/items', 'get');
+    expect(get.annotations).toEqual({
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+
+    const post = await generator.generateTool('/items', 'post');
+    expect(post.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    });
+
+    const del = await generator.generateTool('/items', 'delete');
+    expect(del.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+  });
+
+  it('should set title from the operation summary', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+    const tool = await generator.generateTool('/items', 'get');
+
+    expect(tool.title).toBe('List all items');
+  });
+
+  it('should omit title when there is no summary or override', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+    const tool = await generator.generateTool('/items', 'post');
+
+    expect(tool.title).toBeUndefined();
+    expect('title' in tool).toBe(false);
+  });
+
+  it('should not infer annotations when inferAnnotations is false', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+    const tool = await generator.generateTool('/items', 'get', { inferAnnotations: false });
+
+    expect(tool.annotations).toBeUndefined();
+  });
+
+  it('should keep extension annotations when inference is disabled', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+    const tool = await generator.generateTool('/customized', 'post', { inferAnnotations: false });
+
+    expect(tool.annotations).toEqual({ destructiveHint: false, idempotentHint: true });
+  });
+
+  it('should apply extension overrides for name, title, description, and annotations', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+    const tool = await generator.generateTool('/customized', 'post');
+
+    expect(tool.name).toBe('custom_name'); // override still normalized
+    expect(tool.title).toBe('Custom Title');
+    expect(tool.description).toBe('Agent-facing description');
+    // inferred POST annotations with extension overrides merged on top
+    expect(tool.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+  });
+
+  it('should exclude x-mcp:false and x-speakeasy-mcp disabled operations from generateTools', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+    const tools = await generator.generateTools();
+    const names = tools.map((t) => t.name);
+
+    expect(names).not.toContain('hiddenOp');
+    expect(names).not.toContain('legacyHiddenOp');
+    expect(names).toContain('listItems');
+  });
+});
+
+describe('Tool annotations with uppercase method argument', () => {
+  it('should infer annotations when generateTool receives an uppercase method', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Case API', version: '1.0.0' },
+      paths: {
+        '/items': { get: { operationId: 'listItems', responses: { '200': { description: 'OK' } } } },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/items', 'GET');
+
+    expect(tool.annotations?.readOnlyHint).toBe(true);
+  });
+});
