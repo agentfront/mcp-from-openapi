@@ -63,6 +63,13 @@ export function isReferenceObject(obj: any): obj is ReferenceObject {
  * Convert OpenAPI schema to JsonSchema
  * Note: OpenAPI 3.0 uses a subset of JSON Schema Draft 4
  * OpenAPI 3.1 uses JSON Schema Draft 2020-12
+ *
+ * Normalizations applied for clean JSON Schema 2020-12 output (MCP's default
+ * dialect since spec revision 2025-11-25):
+ * - OpenAPI 3.0 `nullable: true` -> `type: [..., 'null']` union
+ * - OpenAPI 3.0 boolean `exclusiveMinimum`/`exclusiveMaximum` -> numeric form
+ * - OpenAPI `example` (singular) -> `examples` array (2020-12 keyword)
+ * - OpenAPI-only `xml` metadata is dropped
  */
 export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema {
   if (isReferenceObject(schema)) {
@@ -72,8 +79,35 @@ export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema
   // Handle OpenAPI 3.0 boolean exclusiveMaximum/exclusiveMinimum
   // by converting them to JSON Schema Draft 7 numeric format
   const { exclusiveMaximum, exclusiveMinimum, maximum, minimum, ...rest } = schema;
+  // OpenAPI-only keywords pulled out of the JSON Schema output. `nullable` and
+  // `example` carry validation/annotation meaning and are converted below; `xml`
+  // is serialization metadata with no JSON Schema equivalent.
+  const { nullable, example, ...cleanRest } = rest as Record<string, unknown> & {
+    nullable?: boolean;
+    example?: unknown;
+  };
 
-  const result: Record<string, unknown> = { ...rest };
+  const result: Record<string, unknown> = { ...cleanRest };
+  delete result['xml'];
+
+  // OpenAPI 3.0 `nullable: true` -> JSON Schema type union with 'null'.
+  // Without a `type` there is nothing to union; the keyword is dropped either way.
+  if (nullable === true && result['type'] !== undefined) {
+    const type = result['type'];
+    if (Array.isArray(type)) {
+      if (!type.includes('null')) {
+        result['type'] = [...type, 'null'];
+      }
+    } else if (type !== 'null') {
+      result['type'] = [type, 'null'];
+    }
+  }
+
+  // OpenAPI `example` (singular) -> JSON Schema 2020-12 `examples` array.
+  // When the schema already declares an `examples` array (OpenAPI 3.1), it wins.
+  if (example !== undefined && !Array.isArray(result['examples'])) {
+    result['examples'] = [example];
+  }
 
   // Handle exclusiveMaximum conversion
   if (typeof exclusiveMaximum === 'boolean') {
