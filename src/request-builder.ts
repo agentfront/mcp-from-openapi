@@ -129,12 +129,14 @@ function serializePathValue(mapper: ParameterMapper, value: unknown): string {
  */
 function serializeQueryPairs(mapper: ParameterMapper, value: unknown): Array<[string, string]> {
   const style = mapper.style ?? 'form';
-  const explode = mapper.explode ?? true;
+  // OpenAPI explode default: true for `form`, false for every other style
+  const explode = mapper.explode ?? style === 'form';
   const name = mapper.key;
   const str = (v: unknown) => primitiveString(v, name, 'query');
 
   if (Array.isArray(value)) {
-    if (explode || value.length === 0) {
+    // deepObject applies to objects; arrays fall back to form semantics
+    if ((style === 'deepObject' ? mapper.explode ?? true : explode) || value.length === 0) {
       return value.map((v) => [name, str(v)] as [string, string]);
     }
     const delimiter = style === 'spaceDelimited' ? ' ' : style === 'pipeDelimited' ? '|' : ',';
@@ -205,18 +207,61 @@ function assertCookieName(name: string): void {
   }
 }
 
-/** Format a security value per its scheme (mirrors SecurityResolver output). */
+function assertCookieValue(name: string, value: string): void {
+  // Values are sent VERBATIM (no percent-encoding — '=' etc. are legal
+  // cookie-octets and servers compare raw values), so characters that break
+  // the Cookie header structure must fail loudly: CTLs, whitespace, DQUOTE,
+  // semicolon, backslash. Comma is tolerated although RFC 6265 excludes it —
+  // OpenAPI's own cookie serialization comma-joins arrays.
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f\s";\\]/.test(value)) {
+    throw new RequestBuildError(
+      `Cookie '${name}' value contains characters that break the Cookie header (RFC 6265 cookie-octet violation)`,
+      { cookie: name },
+    );
+  }
+}
+
+/**
+ * Format a security value per its scheme (mirrors SecurityResolver output).
+ * Only `bearer`/`basic` get an automatic prefix — structured schemes like
+ * digest (RFC 7616 username/realm/nonce/... fields) cannot be synthesized from
+ * a raw credential, so their values pass through verbatim: provide the full
+ * header value, or resolve credentials with SecurityResolver instead.
+ */
 function formatSecurityValue(mapper: ParameterMapper, value: string): string {
   const security = mapper.security!;
   if (security.type === 'http') {
-    const scheme = security.httpScheme ?? 'bearer';
+    const scheme = (security.httpScheme ?? 'bearer').toLowerCase();
+    if (scheme !== 'bearer' && scheme !== 'basic') {
+      return value;
+    }
     const prefix = scheme.charAt(0).toUpperCase() + scheme.slice(1);
-    return value.toLowerCase().startsWith(`${scheme.toLowerCase()} `) ? value : `${prefix} ${value}`;
+    return value.toLowerCase().startsWith(`${scheme} `) ? value : `${prefix} ${value}`;
   }
   if (security.type === 'oauth2' || security.type === 'openIdConnect') {
     return value.toLowerCase().startsWith('bearer ') ? value : `Bearer ${value}`;
   }
   return value; // apiKey and friends: raw
+}
+
+/**
+ * Resolve the tool's first server URL, substituting `{variable}` templates
+ * with their spec-declared defaults. Variables without defaults are left in
+ * place and caught by the unresolved-template guard in buildHttpRequest.
+ */
+function resolveServerUrl(tool: McpOpenAPITool): string {
+  const server = tool.metadata.servers?.[0];
+  if (!server) return '';
+  let url = server.url;
+  if (server.variables) {
+    for (const [name, variable] of Object.entries(server.variables)) {
+      if (variable && typeof variable.default === 'string') {
+        url = url.replaceAll(`{${name}}`, variable.default);
+      }
+    }
+  }
+  return url;
 }
 
 const JSON_CONTENT = /^application\/(.+\+)?json$/i;
@@ -238,7 +283,13 @@ export function buildHttpRequest(
   input: Record<string, unknown>,
   options: BuildHttpRequestOptions = {},
 ): BuiltHttpRequest {
-  const rawBase = options.baseUrl ?? tool.metadata.servers?.[0]?.url ?? '';
+  const rawBase = options.baseUrl ?? resolveServerUrl(tool);
+  if (rawBase.includes('{')) {
+    throw new RequestBuildError(
+      `Base URL '${rawBase}' contains unresolved server template variables (no default value in the spec); pass an explicit baseUrl`,
+      { baseUrl: rawBase },
+    );
+  }
   if (rawBase !== '' && !/^https?:\/\//i.test(rawBase)) {
     throw new RequestBuildError(`Base URL must be http(s) or empty; received '${rawBase}'`, { baseUrl: rawBase });
   }
@@ -343,10 +394,12 @@ export function buildHttpRequest(
     })
     .join('&');
 
-  // Fold cookies into a single Cookie header
+  // Fold cookies into a single Cookie header — values verbatim, so the
+  // header always matches the `cookies` record
   const cookieEntries = Object.entries(cookies);
   if (cookieEntries.length > 0) {
-    headers['Cookie'] = cookieEntries.map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('; ');
+    for (const [k, v] of cookieEntries) assertCookieValue(k, v);
+    headers['Cookie'] = cookieEntries.map(([k, v]) => `${k}=${v}`).join('; ');
   }
 
   // Serialize the body per content type

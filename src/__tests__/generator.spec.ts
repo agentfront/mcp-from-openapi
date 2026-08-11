@@ -3853,3 +3853,39 @@ describe('Generic tool metadata (McpOpenAPITool<TMeta>)', () => {
     expect(extended.metadata.path).toBe('/x');
   });
 });
+
+describe('secureDefaults per-key refResolution merge', () => {
+  it('keeps the external-ref lockdown when refResolution tightens other knobs', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Ref API', version: '1.0.0' },
+      paths: {
+        '/thing': {
+          get: {
+            operationId: 'getThing',
+            parameters: [{ name: 'q', in: 'query', schema: { $ref: 'https://attacker.example/exfil.json' } }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, {
+      secureDefaults: true,
+      refResolution: { blockedHosts: ['internal.corp'] }, // tightening, not loosening
+      validate: false,
+    });
+    const tools = await generator.generateTools();
+
+    // the external ref must remain unfetched/unresolved
+    expect(JSON.stringify(tools[0].inputSchema)).toContain('attacker.example');
+  });
+
+  it('lets an explicit allowedProtocols override the preset', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      { openapi: '3.0.0', info: { title: 'T', version: '1' }, paths: {} } as any,
+      { secureDefaults: true, refResolution: { allowedProtocols: ['https'] } },
+    );
+
+    expect(generator).toBeInstanceOf(OpenAPIToolGenerator);
+  });
+});

@@ -446,3 +446,109 @@ describe('edge coverage', () => {
     expect(result.properties.u.description).toContain('1 alternative schema variant(s) omitted');
   });
 });
+
+describe('review fixes', () => {
+  it('mergeAllOf recursively merges nested allOf members without leaking composition keys', () => {
+    const { requireAllProperties } = require('../client-targets');
+    void requireAllProperties;
+    const result = collapseRootCompositions({
+      allOf: [
+        { allOf: [{ type: 'object', properties: { a: { type: 'string' } } }] },
+        { type: 'object', properties: { b: { type: 'integer' } } },
+      ],
+    } as any) as any;
+
+    expect(result.allOf).toBeUndefined();
+    expect(Object.keys(result.properties).sort()).toEqual(['a', 'b']);
+  });
+
+  it('collapseRootCompositions re-enters when an allOf member contributes a union', () => {
+    const result = collapseRootCompositions({
+      allOf: [{ oneOf: [{ type: 'string' }, { type: 'integer' }] }, { description: 'combo' }],
+    } as any) as any;
+
+    expect(result.allOf).toBeUndefined();
+    expect(result.oneOf).toBeUndefined();
+    expect(result['x-variants']).toHaveLength(2);
+  });
+
+  it('collapseNestedUnions reaches a fixpoint on unions exposed by unwrapping', () => {
+    const result = collapseNestedUnions({
+      anyOf: [{ anyOf: [{ type: 'string' }, { type: 'integer' }] }, { type: 'null' }],
+    } as any) as any;
+
+    expect(result.anyOf).toBeUndefined();
+    expect(result.oneOf).toBeUndefined();
+    expect(result.type).toBe('string');
+    expect(result.description).toContain('May be null.');
+    expect(result.description).toContain('alternative schema variant');
+  });
+
+  it('inlineLocalRefs keeps $ref sibling keywords, siblings winning', () => {
+    const result = inlineLocalRefs({
+      $defs: { S: { type: 'string', description: 'from def' } },
+      properties: {
+        described: { $ref: '#/$defs/S', description: 'from site' },
+        missing: { $ref: '#/$defs/Nope', title: 'Kept' },
+      },
+    } as any) as any;
+
+    expect(result.properties.described.type).toBe('string');
+    expect(result.properties.described.description).toBe('from site');
+    expect(result.properties.missing.title).toBe('Kept');
+  });
+
+  it('enforceClosedObjects closes nullable object type arrays', () => {
+    const result = enforceClosedObjects({
+      type: ['object', 'null'],
+      properties: { a: { type: 'string' } },
+    } as any) as any;
+
+    expect(result.additionalProperties).toBe(false);
+  });
+
+  it('requireAllProperties makes optionals required-but-nullable (openai strict)', () => {
+    const { requireAllProperties } = require('../client-targets');
+    const result = requireAllProperties({
+      type: 'object',
+      properties: {
+        must: { type: 'string' },
+        maybe: { type: 'string' },
+        multi: { type: ['string', 'integer'] },
+        already: { type: ['string', 'null'] },
+        untyped: {},
+      },
+      required: ['must'],
+    } as any) as any;
+
+    expect(result.required.sort()).toEqual(['already', 'maybe', 'multi', 'must', 'untyped']);
+    expect(result.properties.must.type).toBe('string'); // originally required: untouched
+    expect(result.properties.maybe.type).toEqual(['string', 'null']);
+    expect(result.properties.multi.type).toEqual(['string', 'integer', 'null']);
+    expect(result.properties.already.type).toEqual(['string', 'null']);
+    expect(result.properties.untyped).toEqual({});
+  });
+
+  it('openai target output passes strict-mode requirements end to end', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Strict API', version: '1.0.0' },
+      paths: {
+        '/search': {
+          get: {
+            operationId: 'search',
+            parameters: [{ name: 'q', in: 'query', schema: { type: 'string' } }], // optional
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/search', 'get', { target: 'openai' });
+    const input = tool.inputSchema as any;
+
+    expect(input.additionalProperties).toBe(false);
+    expect(input.required).toEqual(['q']);
+    expect(input.properties.q.type).toEqual(['string', 'null']);
+  });
+});

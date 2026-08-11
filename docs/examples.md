@@ -6,6 +6,8 @@
 
 ## Building an MCP Server
 
+> **Prefer `buildHttpRequest`** from the library for real integrations — see [Request Builder](./request-builder.md). This example shows the underlying mapper contract.
+
 ```typescript
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { OpenAPIToolGenerator } from 'mcp-from-openapi';

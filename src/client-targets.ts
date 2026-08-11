@@ -116,14 +116,19 @@ export function inlineLocalRefs(schema: JsonSchema): JsonSchema {
 
     const ref = record['$ref'];
     if (typeof ref === 'string' && ref.startsWith('#')) {
+      // 2020-12 allows keywords alongside $ref; siblings win over the target
+      const { $ref: _ref, ...siblings } = record;
       if (seenPointers.has(ref)) {
-        return { description: '[Circular $ref removed for client compatibility]' } as JsonSchema;
+        return { description: '[Circular $ref removed for client compatibility]', ...siblings } as JsonSchema;
       }
       const resolved = resolvePointer(ref);
       if (!isSchemaObject(resolved)) {
-        return { description: `[Unresolvable $ref ${ref} removed for client compatibility]` } as JsonSchema;
+        return { description: `[Unresolvable $ref ${ref} removed for client compatibility]`, ...siblings } as JsonSchema;
       }
-      return inline(resolved as JsonSchema, new Set([...seenPointers, ref]));
+      const inlined = inline(resolved as JsonSchema, new Set([...seenPointers, ref]));
+      /* c8 ignore next -- inline() only returns non-objects for degenerate boolean schemas */
+      if (!isSchemaObject(inlined)) return inlined;
+      return { ...(inlined as SchemaRecord), ...siblings } as JsonSchema;
     }
 
     const copy: SchemaRecord = { ...record };
@@ -173,16 +178,22 @@ export function ensureArrayItems(schema: JsonSchema): JsonSchema {
   });
 }
 
-/** Merge `allOf` members into one node (properties/required union, later scalar keywords win). */
+/**
+ * Merge `allOf` members into one node (properties/required union, later
+ * scalar keywords win). Members carrying their own `allOf` are merged
+ * recursively first, so nested compositions cannot leak into the result and
+ * their properties are not lost.
+ */
 function mergeAllOf(node: SchemaRecord): SchemaRecord {
   const members = node['allOf'] as SchemaRecord[];
   const merged: SchemaRecord = {};
   const properties: SchemaRecord = {};
   const required = new Set<string>();
 
-  for (const member of members) {
+  for (const rawMember of members) {
     /* c8 ignore next -- boolean allOf members are degenerate and rare */
-    if (!isSchemaObject(member)) continue;
+    if (!isSchemaObject(rawMember)) continue;
+    const member = Array.isArray(rawMember['allOf']) ? mergeAllOf(rawMember) : rawMember;
     const { properties: memberProps, required: memberRequired, ...scalars } = member;
     Object.assign(merged, scalars);
     if (isSchemaObject(memberProps)) Object.assign(properties, memberProps);
@@ -236,7 +247,8 @@ export function collapseRootCompositions(schema: JsonSchema): JsonSchema {
   const node = { ...(schema as SchemaRecord) };
 
   if (Array.isArray(node['allOf'])) {
-    return mergeAllOf(node) as JsonSchema;
+    // Re-enter: a member may have contributed a union that now sits at the root
+    return collapseRootCompositions(mergeAllOf(node) as JsonSchema);
   }
 
   const nullableMember = nullableWrapperMember(node);
@@ -272,56 +284,67 @@ export function collapseRootCompositions(schema: JsonSchema): JsonSchema {
  */
 export function collapseNestedUnions(schema: JsonSchema): JsonSchema {
   return walkSchema(schema, (node) => {
+    // Fixpoint: unwrapping one union can expose another (a nullable wrapper
+    // whose member is itself a union, a kept variant carrying its own anyOf).
+    // Each pass strictly removes one composition layer, so this terminates.
     let current = node;
-
-    if (Array.isArray(current['allOf'])) {
-      current = mergeAllOf(current);
-    }
-
-    // Type ARRAYS are unions too (`type: ['string', 'null']` from OpenAPI 3.0
-    // nullable): keep the first non-null type, document the rest.
-    const type = current['type'];
-    if (Array.isArray(type)) {
-      const nonNull = type.filter((t) => t !== 'null');
-      const notes: string[] = [];
-      if (nonNull.length > 1) notes.push(`Alternative types accepted: ${nonNull.slice(1).join(', ')}.`);
-      if (nonNull.length !== type.length) notes.push('May be null.');
-      current = { ...current, type: nonNull[0] ?? 'null' };
-      if (notes.length > 0) {
-        const joined = notes.join(' ');
-        current['description'] = current['description'] ? `${current['description']} ${joined}` : joined;
+    for (;;) {
+      if (Array.isArray(current['allOf'])) {
+        current = mergeAllOf(current);
+        continue;
       }
-    }
 
-    const nullableMember = nullableWrapperMember(current);
-    if (nullableMember) {
-      const { anyOf: _anyOf, ...rest } = current;
-      const merged = { ...nullableMember, ...rest };
-      const note = 'May be null.';
-      merged['description'] = merged['description'] ? `${merged['description']} ${note}` : note;
-      return merged;
-    }
-
-    for (const key of ['oneOf', 'anyOf'] as const) {
-      const members = current[key];
-      if (Array.isArray(members) && members.length > 0 && isSchemaObject(members[0])) {
-        const { [key]: _members, ...rest } = current;
-        const first = { ...(members[0] as SchemaRecord) };
-        const note =
-          members.length > 1
-            ? `${members.length - 1} alternative schema variant(s) omitted for client compatibility: ${describeVariants(
-                members.slice(1),
-              )}.`
-            : undefined;
-        const merged = { ...first, ...rest };
-        if (note) {
-          merged['description'] = merged['description'] ? `${merged['description']} ${note}` : note;
+      // Type ARRAYS are unions too (`type: ['string', 'null']` from OpenAPI
+      // 3.0 nullable): keep the first non-null type, document the rest.
+      const type = current['type'];
+      if (Array.isArray(type)) {
+        const nonNull = type.filter((t) => t !== 'null');
+        const notes: string[] = [];
+        if (nonNull.length > 1) notes.push(`Alternative types accepted: ${nonNull.slice(1).join(', ')}.`);
+        if (nonNull.length !== type.length) notes.push('May be null.');
+        current = { ...current, type: nonNull[0] ?? 'null' };
+        if (notes.length > 0) {
+          const joined = notes.join(' ');
+          current['description'] = current['description'] ? `${current['description']} ${joined}` : joined;
         }
-        return merged;
+        continue;
       }
-    }
 
-    return current;
+      const nullableMember = nullableWrapperMember(current);
+      if (nullableMember) {
+        const { anyOf: _anyOf, ...rest } = current;
+        const merged = { ...nullableMember, ...rest };
+        const note = 'May be null.';
+        merged['description'] = merged['description'] ? `${merged['description']} ${note}` : note;
+        current = merged;
+        continue;
+      }
+
+      let collapsedUnion = false;
+      for (const key of ['oneOf', 'anyOf'] as const) {
+        const members = current[key];
+        if (Array.isArray(members) && members.length > 0 && isSchemaObject(members[0])) {
+          const { [key]: _members, ...rest } = current;
+          const first = { ...(members[0] as SchemaRecord) };
+          const note =
+            members.length > 1
+              ? `${members.length - 1} alternative schema variant(s) omitted for client compatibility: ${describeVariants(
+                  members.slice(1),
+                )}.`
+              : undefined;
+          const merged = { ...first, ...rest };
+          if (note) {
+            merged['description'] = merged['description'] ? `${merged['description']} ${note}` : note;
+          }
+          current = merged;
+          collapsedUnion = true;
+          break;
+        }
+      }
+      if (collapsedUnion) continue;
+
+      return current;
+    }
   });
 }
 
@@ -342,16 +365,58 @@ export function demoteFormats(schema: JsonSchema, supported: Set<string> = GEMIN
   });
 }
 
+function isObjectNode(node: SchemaRecord): boolean {
+  const type = node['type'];
+  return (
+    type === 'object' ||
+    (Array.isArray(type) && type.includes('object')) ||
+    (type === undefined && isSchemaObject(node['properties']))
+  );
+}
+
 /** Close every object node (`additionalProperties: false`) — OpenAI strict mode. */
 export function enforceClosedObjects(schema: JsonSchema): JsonSchema {
   return walkSchema(schema, (node) => {
-    const type = node['type'];
-    const isObject = type === 'object' || (type === undefined && isSchemaObject(node['properties']));
     // A schema-valued additionalProperties is a typed map — leave it alone.
-    if (isObject && (node['additionalProperties'] === undefined || node['additionalProperties'] === true)) {
+    if (isObjectNode(node) && (node['additionalProperties'] === undefined || node['additionalProperties'] === true)) {
       return { ...node, additionalProperties: false };
     }
     return node;
+  });
+}
+
+/**
+ * OpenAI strict function calling requires EVERY property to be listed in
+ * `required`; optional fields are expressed as required-but-nullable. This
+ * rewrites each object node accordingly (typed optionals gain a `null` type;
+ * untyped optionals are already permissive).
+ */
+export function requireAllProperties(schema: JsonSchema): JsonSchema {
+  return walkSchema(schema, (node) => {
+    if (!isObjectNode(node) || !isSchemaObject(node['properties'])) return node;
+
+    const properties = node['properties'] as SchemaRecord;
+    const originallyRequired = new Set(Array.isArray(node['required']) ? node['required'].map(String) : []);
+    const rewritten: SchemaRecord = {};
+
+    for (const [name, propSchema] of Object.entries(properties)) {
+      if (originallyRequired.has(name) || !isSchemaObject(propSchema)) {
+        rewritten[name] = propSchema;
+        continue;
+      }
+      const prop = propSchema as SchemaRecord;
+      const type = prop['type'];
+      if (typeof type === 'string' && type !== 'null') {
+        rewritten[name] = { ...prop, type: [type, 'null'] };
+      } else if (Array.isArray(type) && !type.includes('null')) {
+        rewritten[name] = { ...prop, type: [...type, 'null'] };
+      } else {
+        // no declared type (or already nullable): accepts null as-is
+        rewritten[name] = prop;
+      }
+    }
+
+    return { ...node, properties: rewritten, required: Object.keys(properties) };
   });
 }
 
@@ -366,6 +431,7 @@ export function applyClientTarget(schema: JsonSchema, target: ClientTarget): Jso
 
   if (target === 'openai') {
     result = enforceClosedObjects(result);
+    result = requireAllProperties(result);
   } else if (target === 'gemini') {
     result = collapseNestedUnions(result);
     result = demoteFormats(result);

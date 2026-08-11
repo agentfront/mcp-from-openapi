@@ -55,7 +55,13 @@ function applySecureDefaults(options: LoadOptions): LoadOptions {
   return {
     ...options,
     followRedirects: options.followRedirects ?? false,
-    refResolution: options.refResolution ?? { allowedProtocols: [] },
+    // Merge PER KEY: a user tightening one refResolution knob (e.g.
+    // blockedHosts) must not silently discard the preset's external-$ref
+    // lockdown. An explicit allowedProtocols still wins.
+    refResolution: {
+      allowedProtocols: [],
+      ...options.refResolution,
+    },
   };
 }
 

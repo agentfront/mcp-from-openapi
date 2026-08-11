@@ -283,16 +283,16 @@ describe('buildHttpRequest', () => {
       expect(() => buildHttpRequest(tool, { id: '1', h: 'evil\r\nX-Injected: 1' })).toThrow(/header injection/);
     });
 
-    it('folds cookies into a single Cookie header', () => {
+    it('folds cookies into a single Cookie header with verbatim values', () => {
       const tool = makeTool([
         { inputKey: 'id', type: 'path', key: 'id', required: true },
         { inputKey: 'session', type: 'cookie', key: 'session' },
         { inputKey: 'pref', type: 'cookie', key: 'pref' },
       ]);
-      const result = buildHttpRequest(tool, { id: '1', session: 'abc', pref: 'a b' });
+      const result = buildHttpRequest(tool, { id: '1', session: 'abc', pref: 'dark-mode' });
 
-      expect(result.cookies).toEqual({ session: 'abc', pref: 'a b' });
-      expect(result.headers['Cookie']).toBe('session=abc; pref=a%20b');
+      expect(result.cookies).toEqual({ session: 'abc', pref: 'dark-mode' });
+      expect(result.headers['Cookie']).toBe('session=abc; pref=dark-mode');
     });
 
     it('joins cookie arrays with commas and rejects invalid cookie names', () => {
@@ -692,3 +692,103 @@ describe('buildHttpRequest', () => {
 function makeToolWithPathless(tool: McpOpenAPITool): McpOpenAPITool {
   return { ...tool, metadata: { ...tool.metadata, path: '/upload' } };
 }
+
+describe('review fixes', () => {
+  const queryTool = (mapper: Partial<ParameterMapper>) =>
+    makeTool([
+      { inputKey: 'id', type: 'path', key: 'id', required: true },
+      { inputKey: 'p', type: 'query', key: 'p', ...mapper } as ParameterMapper,
+    ]);
+
+  it('spaceDelimited/pipeDelimited default to explode=false per the OpenAPI table', () => {
+    expect(buildHttpRequest(queryTool({ style: 'spaceDelimited' }), { id: '1', p: ['a', 'b'] }).url).toContain(
+      '?p=a%20b',
+    );
+    expect(buildHttpRequest(queryTool({ style: 'pipeDelimited' }), { id: '1', p: ['a', 'b'] }).url).toContain(
+      '?p=a%7Cb',
+    );
+    // form still defaults to explode=true
+    expect(buildHttpRequest(queryTool({}), { id: '1', p: ['a', 'b'] }).url).toContain('?p=a&p=b');
+  });
+
+  it('deepObject top-level arrays default to exploded pairs when explode is omitted', () => {
+    const result = buildHttpRequest(queryTool({ style: 'deepObject' }), { id: '1', p: ['a', 'b'] });
+
+    expect(result.url).toContain('?p=a&p=b');
+  });
+
+  it('deepObject top-level arrays honor an explicit explode=false', () => {
+    const result = buildHttpRequest(queryTool({ style: 'deepObject', explode: false }), { id: '1', p: ['a', 'b'] });
+
+    expect(result.url).toContain('?p=a%2Cb');
+  });
+
+  it('empty arrays with explode=false emit no pairs', () => {
+    const result = buildHttpRequest(queryTool({ explode: false }), { id: '1', p: [] });
+
+    expect(result.url).not.toContain('p=');
+  });
+
+  it('deepObject arrays default to exploded pairs', () => {
+    const result = buildHttpRequest(queryTool({ style: 'deepObject' }), { id: '1', p: { tags: ['x', 'y'] } });
+
+    expect(result.url).toContain('p[tags]=x&p[tags]=y');
+  });
+
+  it('sends cookie values verbatim and rejects illegal cookie octets', () => {
+    const tool = makeTool([
+      { inputKey: 'id', type: 'path', key: 'id', required: true },
+      { inputKey: 'session', type: 'cookie', key: 'session' },
+    ]);
+    const ok = buildHttpRequest(tool, { id: '1', session: 'abc123==' });
+    expect(ok.headers['Cookie']).toBe('session=abc123==');
+    expect(ok.cookies['session']).toBe('abc123==');
+
+    expect(() => buildHttpRequest(tool, { id: '1', session: 'a;b' })).toThrow(/cookie-octet/);
+    expect(() => buildHttpRequest(tool, { id: '1', session: 'a b' })).toThrow(/cookie-octet/);
+  });
+
+  it('substitutes server template variables from spec defaults', () => {
+    const tool = makeTool([{ inputKey: 'id', type: 'path', key: 'id', required: true }], {
+      servers: [
+        {
+          url: 'https://{region}.api.example.com/{version}',
+          variables: { region: { default: 'eu' }, version: { default: 'v2' } },
+        } as any,
+      ],
+    });
+    const result = buildHttpRequest(tool, { id: '9' });
+
+    expect(result.url).toBe('https://eu.api.example.com/v2/things/9');
+  });
+
+  it('throws loudly on unresolved server template variables', () => {
+    const tool = makeTool([{ inputKey: 'id', type: 'path', key: 'id', required: true }], {
+      servers: [{ url: 'https://{region}.api.example.com' } as any],
+    });
+
+    expect(() => buildHttpRequest(tool, { id: '9' })).toThrow(/unresolved server template variables/);
+    // explicit baseUrl is the documented workaround
+    expect(buildHttpRequest(tool, { id: '9' }, { baseUrl: 'https://eu.api.example.com' }).url).toBe(
+      'https://eu.api.example.com/things/9',
+    );
+  });
+
+  it('passes digest and unknown http scheme values through verbatim', () => {
+    const digestTool = makeTool([
+      { inputKey: 'id', type: 'path', key: 'id', required: true },
+      {
+        inputKey: 'digestAuth',
+        type: 'header',
+        key: 'Authorization',
+        security: { scheme: 'digestAuth', type: 'http', httpScheme: 'digest' },
+      },
+    ]);
+    const fullDigest = 'Digest username="u", realm="r", nonce="n", response="x"';
+    const result = buildHttpRequest(digestTool, { id: '1', digestAuth: fullDigest });
+
+    expect(result.headers['Authorization']).toBe(fullDigest);
+    // raw non-header value is NOT blindly prefixed either
+    expect(buildHttpRequest(digestTool, { id: '1', digestAuth: 'rawcred' }).headers['Authorization']).toBe('rawcred');
+  });
+});

@@ -125,6 +125,35 @@ async validate(document: OpenAPIDocument): Promise<ValidationResult>
 
 ## Utility Functions
 
+### buildHttpRequest
+
+Build a ready-to-send HTTP request from a tool and its input values — the full OpenAPI serialization table applied. See [Request Builder](./request-builder.md).
+
+```typescript
+buildHttpRequest(tool: McpOpenAPITool, input: Record<string, unknown>, options?: BuildHttpRequestOptions): BuiltHttpRequest
+```
+
+### applyClientTarget
+
+Apply a client dialect's schema transforms (`'claude' | 'openai' | 'gemini' | 'strict'`). The individual transforms (`inlineLocalRefs`, `ensureArrayItems`, `collapseRootCompositions`, `collapseNestedUnions`, `demoteFormats`, `enforceClosedObjects`) are exported too. See [Client Targets](./client-targets.md).
+
+```typescript
+applyClientTarget(schema: JsonSchema, target: ClientTarget): JsonSchema
+```
+
+### toSdkTool
+
+Shape a tool for the official MCP SDK's `registerTool(name, config, handler)` — pass the SDK v2 `fromJsonSchema` to wrap schemas; without it, raw JSON Schemas are returned.
+
+```typescript
+toSdkTool(tool: McpOpenAPITool): [string, SdkToolConfig]
+toSdkTool(tool: McpOpenAPITool, wrapper: { fromJsonSchema }): [string, SdkToolConfig]
+```
+
+### inferAnnotationsFromMethod / extractExtensionOverrides / resolveExtensionEnabled
+
+Annotation inference and `x-mcp` extension family parsing. See [Annotations & Extensions](./annotations.md).
+
 ### createSecurityContext
 
 Helper to create a `SecurityContext` from partial auth data.
@@ -470,13 +499,21 @@ interface GenerateOptions {
   includeOperations?: string[];
   excludeOperations?: string[];
   filterFn?: (operation: OperationWithContext) => boolean;
+  includeTags?: string[];            // filter by OpenAPI tags
+  excludeTags?: string[];
+  includeMethods?: HTTPMethod[];     // filter by HTTP method
+  excludeMethods?: HTTPMethod[];
+  includePaths?: string[];           // path globs: * per segment, ** across, ? one char
+  excludePaths?: string[];
+  readOnlyOnly?: boolean;            // default: false (safety switch)
   namingStrategy?: NamingStrategy;
   preferredStatusCodes?: number[];   // default: [200, 201, 204, 202, 203, 206]
   includeDeprecated?: boolean;       // default: false
   includeAllResponses?: boolean;     // default: true
   maxSchemaDepth?: number;           // default: 10 (deeper structures truncated)
   includeExamples?: boolean;         // default: false (parameter/media-type examples)
-  includeSecurityInInput?: boolean;  // default: false
+  includeSecurityInInput?: boolean | string[]; // default: false; array = per-scheme selection
+  target?: ClientTarget;             // per-client schema dialect transforms
   inferAnnotations?: boolean;        // default: true (HTTP-method annotation inference)
   maxToolNameLength?: number;        // default: 64 (clamped to MCP's 128 max)
   resolveFormats?: boolean;          // default: false

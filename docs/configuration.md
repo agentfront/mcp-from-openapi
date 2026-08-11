@@ -32,6 +32,7 @@ const generator = await OpenAPIToolGenerator.fromURL(url, {
 | `validate` | `boolean` | `true` | Validate the OpenAPI document on load |
 | `followRedirects` | `boolean` | `true` | Follow HTTP redirects when loading from URL |
 | `refResolution` | `RefResolutionOptions` | `{}` | Security settings for `$ref` resolution |
+| `secureDefaults` | `boolean` | `false` | One-flag strict posture for untrusted specs: redirects off, external `$ref` resolution disabled. Explicit `followRedirects`/`refResolution` values still win |
 
 ### RefResolutionOptions
 
@@ -77,10 +78,28 @@ const tools = await generator.generateTools({
 | `includeSecurityInInput` | `boolean` | `false` | Add security params to inputSchema |
 | `inferAnnotations` | `boolean` | `true` | Infer MCP tool annotations from HTTP method semantics |
 | `maxToolNameLength` | `number` | `64` | Tool name length cap (clamped to MCP's 128 max); longer names get a hash suffix |
+| `includeTags` / `excludeTags` | `string[]` | - | Filter operations by OpenAPI tags |
+| `includeMethods` / `excludeMethods` | `HTTPMethod[]` | - | Filter operations by HTTP method |
+| `includePaths` / `excludePaths` | `string[]` | - | Filter by path globs (`*` per segment, `**` across, `?` one char) |
+| `readOnlyOnly` | `boolean` | `false` | Safety switch: only operations whose effective annotations are read-only |
+| `target` | `'claude' \| 'openai' \| 'gemini' \| 'strict'` | - | Per-client schema dialect transforms — see [Client Targets](./client-targets.md) |
 
 ### Filtering Operations
 
-Three ways to filter which operations become tools:
+Filter which operations become tools by tag, method, path glob, operation ID, annotation safety, extension flags, or a custom function:
+
+```typescript
+const tools = await generator.generateTools({
+  includeTags: ['public'],
+  excludeMethods: ['delete'],
+  excludePaths: ['/admin/**', '/internal/*'],
+  readOnlyOnly: true, // only read-only operations survive
+});
+```
+
+Spec authors can also exclude operations declaratively with `x-mcp: false` at the **root, path, or operation** level (operation wins, then path, then root — a root-level `false` flips the whole spec to opt-in). See [Annotations & Extensions](./annotations.md).
+
+The original mechanisms still apply:
 
 **By operation ID:**
 

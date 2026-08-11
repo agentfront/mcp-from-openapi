@@ -16,6 +16,7 @@ export {
   collapseNestedUnions,
   demoteFormats,
   enforceClosedObjects,
+  requireAllProperties,
 } from './client-targets';
 export type { ClientTarget } from './client-targets';
 
