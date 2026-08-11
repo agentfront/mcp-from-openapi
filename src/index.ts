@@ -8,6 +8,16 @@ export { SecurityResolver, createSecurityContext } from './security-resolver';
 export { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 export { inferAnnotationsFromMethod, extractExtensionOverrides, resolveExtensionEnabled } from './annotations';
 export type { ExtensionToolOverrides } from './annotations';
+export {
+  applyClientTarget,
+  inlineLocalRefs,
+  ensureArrayItems,
+  collapseRootCompositions,
+  collapseNestedUnions,
+  demoteFormats,
+  enforceClosedObjects,
+} from './client-targets';
+export type { ClientTarget } from './client-targets';
 
 // Request building
 export { buildHttpRequest } from './request-builder';

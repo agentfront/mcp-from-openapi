@@ -855,6 +855,17 @@ export interface GenerateOptions {
   includeSecurityInInput?: boolean | string[];
 
   /**
+   * Target client schema dialect. Every MCP client accepts a different JSON
+   * Schema subset; setting a target applies the transforms that make the
+   * generated input/output schemas valid for it: `strict` (safe baseline —
+   * local $refs inlined, arrays get `items`, root compositions collapsed),
+   * `claude` (= strict), `openai` (strict + closed objects), `gemini`
+   * (strict + all unions collapsed + unsupported formats demoted).
+   * See `applyClientTarget` for standalone use.
+   */
+  target?: import('./client-targets').ClientTarget;
+
+  /**
    * Infer MCP tool annotations from HTTP method semantics:
    * GET/HEAD/OPTIONS/TRACE -> read-only + idempotent; PUT/DELETE ->
    * destructive + idempotent; POST/PATCH -> destructive, not idempotent.

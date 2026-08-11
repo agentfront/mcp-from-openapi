@@ -27,6 +27,7 @@ import { ParameterResolver } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
 import { SchemaBuilder } from './schema-builder';
 import { extractExtensionOverrides, inferAnnotationsFromMethod, resolveExtensionEnabled } from './annotations';
+import { applyClientTarget } from './client-targets';
 import { Validator } from './validator';
 import { GenerationError, LoadError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
@@ -647,6 +648,15 @@ export class OpenAPIToolGenerator {
     resolvedInputSchema = SchemaBuilder.truncateDepth(resolvedInputSchema, maxSchemaDepth);
     if (resolvedOutputSchema) {
       resolvedOutputSchema = SchemaBuilder.truncateDepth(resolvedOutputSchema, maxSchemaDepth);
+    }
+
+    // Client dialect transforms (final step — the emitted schemas must be
+    // exactly what the targeted client accepts)
+    if (options.target) {
+      resolvedInputSchema = applyClientTarget(resolvedInputSchema, options.target);
+      if (resolvedOutputSchema) {
+        resolvedOutputSchema = applyClientTarget(resolvedOutputSchema, options.target);
+      }
     }
 
     return {
