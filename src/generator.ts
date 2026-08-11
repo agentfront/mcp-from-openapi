@@ -27,7 +27,7 @@ import { ResponseBuilder } from './response-builder';
 import { SchemaBuilder } from './schema-builder';
 import { extractExtensionOverrides, inferAnnotationsFromMethod } from './annotations';
 import { Validator } from './validator';
-import { LoadError, ParseError } from './errors';
+import { GenerationError, LoadError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
 
@@ -36,6 +36,13 @@ const MCP_MAX_TOOL_NAME_LENGTH = 128;
 
 /** Default tool name cap — the strictest common client limit (Claude/Bedrock: 64) */
 const DEFAULT_MAX_TOOL_NAME_LENGTH = 64;
+
+/**
+ * Bound on collision-dedup retries. Generous for real specs (the first retry
+ * almost always succeeds), but finite so a tiny `maxToolNameLength` whose
+ * entire name space is exhausted fails loudly instead of looping forever.
+ */
+const MAX_NAME_DEDUP_ATTEMPTS = 256;
 
 /**
  * 32-bit FNV-1a hash rendered as 8 hex chars. Used for stable, content-derived
@@ -59,12 +66,16 @@ function fnv1aHex(input: string): string {
  * nothing usable.
  */
 function normalizeToolName(raw: string, maxLength: number, fallbackSeed: string): string {
+  // Hash the RAW name, not the sanitized one: two raws differing only in
+  // invalid characters must not collapse to the same truncation suffix.
+  let hashSeed = raw;
   let name = raw
     .replace(/[^A-Za-z0-9_.-]/g, '_')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '');
 
   if (name.length === 0) {
+    hashSeed = fallbackSeed;
     name = `tool_${fnv1aHex(fallbackSeed)}`;
   }
 
@@ -72,9 +83,9 @@ function normalizeToolName(raw: string, maxLength: number, fallbackSeed: string)
   if (name.length > cap) {
     // 9 = '_' + 8-char hash. Below that there is no room for a readable base.
     if (cap >= 13) {
-      name = `${name.slice(0, cap - 9)}_${fnv1aHex(name)}`;
+      name = `${name.slice(0, cap - 9)}_${fnv1aHex(hashSeed)}`;
     } else {
-      name = fnv1aHex(name).slice(0, cap);
+      name = fnv1aHex(hashSeed).slice(0, cap);
     }
   }
 
@@ -465,12 +476,24 @@ export class OpenAPIToolGenerator {
             // Recheck after renaming: the suffixed name can itself be taken
             // (e.g. an operationId that mimics a suffixed name, or truncated
             // hash-only names under tiny caps). Extending the seed reseeds
-            // the hash deterministically until a free name is found.
+            // the hash deterministically until a free name is found — bounded,
+            // because a tiny cap (e.g. 1 = 16 possible hex names) can exhaust
+            // the name space entirely.
             let seed = `${method} ${pathStr}`;
             let deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
+            let attempts = 1;
             while (usedNames.has(deduped)) {
+              if (attempts >= MAX_NAME_DEDUP_ATTEMPTS) {
+                throw new GenerationError(
+                  `Unable to find a unique tool name for "${tool.name}" (${method.toUpperCase()} ${pathStr}) ` +
+                    `within ${MAX_NAME_DEDUP_ATTEMPTS} attempts — the name space under maxToolNameLength=${maxLength} ` +
+                    `is exhausted. Increase maxToolNameLength or rename the operation.`,
+                  { name: tool.name, method, path: pathStr, maxToolNameLength: maxLength },
+                );
+              }
               seed += '#';
               deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
+              attempts++;
             }
             tool = { ...tool, name: deduped };
           }

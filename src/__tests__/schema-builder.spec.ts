@@ -709,3 +709,51 @@ describe('SchemaBuilder.truncateDepth 2020-12 keyword coverage', () => {
     expect(result.properties.level1.description).toContain('Truncated');
   });
 });
+
+describe('SchemaBuilder.truncateDepth depth-bound validation', () => {
+  const deep = { type: 'object', properties: { inner: { type: 'object', properties: { leaf: { type: 'string' } } } } } as any;
+
+  it('should fall back to the default bound for NaN', () => {
+    const node: any = { type: 'object', properties: { value: { type: 'string' } } };
+    node.properties.next = node; // circular: unbounded traversal would hang
+
+    const result = SchemaBuilder.truncateDepth(node, NaN) as any;
+
+    expect(JSON.stringify(result)).toContain('Truncated'); // bounded at the default of 10
+  });
+
+  it('should fall back to the default bound for Infinity', () => {
+    const node: any = { type: 'object', properties: { value: { type: 'string' } } };
+    node.properties.next = node;
+
+    const result = SchemaBuilder.truncateDepth(node, Infinity) as any;
+
+    expect(JSON.stringify(result)).toContain('Truncated');
+  });
+
+  it('should floor fractional depths', () => {
+    const result = SchemaBuilder.truncateDepth(deep, 1.9) as any;
+
+    // floors to 1: level-1 children stripped
+    expect(result.properties.inner.properties).toBeUndefined();
+  });
+
+  it('should clamp negative depths to 0 (root truncation)', () => {
+    const result = SchemaBuilder.truncateDepth(deep, -5) as any;
+
+    expect(result.properties).toBeUndefined();
+    expect(result.description).toContain('Truncated');
+  });
+
+  it('should truncate schemas under contentSchema', () => {
+    const schema = {
+      type: 'string',
+      contentMediaType: 'application/json',
+      contentSchema: deep,
+    } as any;
+    const result = SchemaBuilder.truncateDepth(schema, 1) as any;
+
+    expect(result.contentSchema.properties).toBeUndefined();
+    expect(result.contentSchema.description).toContain('Truncated');
+  });
+});

@@ -188,7 +188,17 @@ export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema
   }
 
   if (wrapNullable) {
-    return { anyOf: [result, { type: 'null' }] } as JsonSchema;
+    // Hoist pure annotation keywords onto the wrapper so descriptions stay
+    // visible at the top level instead of being buried inside anyOf[0].
+    const wrapper: Record<string, unknown> = {};
+    for (const key of ['title', 'description', 'deprecated'] as const) {
+      if (result[key] !== undefined) {
+        wrapper[key] = result[key];
+        delete result[key];
+      }
+    }
+    wrapper['anyOf'] = [result, { type: 'null' }];
+    return wrapper as JsonSchema;
   }
 
   return result as JsonSchema;

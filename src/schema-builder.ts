@@ -342,7 +342,11 @@ export class SchemaBuilder {
    * a truncation note appended to the description.
    */
   static truncateDepth(schema: JsonSchema, maxDepth: number): JsonSchema {
-    return this.truncateDepthRecursive(schema, 0, maxDepth);
+    // Guard the depth bound itself: NaN/Infinity would disable truncation
+    // (`depth >= NaN` is always false) and hang on circular graphs; fractional
+    // depths floor. Non-finite input falls back to the documented default.
+    const bound = Number.isFinite(maxDepth) ? Math.max(0, Math.floor(maxDepth)) : 10;
+    return this.truncateDepthRecursive(schema, 0, bound);
   }
 
   /** Keys whose value is a map of schemas (JSON Schema 2020-12) */
@@ -364,6 +368,7 @@ export class SchemaBuilder {
     'else',
     'propertyNames',
     'contains',
+    'contentSchema',
     'unevaluatedProperties',
     'unevaluatedItems',
   ] as const;

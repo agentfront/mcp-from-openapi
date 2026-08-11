@@ -137,6 +137,8 @@ function buildRequest(tool: McpOpenAPITool, input: Record<string, any>) {
     url: `${baseUrl}${path}${qs ? '?' + qs : ''}`,
     method: tool.metadata.method.toUpperCase(),
     headers,
+    // NOTE: binary bodies (mapper serialization.binary) need raw/multipart
+    // serialization per serialization.contentType, not JSON.stringify
     body: body !== undefined ? JSON.stringify(body) : undefined,
   };
 }

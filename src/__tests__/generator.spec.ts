@@ -3488,3 +3488,61 @@ describe('hasExternalRefs cycle guard', () => {
     expect(hasExternalRefs(cyclic)).toBe(true);
   });
 });
+
+describe('Tool name hashing uses the raw name', () => {
+  const specFor = (operationId: string): any => ({
+    openapi: '3.0.0',
+    info: { title: 'Raw Hash API', version: '1.0.0' },
+    paths: {
+      '/things': { get: { operationId, responses: { '200': { description: 'OK' } } } },
+    },
+  });
+
+  it('should give distinct suffixes to long names differing only by invalid characters', async () => {
+    const base = 'y'.repeat(70);
+    const genA = await OpenAPIToolGenerator.fromJSON(specFor(`${base}!end`));
+    const genB = await OpenAPIToolGenerator.fromJSON(specFor(`${base}?end`));
+
+    const nameA = (await genA.generateTool('/things', 'get')).name;
+    const nameB = (await genB.generateTool('/things', 'get')).name;
+
+    // both sanitize to the same base, so only the raw-name hash separates them
+    expect(nameA).toHaveLength(64);
+    expect(nameB).toHaveLength(64);
+    expect(nameA.slice(0, 55)).toBe(nameB.slice(0, 55));
+    expect(nameA).not.toBe(nameB);
+  });
+
+  it('should use the fallback seed for empty-sanitized names under tiny caps', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specFor('!!!'));
+    const tool = await generator.generateTool('/things', 'get', { maxToolNameLength: 8 });
+
+    expect(tool.name).toMatch(/^[0-9a-f]{8}$/);
+  });
+});
+
+describe('Collision dedup exhaustion', () => {
+  it('should fail loudly (per-tool) when a tiny cap exhausts the name space', async () => {
+    // 17 operations, all colliding, under a 1-char cap: only 16 hex names exist
+    const paths: Record<string, unknown> = {};
+    for (let i = 0; i < 17; i++) {
+      paths[`/p${i}`] = { get: { operationId: 'same', responses: { '200': { description: 'OK' } } } };
+    }
+    const spec: any = { openapi: '3.0.0', info: { title: 'Exhaust API', version: '1.0.0' }, paths };
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+      const tools = await generator.generateTools({ maxToolNameLength: 1 });
+      const names = tools.map((t) => t.name);
+
+      // all 16 possible names taken, every emitted name unique, 17th dropped
+      expect(new Set(names).size).toBe(names.length);
+      expect(names.length).toBeLessThan(17);
+      const messages = warnSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(messages).toContain('name space');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});

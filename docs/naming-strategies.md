@@ -104,7 +104,7 @@ Normalization is not bypassable: MCP name rules are hard client constraints (Cla
 
 By default, tools are named using the operation's `operationId` (or an extension `name` override — see [Annotations & Extensions](./annotations.md)). If neither exists, a name is generated from the path and method:
 
-```
+```text
 {method}_{sanitized_path}
 ```
 

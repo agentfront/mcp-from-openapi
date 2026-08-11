@@ -90,7 +90,7 @@ x-frontmcp:
 
 ### Merge order
 
-```
+```text
 HTTP-method inference  <  x-speakeasy-mcp  <  x-mcp  <  x-frontmcp
 ```
 

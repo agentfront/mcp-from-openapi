@@ -219,15 +219,7 @@ interface ParameterMapper {
 }
 ```
 
-`wholeBody` is set for non-object bodies (arrays, primitives, binary) and root `oneOf`/`anyOf` union bodies: send `input[inputKey]` directly as the request body instead of wrapping it in `{ [key]: value }`.
-
-```typescript
-interface SerializationInfo {
-  contentType?: string;                     // Body content type
-  encoding?: Record<string, EncodingObject>; // OpenAPI media-type encoding rules
-  binary?: boolean;                          // File part / raw binary body (format: binary)
-}
-```
+`wholeBody` is set for non-object bodies (arrays, primitives, binary) and root `oneOf`/`anyOf` union bodies: send `input[inputKey]` directly as the request body instead of wrapping it in `{ [key]: value }`. See [SerializationInfo](#serializationinfo) for the content-type, encoding, and binary markers.
 
 ---
 
@@ -298,8 +290,9 @@ Serialization details for complex parameters.
 
 ```typescript
 interface SerializationInfo {
-  contentType?: string;
-  encoding?: Record<string, EncodingObject>;
+  contentType?: string;                      // Body content type
+  encoding?: Record<string, EncodingObject>; // OpenAPI media-type encoding rules
+  binary?: boolean;                          // File part / raw binary body (format: binary)
 }
 ```
 

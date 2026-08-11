@@ -372,8 +372,25 @@ describe('toJsonSchema', () => {
 
       expect((result as any).nullable).toBeUndefined();
       expect(result.anyOf).toHaveLength(2);
-      expect(result.anyOf[0].description).toBe('anything');
       expect(result.anyOf[1]).toEqual({ type: 'null' });
+      // annotations are hoisted onto the wrapper, not buried in anyOf[0]
+      expect(result.description).toBe('anything');
+      expect(result.anyOf[0].description).toBeUndefined();
+    });
+
+    it('should hoist title and deprecated onto the nullable wrapper', () => {
+      const schema = {
+        oneOf: [{ type: 'string' }],
+        nullable: true,
+        title: 'Maybe',
+        deprecated: true,
+      } as any;
+      const result = toJsonSchema(schema) as any;
+
+      expect(result.title).toBe('Maybe');
+      expect(result.deprecated).toBe(true);
+      expect(result.anyOf[0].title).toBeUndefined();
+      expect(result.anyOf[0].oneOf).toHaveLength(1);
     });
 
     it('should preserve nullability of compositions via anyOf wrapping', () => {
