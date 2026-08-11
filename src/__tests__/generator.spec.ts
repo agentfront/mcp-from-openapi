@@ -3035,3 +3035,283 @@ describe('Deterministic tool ordering', () => {
     );
   });
 });
+
+describe('Deep request-body handling', () => {
+  const bodySpec = (requestBody: any): any => ({
+    openapi: '3.0.0',
+    info: { title: 'Body API', version: '1.0.0' },
+    paths: {
+      '/submit': {
+        post: {
+          operationId: 'submit',
+          requestBody,
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+    },
+  });
+
+  it('should flatten allOf request bodies into named parameters', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              allOf: [
+                { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+                { type: 'object', properties: { age: { type: 'integer' } }, required: ['age'] },
+              ],
+            },
+          },
+        },
+      }),
+      { dereference: false },
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const props = (tool.inputSchema as any).properties;
+
+    expect(Object.keys(props).sort()).toEqual(['age', 'name']);
+    expect((tool.inputSchema as any).required.sort()).toEqual(['age', 'name']);
+    expect(tool.mapper.filter((m) => m.type === 'body')).toHaveLength(2);
+    expect(tool.mapper.every((m) => !m.wholeBody)).toBe(true);
+  });
+
+  it('should merge nested allOf members and direct properties', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/json': {
+            schema: {
+              allOf: [
+                {
+                  allOf: [{ type: 'object', properties: { deep: { type: 'string' } } }],
+                },
+                { type: 'object', properties: { shallow: { type: 'boolean' } } },
+              ],
+              properties: { direct: { type: 'number' } },
+            },
+          },
+        },
+      }),
+      { dereference: false },
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const props = (tool.inputSchema as any).properties;
+
+    expect(Object.keys(props).sort()).toEqual(['deep', 'direct', 'shallow']);
+  });
+
+  it('should flatten object bodies that declare properties without an explicit type', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/json': {
+            schema: { properties: { untyped: { type: 'string' } } },
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+
+    expect((tool.inputSchema as any).properties.untyped).toBeDefined();
+  });
+
+  it('should keep oneOf union bodies whole with a wholeBody mapper flag', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              oneOf: [
+                { type: 'object', properties: { email: { type: 'string' } }, required: ['email'] },
+                { type: 'object', properties: { phone: { type: 'string' } }, required: ['phone'] },
+              ],
+            },
+          },
+        },
+      }),
+      { dereference: false },
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const props = (tool.inputSchema as any).properties;
+    const bodyMapper = tool.mapper.find((m) => m.type === 'body');
+
+    expect(Object.keys(props)).toEqual(['body']);
+    expect(props.body.oneOf).toHaveLength(2);
+    expect(bodyMapper?.wholeBody).toBe(true);
+    expect(bodyMapper?.required).toBe(true);
+  });
+
+  it('should keep anyOf union bodies whole', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/json': {
+            schema: { anyOf: [{ type: 'string' }, { type: 'integer' }] },
+          },
+        },
+      }),
+      { dereference: false },
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const bodyMapper = tool.mapper.find((m) => m.type === 'body');
+
+    expect((tool.inputSchema as any).properties.body.anyOf).toHaveLength(2);
+    expect(bodyMapper?.wholeBody).toBe(true);
+  });
+
+  it('should flag array bodies as wholeBody', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/json': {
+            schema: { type: 'array', items: { type: 'string' } },
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const bodyMapper = tool.mapper.find((m) => m.type === 'body');
+
+    expect(bodyMapper?.wholeBody).toBe(true);
+  });
+
+  it('should mark multipart file parts as binary and propagate encoding', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        required: true,
+        content: {
+          'multipart/form-data': {
+            schema: {
+              type: 'object',
+              properties: {
+                file: { type: 'string', format: 'binary' },
+                caption: { type: 'string' },
+              },
+              required: ['file'],
+            },
+            encoding: {
+              file: { contentType: 'application/octet-stream' },
+            },
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const fileMapper = tool.mapper.find((m) => m.inputKey === 'file');
+    const captionMapper = tool.mapper.find((m) => m.inputKey === 'caption');
+
+    expect(fileMapper?.serialization?.contentType).toBe('multipart/form-data');
+    expect(fileMapper?.serialization?.binary).toBe(true);
+    expect(fileMapper?.serialization?.encoding).toEqual({ file: { contentType: 'application/octet-stream' } });
+    expect(fileMapper?.required).toBe(true);
+    expect(captionMapper?.serialization?.binary).toBeUndefined();
+    expect(captionMapper?.serialization?.encoding).toBeUndefined();
+  });
+
+  it('should mark raw binary whole bodies as binary', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/octet-stream': {
+            schema: { type: 'string', format: 'binary' },
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const bodyMapper = tool.mapper.find((m) => m.type === 'body');
+
+    expect(bodyMapper?.wholeBody).toBe(true);
+    expect(bodyMapper?.serialization?.binary).toBe(true);
+    expect(bodyMapper?.serialization?.contentType).toBe('application/octet-stream');
+  });
+
+  it('should mark OpenAPI 3.1 contentMediaType schemas as binary', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'multipart/form-data': {
+            schema: {
+              type: 'object',
+              properties: {
+                image: { type: 'string', contentMediaType: 'image/png' },
+                doc: { type: 'string', contentMediaType: 'text/plain', contentEncoding: 'base64' },
+              },
+            },
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const imageMapper = tool.mapper.find((m) => m.inputKey === 'image');
+    const docMapper = tool.mapper.find((m) => m.inputKey === 'doc');
+
+    expect(imageMapper?.serialization?.binary).toBe(true);
+    // base64-encoded content is a string payload, not raw binary
+    expect(docMapper?.serialization?.binary).toBeUndefined();
+  });
+});
+
+describe('Whole-body parameters in edge positions', () => {
+  it('should keep the wholeBody flag through name-conflict resolution', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Conflict API', version: '1.0.0' },
+      paths: {
+        '/things': {
+          post: {
+            operationId: 'createThing',
+            parameters: [{ name: 'body', in: 'query', schema: { type: 'string' } }],
+            requestBody: {
+              content: {
+                'application/json': { schema: { type: 'array', items: { type: 'string' } } },
+              },
+            },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/things', 'post');
+
+    const bodyEntry = tool.mapper.find((m) => m.type === 'body');
+    const queryEntry = tool.mapper.find((m) => m.type === 'query');
+
+    expect(bodyEntry?.wholeBody).toBe(true);
+    expect(queryEntry?.wholeBody).toBeUndefined();
+    // conflict resolution renamed both sides
+    expect(bodyEntry?.inputKey).not.toBe(queryEntry?.inputKey);
+  });
+
+  it('should carry the full encoding map on whole-body parameters', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Encoding API', version: '1.0.0' },
+      paths: {
+        '/upload': {
+          post: {
+            operationId: 'upload',
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: { type: 'array', items: { type: 'string' } },
+                  encoding: { part: { contentType: 'text/plain' } },
+                },
+              },
+            },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/upload', 'post');
+    const bodyEntry = tool.mapper.find((m) => m.type === 'body');
+
+    expect(bodyEntry?.serialization?.encoding).toEqual({ part: { contentType: 'text/plain' } });
+  });
+});

@@ -307,6 +307,15 @@ export interface ParameterMapper {
   serialization?: SerializationInfo;
 
   /**
+   * When true, this input value IS the entire request body — set for
+   * non-object bodies (arrays, primitives, binary) and for `oneOf`/`anyOf`
+   * union bodies that cannot be flattened into named properties. Consumers
+   * building requests must send the value directly as the body instead of
+   * wrapping it in an object keyed by `key`.
+   */
+  wholeBody?: boolean;
+
+  /**
    * Security scheme information (if this is an auth parameter)
    * This allows frameworks to resolve auth from context, env vars, etc.
    */
@@ -323,9 +332,17 @@ export interface SerializationInfo {
   contentType?: string;
 
   /**
-   * Encoding rules
+   * Encoding rules from the request body's media type (OpenAPI `encoding`).
+   * For a flattened body-property parameter this contains only that
+   * property's entry; for a whole-body parameter it is the full map.
    */
   encoding?: Record<string, EncodingObject>;
+
+  /**
+   * File-upload marker: the parameter schema declares binary content
+   * (`format: binary`), e.g. a multipart file part or a raw binary body.
+   */
+  binary?: boolean;
 }
 
 /**

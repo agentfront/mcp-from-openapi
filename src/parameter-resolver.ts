@@ -106,7 +106,7 @@ export class ParameterResolver {
           ? collectExampleValues(mediaType.example, mediaType.examples)
           : undefined;
         /* c8 ignore next -- both sides of ?? tested: true by required body tests, false by optional body tests */
-        this.extractBodyParameters(mediaType.schema, parametersByName, requestBody.required ?? false, contentType, mediaExamples);
+        this.extractBodyParameters(mediaType.schema, parametersByName, requestBody.required ?? false, contentType, mediaExamples, mediaType.encoding);
       }
     }
 
@@ -134,6 +134,7 @@ export class ParameterResolver {
           style: param.style,
           explode: param.explode,
           serialization: param.serialization,
+          ...(param.wholeBody && { wholeBody: true }),
         });
       } else {
         // Conflict - need to resolve
@@ -153,6 +154,7 @@ export class ParameterResolver {
             style: param.style,
             explode: param.explode,
             serialization: param.serialization,
+            ...(param.wholeBody && { wholeBody: true }),
           });
         });
       }
@@ -188,6 +190,7 @@ export class ParameterResolver {
     required: boolean,
     contentType: string,
     mediaExamples?: unknown[],
+    encoding?: Record<string, any>,
     prefix = '',
   ): void {
     if (!schema || typeof schema !== 'object') return;
@@ -195,16 +198,20 @@ export class ParameterResolver {
     // Convert to JsonSchema for processing
     const jsonSchema = toJsonSchema(schema);
 
-    // Handle object schemas
-    if (jsonSchema.type === 'object' && jsonSchema.properties) {
-      const requiredFields = new Set(jsonSchema.required ?? []);
+    // Flatten object bodies into named parameters — including `allOf`
+    // compositions, whose object members merge into one property set.
+    const flattened = flattenObjectBody(jsonSchema);
 
-      for (const [propName, propSchema] of Object.entries(jsonSchema.properties)) {
+    if (flattened) {
+      const requiredFields = flattened.required;
+
+      for (const [propName, propSchema] of Object.entries(flattened.properties)) {
         /* c8 ignore next -- prefix is only used internally and defaults to '' */
         const fullName = prefix ? `${prefix}.${propName}` : propName;
         const isRequired = required && requiredFields.has(propName);
 
         if (typeof propSchema === 'object') {
+          const propEncoding = encoding?.[propName];
           const info: ParameterInfo = {
             name: fullName,
             location: 'body',
@@ -213,6 +220,8 @@ export class ParameterResolver {
             description: (propSchema as any).description,
             serialization: {
               contentType,
+              ...(propEncoding && { encoding: { [propName]: propEncoding } }),
+              ...(isBinarySchema(propSchema as JsonSchema) && { binary: true }),
             },
           };
 
@@ -223,16 +232,20 @@ export class ParameterResolver {
         }
       }
     } else {
-      // For non-object bodies (arrays, primitives), treat as single parameter
+      // Whole-body parameter: non-object bodies (arrays, primitives, binary)
+      // and root oneOf/anyOf unions that cannot be flattened into properties.
       const bodyParamName = prefix || 'body';
       const info: ParameterInfo = {
         name: bodyParamName,
         location: 'body',
         required,
-        schema,
+        schema: jsonSchema,
         examples: mediaExamples,
+        wholeBody: true,
         serialization: {
           contentType,
+          ...(encoding && Object.keys(encoding).length > 0 && { encoding }),
+          ...(isBinarySchema(jsonSchema) && { binary: true }),
         },
       };
 
@@ -413,10 +426,73 @@ interface ParameterInfo {
   allowReserved?: boolean;
   deprecated?: boolean;
   examples?: unknown[];
+  wholeBody?: boolean;
   serialization?: {
     contentType?: string;
     encoding?: Record<string, any>;
+    binary?: boolean;
   };
+}
+
+/**
+ * A flattened view of an object request body: the combined property map and
+ * required set, with `allOf` members merged in (later members win on property
+ * collisions, required sets union).
+ */
+interface FlattenedObjectBody {
+  properties: Record<string, JsonSchema>;
+  required: Set<string>;
+}
+
+/**
+ * Flatten an object body schema — including `allOf` compositions — into a
+ * single property map. Returns undefined when the body cannot be represented
+ * as named properties: root `oneOf`/`anyOf` unions (variant fields would
+ * collide and blur which variant is meant), non-object schemas (arrays,
+ * primitives, binary), and free-form objects without properties.
+ */
+function flattenObjectBody(schema: JsonSchema): FlattenedObjectBody | undefined {
+  /* c8 ignore next -- defensive: toJsonSchema always yields objects, so non-object nodes cannot reach here */
+  if (!schema || typeof schema !== 'object') return undefined;
+
+  // Root unions stay whole: flattening variants would mix their fields
+  if (Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf)) return undefined;
+
+  const properties: Record<string, JsonSchema> = {};
+  const required = new Set<string>();
+
+  // allOf members merge first (in order), direct properties win last
+  if (Array.isArray(schema.allOf)) {
+    for (const member of schema.allOf) {
+      const flattenedMember = flattenObjectBody(member as JsonSchema);
+      if (flattenedMember) {
+        Object.assign(properties, flattenedMember.properties);
+        flattenedMember.required.forEach((field) => required.add(field));
+      }
+    }
+  }
+
+  if (schema.properties && typeof schema.properties === 'object') {
+    Object.assign(properties, schema.properties as Record<string, JsonSchema>);
+  }
+  if (Array.isArray(schema.required)) {
+    schema.required.forEach((field) => required.add(field));
+  }
+
+  return Object.keys(properties).length > 0 ? { properties, required } : undefined;
+}
+
+/**
+ * Does the schema declare raw binary content (a file part / binary body)?
+ * OpenAPI 3.0 uses `format: binary`; 3.1 leans on `contentMediaType` without
+ * `contentEncoding` for raw binary.
+ */
+function isBinarySchema(schema: JsonSchema): boolean {
+  /* c8 ignore next -- defensive: callers guard with `typeof === 'object'` before invoking */
+  if (!schema || typeof schema !== 'object') return false;
+  const record = schema as Record<string, unknown>;
+  if (record['format'] === 'binary') return true;
+  return typeof record['contentMediaType'] === 'string' && record['contentEncoding'] === undefined;
 }
 
 /**
