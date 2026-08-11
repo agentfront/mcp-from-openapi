@@ -333,6 +333,114 @@ export class SchemaBuilder {
   }
 
   /**
+   * Truncate a schema tree to a maximum nesting depth.
+   *
+   * The root sits at depth 0; descending into `properties` values, `items`,
+   * `additionalProperties`, composition members (`allOf`/`anyOf`/`oneOf`), or
+   * `not` increments the depth. Nodes at `maxDepth` keep their scalar keywords
+   * (type, description, format, ...) but have their child schemas stripped and
+   * a truncation note appended to the description.
+   */
+  static truncateDepth(schema: JsonSchema, maxDepth: number): JsonSchema {
+    // Guard the depth bound itself: NaN/Infinity would disable truncation
+    // (`depth >= NaN` is always false) and hang on circular graphs; fractional
+    // depths floor. Non-finite input falls back to the documented default.
+    const bound = Number.isFinite(maxDepth) ? Math.max(0, Math.floor(maxDepth)) : 10;
+    return this.truncateDepthRecursive(schema, 0, bound);
+  }
+
+  /** Keys whose value is a map of schemas (JSON Schema 2020-12) */
+  private static readonly TRUNCATE_MAP_KEYS = [
+    'properties',
+    'patternProperties',
+    '$defs',
+    'definitions',
+    'dependentSchemas',
+  ] as const;
+
+  /** Keys whose value is a single schema (or, for `items`, a tuple array) */
+  private static readonly TRUNCATE_SCHEMA_KEYS = [
+    'items',
+    'additionalProperties',
+    'not',
+    'if',
+    'then',
+    'else',
+    'propertyNames',
+    'contains',
+    'contentSchema',
+    'unevaluatedProperties',
+    'unevaluatedItems',
+  ] as const;
+
+  /** Keys whose value is an array of schemas */
+  private static readonly TRUNCATE_LIST_KEYS = ['allOf', 'anyOf', 'oneOf', 'prefixItems'] as const;
+
+  // Copy-on-walk: never mutates the input, only copies nodes that have schema
+  // children, and — because the walk is depth-bounded — terminates even on
+  // circular schema graphs (which `clone()`'s JSON round-trip would reject).
+  private static truncateDepthRecursive(node: JsonSchema, depth: number, maxDepth: number): JsonSchema {
+    /* c8 ignore next -- guard for boolean/degenerate schemas in recursive traversal */
+    if (!node || typeof node !== 'object') return node;
+
+    const record = node as Record<string, unknown>;
+    const childKeys = [...this.TRUNCATE_MAP_KEYS, ...this.TRUNCATE_SCHEMA_KEYS, ...this.TRUNCATE_LIST_KEYS];
+    const hasChildren = childKeys.some((key) => {
+      const value = record[key];
+      return value !== null && typeof value === 'object';
+    });
+
+    if (!hasChildren) return node;
+
+    const copy = { ...node } as JsonSchema;
+    const copyRecord = copy as Record<string, unknown>;
+
+    if (depth >= maxDepth) {
+      for (const key of childKeys) {
+        const value = copyRecord[key];
+        if (value !== null && typeof value === 'object') {
+          delete copyRecord[key];
+        }
+      }
+      // `required` refers to stripped properties; drop it alongside them
+      delete copyRecord['required'];
+      const note = '[Truncated: nested schema exceeds maxSchemaDepth]';
+      copy.description = copy.description ? `${copy.description} ${note}` : note;
+      return copy;
+    }
+
+    for (const key of this.TRUNCATE_MAP_KEYS) {
+      const value = copyRecord[key];
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        const mapped: Record<string, JsonSchema> = {};
+        for (const [name, sub] of Object.entries(value as Record<string, JsonSchema>)) {
+          mapped[name] = this.truncateDepthRecursive(sub, depth + 1, maxDepth);
+        }
+        copyRecord[key] = mapped;
+      }
+    }
+
+    for (const key of this.TRUNCATE_SCHEMA_KEYS) {
+      const value = copyRecord[key];
+      if (value !== null && typeof value === 'object') {
+        // `items` may be a tuple array (pre-2020-12 style)
+        copyRecord[key] = Array.isArray(value)
+          ? value.map((item) => this.truncateDepthRecursive(item as JsonSchema, depth + 1, maxDepth))
+          : this.truncateDepthRecursive(value as JsonSchema, depth + 1, maxDepth);
+      }
+    }
+
+    for (const key of this.TRUNCATE_LIST_KEYS) {
+      const value = copyRecord[key];
+      if (Array.isArray(value)) {
+        copyRecord[key] = value.map((member) => this.truncateDepthRecursive(member as JsonSchema, depth + 1, maxDepth));
+      }
+    }
+
+    return copy;
+  }
+
+  /**
    * Simplify schema by removing unnecessary fields
    */
   static simplify(schema: JsonSchema): JsonSchema {

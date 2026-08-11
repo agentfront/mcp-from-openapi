@@ -209,8 +209,12 @@ function buildRequest(tool: McpOpenAPITool, input: Record<string, any>) {
         headers[m.key] = String(value);
         break;
       case 'body':
-        if (!body) body = {};
-        body[m.key] = value;
+        if (m.wholeBody) {
+          body = value; // non-object/union bodies: the value IS the entire body
+        } else {
+          if (!body) body = {};
+          body[m.key] = value;
+        }
         break;
     }
   }
@@ -223,7 +227,9 @@ function buildRequest(tool: McpOpenAPITool, input: Record<string, any>) {
     url,
     method: tool.metadata.method.toUpperCase(),
     headers,
-    body: body ? JSON.stringify(body) : undefined,
+    // NOTE: binary bodies (mapper serialization.binary) need raw/multipart
+    // serialization per serialization.contentType, not JSON.stringify
+    body: body !== undefined ? JSON.stringify(body) : undefined,
   };
 }
 ```

@@ -32,9 +32,10 @@ OpenAPIToolGenerator (src/generator.ts)
 
 | File | Purpose |
 |------|---------|
-| `src/generator.ts` | Main entry point. Factory methods (`fromJSON`, `fromYAML`, `fromURL`, `fromFile`), tool generation, SSRF protection, `$ref` dereferencing |
-| `src/types.ts` | All type definitions, `toJsonSchema()` conversion, `isReferenceObject()` guard |
-| `src/parameter-resolver.ts` | Resolves OpenAPI parameters + requestBody into flat inputSchema with conflict resolution |
+| `src/generator.ts` | Main entry point. Factory methods (`fromJSON`, `fromYAML`, `fromURL`, `fromFile`), tool generation, tool-name normalization/dedup, SSRF protection, `$ref` dereferencing |
+| `src/types.ts` | All type definitions, `toJsonSchema()` conversion (incl. `nullable`/`example`/`xml` normalization), `isReferenceObject()` guard |
+| `src/annotations.ts` | HTTP-method annotation inference + `x-mcp` extension family overrides (`x-speakeasy-mcp` < `x-mcp` < `x-frontmcp`) |
+| `src/parameter-resolver.ts` | Resolves OpenAPI parameters + requestBody into flat inputSchema with conflict resolution; flattens `allOf` bodies, flags `wholeBody`/`binary` |
 | `src/response-builder.ts` | Builds outputSchema from OpenAPI responses with content-type and status code preferences |
 | `src/format-resolver.ts` | Format-to-schema resolution. Built-in resolvers for uuid, date-time, email, int32, etc. |
 | `src/schema-builder.ts` | Static utilities: merge, union, clone, flatten, simplify, withFormat, etc. |
@@ -115,12 +116,15 @@ GenerateOptions (generateTools/generateTool)
 
 ## Key Conventions
 
-- `toJsonSchema()` converts OpenAPI SchemaObject to JSON Schema (handles exclusiveMin/Max boolean-to-numeric conversion)
+- `toJsonSchema()` converts OpenAPI SchemaObject to JSON Schema 2020-12 (exclusiveMin/Max boolean-to-numeric, `nullable` → type union, `example` → `examples`, drops `xml`)
 - Schemas pass through `toJsonSchema()` in both ParameterResolver and ResponseBuilder
 - Metadata is attached via `x-` prefixed properties (`x-parameter-location`, `x-status-code`, `x-content-type`)
-- The `mapper` array maps inputSchema keys to their HTTP locations (path/query/header/body/cookie)
+- The `mapper` array maps inputSchema keys to their HTTP locations (path/query/header/body/cookie); `wholeBody: true` means the value IS the entire body; `serialization.binary` marks file parts
 - Security info lives on mapper entries (not on inputSchema unless `includeSecurityInInput: true`)
-- Format resolution is a post-processing step applied to final inputSchema/outputSchema
+- Tool names are always normalized to MCP rules (`[A-Za-z0-9_.-]`, `maxToolNameLength` cap default 64, hash-suffix truncation, collision dedup in `generateTools`)
+- Tool `title`/`annotations` come from HTTP-method inference (`inferAnnotations`, default on) + `x-mcp` family overrides in `src/annotations.ts`
+- `generateTools()` output is deterministically ordered (path asc, canonical method order)
+- Format resolution is a post-processing step applied to final inputSchema/outputSchema; `maxSchemaDepth` truncation (default 10) runs last
 
 ## Documentation
 

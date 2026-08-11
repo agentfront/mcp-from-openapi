@@ -349,6 +349,163 @@ describe('toJsonSchema', () => {
     });
   });
 
+  describe('Nullable Conversion (OpenAPI 3.0)', () => {
+    it('should convert nullable:true with a single type to a type union', () => {
+      const schema: SchemaObject = { type: 'string', nullable: true } as any;
+      const result = toJsonSchema(schema);
+
+      expect(result.type).toEqual(['string', 'null']);
+      expect((result as any).nullable).toBeUndefined();
+    });
+
+    it('should drop nullable:false without changing the type', () => {
+      const schema: SchemaObject = { type: 'string', nullable: false } as any;
+      const result = toJsonSchema(schema);
+
+      expect(result.type).toBe('string');
+      expect((result as any).nullable).toBeUndefined();
+    });
+
+    it('should wrap type-less nullable schemas in an anyOf with null', () => {
+      const schema = { nullable: true, description: 'anything' } as any;
+      const result = toJsonSchema(schema) as any;
+
+      expect((result as any).nullable).toBeUndefined();
+      expect(result.anyOf).toHaveLength(2);
+      expect(result.anyOf[1]).toEqual({ type: 'null' });
+      // annotations are hoisted onto the wrapper, not buried in anyOf[0]
+      expect(result.description).toBe('anything');
+      expect(result.anyOf[0].description).toBeUndefined();
+    });
+
+    it('should hoist title and deprecated onto the nullable wrapper', () => {
+      const schema = {
+        oneOf: [{ type: 'string' }],
+        nullable: true,
+        title: 'Maybe',
+        deprecated: true,
+      } as any;
+      const result = toJsonSchema(schema) as any;
+
+      expect(result.title).toBe('Maybe');
+      expect(result.deprecated).toBe(true);
+      expect(result.anyOf[0].title).toBeUndefined();
+      expect(result.anyOf[0].oneOf).toHaveLength(1);
+    });
+
+    it('should preserve nullability of compositions via anyOf wrapping', () => {
+      const schema = { oneOf: [{ type: 'string' }, { type: 'integer' }], nullable: true } as any;
+      const result = toJsonSchema(schema) as any;
+
+      expect(result.anyOf).toHaveLength(2);
+      expect(result.anyOf[0].oneOf).toHaveLength(2);
+      expect(result.anyOf[1]).toEqual({ type: 'null' });
+      expect(result.nullable).toBeUndefined();
+    });
+
+    it('should preserve nullability of enum-only schemas via anyOf wrapping', () => {
+      const schema = { enum: ['a', 'b'], nullable: true } as any;
+      const result = toJsonSchema(schema) as any;
+
+      expect(result.anyOf[0].enum).toEqual(['a', 'b']);
+      expect(result.anyOf[1]).toEqual({ type: 'null' });
+    });
+
+    it('should append null to an existing type array', () => {
+      const schema = { type: ['string', 'number'], nullable: true } as any;
+      const result = toJsonSchema(schema);
+
+      expect(result.type).toEqual(['string', 'number', 'null']);
+    });
+
+    it('should not duplicate null in a type array that already includes it', () => {
+      const schema = { type: ['string', 'null'], nullable: true } as any;
+      const result = toJsonSchema(schema);
+
+      expect(result.type).toEqual(['string', 'null']);
+    });
+
+    it('should leave type:null alone when nullable:true', () => {
+      const schema = { type: 'null', nullable: true } as any;
+      const result = toJsonSchema(schema);
+
+      expect(result.type).toBe('null');
+    });
+
+    it('should convert nullable in nested properties', () => {
+      const schema: SchemaObject = {
+        type: 'object',
+        properties: {
+          name: { type: 'string', nullable: true } as any,
+        },
+      };
+      const result = toJsonSchema(schema) as any;
+
+      expect(result.properties?.name.type).toEqual(['string', 'null']);
+      expect(result.properties?.name.nullable).toBeUndefined();
+    });
+  });
+
+  describe('Example Normalization', () => {
+    it('should convert singular example to an examples array', () => {
+      const schema: SchemaObject = { type: 'string', example: 'hello' } as any;
+      const result = toJsonSchema(schema);
+
+      expect(result.examples).toEqual(['hello']);
+      expect((result as any).example).toBeUndefined();
+    });
+
+    it('should keep an existing examples array and drop the singular example', () => {
+      const schema = { type: 'string', example: 'a', examples: ['b', 'c'] } as any;
+      const result = toJsonSchema(schema);
+
+      expect(result.examples).toEqual(['b', 'c']);
+      expect((result as any).example).toBeUndefined();
+    });
+
+    it('should preserve OpenAPI 3.1 examples arrays as-is', () => {
+      const schema = { type: 'string', examples: ['x'] } as any;
+      const result = toJsonSchema(schema);
+
+      expect(result.examples).toEqual(['x']);
+    });
+
+    it('should convert falsy examples (0, false, null)', () => {
+      expect(toJsonSchema({ type: 'integer', example: 0 } as any).examples).toEqual([0]);
+      expect(toJsonSchema({ type: 'boolean', example: false } as any).examples).toEqual([false]);
+      expect(toJsonSchema({ type: 'string', nullable: true, example: null } as any).examples).toEqual([null]);
+    });
+
+    it('should convert example in nested properties', () => {
+      const schema: SchemaObject = {
+        type: 'object',
+        properties: {
+          id: { type: 'string', example: 'abc-123' } as any,
+        },
+      };
+      const result = toJsonSchema(schema) as any;
+
+      expect(result.properties?.id.examples).toEqual(['abc-123']);
+    });
+  });
+
+  describe('XML Metadata Removal', () => {
+    it('should drop the xml keyword', () => {
+      const schema: SchemaObject = {
+        type: 'object',
+        xml: { name: 'user', wrapped: true },
+        properties: {
+          id: { type: 'string', xml: { attribute: true } } as any,
+        },
+      } as any;
+      const result = toJsonSchema(schema) as any;
+
+      expect(result.xml).toBeUndefined();
+      expect(result.properties?.id.xml).toBeUndefined();
+      expect(result.properties?.id.type).toBe('string');
+    });
+  });
+
   describe('Complex Schemas', () => {
     it('should handle deeply nested schema', () => {
       const schema: SchemaObject = {
@@ -396,5 +553,72 @@ describe('toJsonSchema', () => {
       expect(result.oneOf).toBeDefined();
       expect(result.not).toBeDefined();
     });
+  });
+});
+
+describe('toJsonSchema 2020-12 keyword traversal', () => {
+  const nullableString = { type: 'string', nullable: true, example: 'v', xml: { name: 'n' } } as any;
+  const expectNormalized = (node: any) => {
+    expect(node.type).toEqual(['string', 'null']);
+    expect(node.nullable).toBeUndefined();
+    expect(node.examples).toEqual(['v']);
+    expect(node.example).toBeUndefined();
+    expect(node.xml).toBeUndefined();
+  };
+
+  it('should normalize schemas under map-of-schemas keywords', () => {
+    const result = toJsonSchema({
+      type: 'object',
+      patternProperties: { '^x-': nullableString },
+      $defs: { Node: nullableString },
+      definitions: { Legacy: nullableString },
+      dependentSchemas: { flag: nullableString },
+    } as any) as any;
+
+    expectNormalized(result.patternProperties['^x-']);
+    expectNormalized(result.$defs.Node);
+    expectNormalized(result.definitions.Legacy);
+    expectNormalized(result.dependentSchemas.flag);
+  });
+
+  it('should normalize schemas under single-schema keywords', () => {
+    const result = toJsonSchema({
+      contains: nullableString,
+      propertyNames: { pattern: '^a' },
+      if: nullableString,
+      then: nullableString,
+      else: nullableString,
+      contentSchema: nullableString,
+      unevaluatedItems: nullableString,
+      unevaluatedProperties: false,
+    } as any) as any;
+
+    expectNormalized(result.contains);
+    expectNormalized(result.if);
+    expectNormalized(result.then);
+    expectNormalized(result.else);
+    expectNormalized(result.contentSchema);
+    expectNormalized(result.unevaluatedItems);
+    expect(result.propertyNames).toEqual({ pattern: '^a' });
+    expect(result.unevaluatedProperties).toBe(false); // boolean form untouched
+  });
+
+  it('should normalize schemas under prefixItems', () => {
+    const result = toJsonSchema({
+      type: 'array',
+      prefixItems: [nullableString, { type: 'number' }],
+    } as any) as any;
+
+    expectNormalized(result.prefixItems[0]);
+    expect(result.prefixItems[1]).toEqual({ type: 'number' });
+  });
+
+  it('should hoist examples onto the nullable anyOf wrapper', () => {
+    const result = toJsonSchema({ enum: ['a', 'b'], nullable: true, example: 'a' } as any) as any;
+
+    expect(result.examples).toEqual(['a']);
+    expect(result.anyOf[0].examples).toBeUndefined();
+    expect(result.anyOf[0].enum).toEqual(['a', 'b']);
+    expect(result.anyOf[1]).toEqual({ type: 'null' });
   });
 });

@@ -50,14 +50,15 @@ Now you know exactly how to build the HTTP request.
 
 ## Features
 
-- **Smart Parameter Handling** -- Automatic conflict detection and resolution across path, query, header, cookie, and body
-- **Complete Schemas** -- Input schema combines all parameters; output schema from responses (with oneOf unions)
+- **Smart Parameter Handling** -- Automatic conflict detection and resolution across path, query, header, cookie, and body; `allOf` bodies flatten, union and binary bodies map cleanly (`wholeBody`, `binary` markers)
+- **Complete Schemas** -- Input schema combines all parameters; output schema from responses (with oneOf unions); clean JSON Schema 2020-12 output (`nullable` unions, normalized `examples`)
+- **MCP-Native Tools** -- `title` and tool `annotations` (readOnly/destructive/idempotent hints) inferred from HTTP semantics, overridable via the `x-mcp` extension family; spec-compliant tool names (64-char cap, stable hash truncation, collision dedup); deterministic tool ordering for prompt-cache friendliness
 - **Security Resolution** -- Framework-agnostic auth for Bearer, Basic, Digest, API Key, OAuth2, OpenID, mTLS, HMAC, AWS Sig V4
 - **SSRF Prevention** -- Blocks internal IPs, localhost, and cloud metadata endpoints by default during `$ref` resolution
 - **Multiple Input Sources** -- Load from URL, file, YAML string, or JSON object
 - **Rich Metadata** -- Authentication, servers, tags, deprecation, external docs, `x-frontmcp` extension
-- **Production Ready** -- Full TypeScript support, validation, structured errors, 80%+ test coverage
-- **MCP Native** -- Designed specifically for Model Context Protocol integration
+- **Production Ready** -- Full TypeScript support, validation, structured errors, 100% statement test coverage
+- **Runtime Agnostic** -- Works on Node and V8 isolates (Cloudflare Workers) alike
 
 ## Installation
 
@@ -83,6 +84,8 @@ const tools = await generator.generateTools();
 // Each tool has everything you need
 tools.forEach((tool) => {
   console.log(tool.name);          // "createUser"
+  console.log(tool.title);         // "Create a user" (from summary/extensions)
+  console.log(tool.annotations);   // { readOnlyHint: false, destructiveHint: true, ... }
   console.log(tool.inputSchema);   // Combined schema for all params
   console.log(tool.outputSchema);  // Response schema
   console.log(tool.mapper);        // How to build the HTTP request
@@ -99,7 +102,7 @@ function buildRequest(tool: McpOpenAPITool, input: Record<string, any>) {
   let path = tool.metadata.path;
   const query = new URLSearchParams();
   const headers: Record<string, string> = {};
-  let body: Record<string, any> | undefined;
+  let body: any;
 
   for (const m of tool.mapper) {
     const value = input[m.inputKey];
@@ -116,8 +119,13 @@ function buildRequest(tool: McpOpenAPITool, input: Record<string, any>) {
         headers[m.key] = String(value);
         break;
       case 'body':
-        if (!body) body = {};
-        body[m.key] = value;
+        if (m.wholeBody) {
+          // Non-object / union bodies: the value IS the entire body
+          body = value;
+        } else {
+          if (!body) body = {};
+          body[m.key] = value;
+        }
         break;
     }
   }
@@ -129,7 +137,9 @@ function buildRequest(tool: McpOpenAPITool, input: Record<string, any>) {
     url: `${baseUrl}${path}${qs ? '?' + qs : ''}`,
     method: tool.metadata.method.toUpperCase(),
     headers,
-    body: body ? JSON.stringify(body) : undefined,
+    // NOTE: binary bodies (mapper serialization.binary) need raw/multipart
+    // serialization per serialization.contentType, not JSON.stringify
+    body: body !== undefined ? JSON.stringify(body) : undefined,
   };
 }
 ```
@@ -142,6 +152,7 @@ function buildRequest(tool: McpOpenAPITool, input: Record<string, any>) {
 | [Configuration](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/configuration.md) | LoadOptions, GenerateOptions, RefResolutionOptions |
 | [Parameter Conflicts](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/parameter-conflicts.md) | How conflict detection and resolution works |
 | [Response Schemas](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/response-schemas.md) | Output schemas, status codes, oneOf unions |
+| [Annotations & Extensions](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/annotations.md) | Tool title, annotation inference, `x-mcp` extension family |
 | [Security](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/security.md) | SecurityResolver, all auth types, custom resolvers |
 | [SSRF Prevention](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/ssrf-prevention.md) | Ref resolution security, blocked IPs and hosts |
 | [Format Resolution](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/FORMAT_RESOLUTION.md) | Format-to-schema enrichment (uuid, date-time, email, int32, etc.) |

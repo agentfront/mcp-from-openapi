@@ -4,6 +4,7 @@ import type { JSONSchema } from 'zod/v4/core';
 type JsonSchema = JSONSchema.JSONSchema;
 import type { ResponseObject, GenerateOptions, ResponsesObject } from './types';
 import { isReferenceObject, toJsonSchema } from './types';
+import { collectExampleValues } from './parameter-resolver';
 
 /**
  * Builds output schemas from OpenAPI response definitions
@@ -11,10 +12,12 @@ import { isReferenceObject, toJsonSchema } from './types';
 export class ResponseBuilder {
   private preferredStatusCodes: number[];
   private includeAllResponses: boolean;
+  private includeExamples: boolean;
 
   constructor(options: GenerateOptions = {}) {
     this.preferredStatusCodes = options.preferredStatusCodes ?? [200, 201, 204, 202, 203, 206];
     this.includeAllResponses = options.includeAllResponses ?? true;
+    this.includeExamples = options.includeExamples ?? false;
   }
 
   /**
@@ -115,6 +118,15 @@ export class ResponseBuilder {
     // Add description if not already present
     if (!schema.description && response.description) {
       schema.description = response.description;
+    }
+
+    // Media-type-level example(s) are more specific than schema-level ones,
+    // so they replace any schema-derived `examples` when enabled.
+    if (this.includeExamples) {
+      const mediaExamples = collectExampleValues(mediaType.example, mediaType.examples);
+      if (mediaExamples) {
+        schema.examples = mediaExamples as JsonSchema['examples'];
+      }
     }
 
     // Add content type metadata

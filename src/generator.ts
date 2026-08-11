@@ -24,10 +24,73 @@ import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import { isReferenceObject } from './types';
 import { ParameterResolver } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
+import { SchemaBuilder } from './schema-builder';
+import { extractExtensionOverrides, inferAnnotationsFromMethod } from './annotations';
 import { Validator } from './validator';
-import { LoadError, ParseError } from './errors';
+import { GenerationError, LoadError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
+
+/** MCP hard limit for tool name length (spec revision 2025-11-25, SEP-986) */
+const MCP_MAX_TOOL_NAME_LENGTH = 128;
+
+/** Default tool name cap — the strictest common client limit (Claude/Bedrock: 64) */
+const DEFAULT_MAX_TOOL_NAME_LENGTH = 64;
+
+/**
+ * Bound on collision-dedup retries. Generous for real specs (the first retry
+ * almost always succeeds), but finite so a tiny `maxToolNameLength` whose
+ * entire name space is exhausted fails loudly instead of looping forever.
+ */
+const MAX_NAME_DEDUP_ATTEMPTS = 256;
+
+/**
+ * 32-bit FNV-1a hash rendered as 8 hex chars. Used for stable, content-derived
+ * name suffixes (no Node `crypto` dependency, so V8-isolate runtimes work).
+ */
+function fnv1aHex(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * Sanitize and cap a tool name per MCP rules: only `[A-Za-z0-9_.-]`, 1-128
+ * chars. Invalid characters become underscores (collapsed); names longer than
+ * `maxLength` are truncated with a hash suffix derived from the FULL original
+ * name, keeping truncated names unique and stable across regenerations.
+ * `fallbackSeed` names the operation (method + path) when sanitization leaves
+ * nothing usable.
+ */
+function normalizeToolName(raw: string, maxLength: number, fallbackSeed: string): string {
+  // Hash the RAW name, not the sanitized one: two raws differing only in
+  // invalid characters must not collapse to the same truncation suffix.
+  let hashSeed = raw;
+  let name = raw
+    .replace(/[^A-Za-z0-9_.-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+  if (name.length === 0) {
+    hashSeed = fallbackSeed;
+    name = `tool_${fnv1aHex(fallbackSeed)}`;
+  }
+
+  const cap = Math.min(Math.max(1, maxLength), MCP_MAX_TOOL_NAME_LENGTH);
+  if (name.length > cap) {
+    // 9 = '_' + 8-char hash. Below that there is no room for a readable base.
+    if (cap >= 13) {
+      name = `${name.slice(0, cap - 9)}_${fnv1aHex(hashSeed)}`;
+    } else {
+      name = fnv1aHex(hashSeed).slice(0, cap);
+    }
+  }
+
+  return name;
+}
 
 /**
  * Main class for generating MCP tools from OpenAPI specifications
@@ -376,12 +439,20 @@ export class OpenAPIToolGenerator {
 
     const document = this.getDocument();
     const tools: McpOpenAPITool[] = [];
+    const usedNames = new Set<string>();
 
     if (!document.paths) {
       return tools;
     }
 
-    for (const [pathStr, pathItem] of Object.entries(document.paths)) {
+    // Deterministic ordering (MCP 2026-07-28 SHOULD): paths sorted by code
+    // unit (locale-independent), methods in the fixed canonical order below.
+    // Stable output across spec re-serializations keeps clients' prompt
+    // caches effective.
+    // (object keys are unique, so the comparator never sees equal paths)
+    const sortedPaths = Object.entries(document.paths).sort(([a], [b]) => (a < b ? -1 : 1));
+
+    for (const [pathStr, pathItem] of sortedPaths) {
       if (!pathItem || '$ref' in pathItem) continue;
 
       const methods: HTTPMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
@@ -396,7 +467,37 @@ export class OpenAPIToolGenerator {
         }
 
         try {
-          const tool = await this.generateTool(pathStr, method, options);
+          let tool = await this.generateTool(pathStr, method, options);
+          // Resolve tool-name collisions (e.g. duplicate operationIds) with a
+          // stable, content-derived suffix — the (method, path) pair is unique
+          // per operation, so the suffixed name is deterministic across runs.
+          if (usedNames.has(tool.name)) {
+            const maxLength = options.maxToolNameLength ?? DEFAULT_MAX_TOOL_NAME_LENGTH;
+            // Recheck after renaming: the suffixed name can itself be taken
+            // (e.g. an operationId that mimics a suffixed name, or truncated
+            // hash-only names under tiny caps). Extending the seed reseeds
+            // the hash deterministically until a free name is found — bounded,
+            // because a tiny cap (e.g. 1 = 16 possible hex names) can exhaust
+            // the name space entirely.
+            let seed = `${method} ${pathStr}`;
+            let deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
+            let attempts = 1;
+            while (usedNames.has(deduped)) {
+              if (attempts >= MAX_NAME_DEDUP_ATTEMPTS) {
+                throw new GenerationError(
+                  `Unable to find a unique tool name for "${tool.name}" (${method.toUpperCase()} ${pathStr}) ` +
+                    `within ${MAX_NAME_DEDUP_ATTEMPTS} attempts — the name space under maxToolNameLength=${maxLength} ` +
+                    `is exhausted. Increase maxToolNameLength or rename the operation.`,
+                  { name: tool.name, method, path: pathStr, maxToolNameLength: maxLength },
+                );
+              }
+              seed += '#';
+              deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
+              attempts++;
+            }
+            tool = { ...tool, name: deduped };
+          }
+          usedNames.add(tool.name);
           tools.push(tool);
         } catch (error: unknown) {
           /* c8 ignore next */
@@ -429,7 +530,9 @@ export class OpenAPIToolGenerator {
     }
 
     // Resolve parameters
-    const parameterResolver = new ParameterResolver(options.namingStrategy);
+    const parameterResolver = new ParameterResolver(options.namingStrategy, {
+      includeExamples: options.includeExamples,
+    });
 
     // Filter out ReferenceObjects from parameters
     let pathParameters: ParameterObject[] | undefined = undefined;
@@ -457,11 +560,28 @@ export class OpenAPIToolGenerator {
     const responseBuilder = new ResponseBuilder(options);
     const outputSchema = responseBuilder.build(operation.responses);
 
-    // Generate tool name
-    const name = this.generateToolName(pathStr, method as HTTPMethod, operation.operationId, options);
+    // Extension overrides (x-speakeasy-mcp < x-mcp < x-frontmcp)
+    const overrides = extractExtensionOverrides(operation);
+
+    // Generate tool name (an extension name override takes the operationId's
+    // place, including as the value passed to a custom toolNameGenerator)
+    const name = this.generateToolName(pathStr, method as HTTPMethod, overrides.name ?? operation.operationId, options);
 
     // Generate description
-    const description = operation.summary || operation.description || `${method.toUpperCase()} ${pathStr}`;
+    const description =
+      overrides.description ?? (operation.summary || operation.description || `${method.toUpperCase()} ${pathStr}`);
+
+    // Display title (MCP Tool.title): extension override, else operation summary
+    const title = overrides.title ?? operation.summary;
+
+    // Annotations: HTTP-method inference (opt-out) + extension overrides on top.
+    // Lowercase first — the public generateTool(path, method) accepts any case.
+    const inferred =
+      options.inferAnnotations !== false
+        ? inferAnnotationsFromMethod(method.toLowerCase() as HTTPMethod)
+        : undefined;
+    const annotations =
+      inferred || overrides.annotations ? { ...inferred, ...overrides.annotations } : undefined;
 
     // Extract metadata
     const metadata = this.extractMetadata(pathStr, method as HTTPMethod, operation, document, outputSchema);
@@ -472,12 +592,23 @@ export class OpenAPIToolGenerator {
       ...options.formatResolvers,
     };
     const hasFormatResolvers = Object.keys(formatResolvers).length > 0;
-    const resolvedInputSchema = hasFormatResolvers ? resolveSchemaFormats(inputSchema, formatResolvers) : inputSchema;
-    const resolvedOutputSchema = hasFormatResolvers && outputSchema ? resolveSchemaFormats(outputSchema, formatResolvers) : outputSchema;
+    let resolvedInputSchema = hasFormatResolvers ? resolveSchemaFormats(inputSchema, formatResolvers) : inputSchema;
+    let resolvedOutputSchema = hasFormatResolvers && outputSchema ? resolveSchemaFormats(outputSchema, formatResolvers) : outputSchema;
+
+    // Bound schema nesting depth (applied last so the final schemas are
+    // bounded). Floor of 1: depth 0 would strip the ROOT inputSchema's
+    // properties while the mapper still lists every parameter.
+    const maxSchemaDepth = Math.max(1, options.maxSchemaDepth ?? 10);
+    resolvedInputSchema = SchemaBuilder.truncateDepth(resolvedInputSchema, maxSchemaDepth);
+    if (resolvedOutputSchema) {
+      resolvedOutputSchema = SchemaBuilder.truncateDepth(resolvedOutputSchema, maxSchemaDepth);
+    }
 
     return {
       name,
+      ...(title !== undefined && { title }),
       description,
+      ...(annotations && { annotations }),
       inputSchema: resolvedInputSchema,
       outputSchema: resolvedOutputSchema,
       mapper,
@@ -494,6 +625,11 @@ export class OpenAPIToolGenerator {
     method: string,
     options: GenerateOptions,
   ): boolean {
+    // Explicit extension exclusion (x-mcp: false, x-speakeasy-mcp: disabled)
+    if (extractExtensionOverrides(operation).disabled) {
+      return false;
+    }
+
     // Check deprecated
     if (operation.deprecated && !options.includeDeprecated) {
       return false;
@@ -533,22 +669,30 @@ export class OpenAPIToolGenerator {
     operationId?: string,
     options: GenerateOptions = {},
   ): string {
+    let rawName: string;
+
     if (options.namingStrategy?.toolNameGenerator) {
-      return options.namingStrategy.toolNameGenerator(path, method, operationId);
+      rawName = options.namingStrategy.toolNameGenerator(path, method, operationId);
+    } else if (operationId) {
+      rawName = operationId;
+    } else {
+      // Generate from path and method
+      const sanitized = path
+        .replace(/\{([^}]+)\}/g, 'By_$1')
+        .replace(/[^a-zA-Z0-9_]/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_|_$/g, '');
+
+      rawName = `${method}_${sanitized}`;
     }
 
-    if (operationId) {
-      return operationId;
-    }
-
-    // Generate from path and method
-    const sanitized = path
-      .replace(/\{([^}]+)\}/g, 'By_$1')
-      .replace(/[^a-zA-Z0-9_]/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^_|_$/g, '');
-
-    return `${method}_${sanitized}`;
+    // MCP name rules are hard client constraints, so they apply to every
+    // source — operationIds and custom toolNameGenerator output included.
+    return normalizeToolName(
+      rawName,
+      options.maxToolNameLength ?? DEFAULT_MAX_TOOL_NAME_LENGTH,
+      `${method} ${path}`,
+    );
   }
 
   /**

@@ -502,4 +502,258 @@ describe('SchemaBuilder', () => {
       expect(result.examples).toEqual(['example']);
     });
   });
+
+  describe('truncateDepth', () => {
+    const deepSchema = () =>
+      ({
+        type: 'object',
+        properties: {
+          level1: {
+            type: 'object',
+            description: 'first level',
+            properties: {
+              level2: {
+                type: 'object',
+                properties: {
+                  level3: { type: 'string' },
+                },
+                required: ['level3'],
+              },
+            },
+          },
+        },
+      }) as any;
+
+    it('should be a no-op when the schema is shallower than maxDepth', () => {
+      const schema = deepSchema();
+      const result = SchemaBuilder.truncateDepth(schema, 10);
+
+      expect(result).toEqual(schema);
+    });
+
+    it('should not mutate the input schema', () => {
+      const schema = deepSchema();
+      const snapshot = JSON.parse(JSON.stringify(schema));
+      SchemaBuilder.truncateDepth(schema, 1);
+
+      expect(schema).toEqual(snapshot);
+    });
+
+    it('should strip children at maxDepth and append a truncation note', () => {
+      const result = SchemaBuilder.truncateDepth(deepSchema(), 1) as any;
+
+      const level1 = result.properties.level1;
+      expect(level1.type).toBe('object');
+      expect(level1.properties).toBeUndefined();
+      expect(level1.description).toBe('first level [Truncated: nested schema exceeds maxSchemaDepth]');
+    });
+
+    it('should add a truncation note when there is no existing description', () => {
+      const result = SchemaBuilder.truncateDepth(deepSchema(), 2) as any;
+
+      const level2 = result.properties.level1.properties.level2;
+      expect(level2.properties).toBeUndefined();
+      expect(level2.required).toBeUndefined();
+      expect(level2.description).toBe('[Truncated: nested schema exceeds maxSchemaDepth]');
+    });
+
+    it('should truncate the root at maxDepth 0', () => {
+      const result = SchemaBuilder.truncateDepth(deepSchema(), 0) as any;
+
+      expect(result.type).toBe('object');
+      expect(result.properties).toBeUndefined();
+      expect(result.description).toContain('Truncated');
+    });
+
+    it('should count array items as a depth level', () => {
+      const schema = {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { name: { type: 'string' } },
+        },
+      } as any;
+      const result = SchemaBuilder.truncateDepth(schema, 1) as any;
+
+      expect(result.items.type).toBe('object');
+      expect(result.items.properties).toBeUndefined();
+      expect(result.items.description).toContain('Truncated');
+    });
+
+    it('should traverse tuple-style items arrays', () => {
+      const schema = {
+        type: 'array',
+        items: [{ type: 'object', properties: { a: { type: 'string' } } }, { type: 'number' }],
+      } as any;
+      const result = SchemaBuilder.truncateDepth(schema, 1) as any;
+
+      expect(result.items[0].properties).toBeUndefined();
+      expect(result.items[0].description).toContain('Truncated');
+      expect(result.items[1]).toEqual({ type: 'number' });
+    });
+
+    it('should traverse composition members and not', () => {
+      const schema = {
+        oneOf: [{ type: 'object', properties: { a: { type: 'string' } } }],
+        anyOf: [{ type: 'object', properties: { b: { type: 'string' } } }],
+        allOf: [{ type: 'object', properties: { c: { type: 'string' } } }],
+        not: { type: 'object', properties: { d: { type: 'string' } } },
+      } as any;
+      const result = SchemaBuilder.truncateDepth(schema, 1) as any;
+
+      expect(result.oneOf[0].properties).toBeUndefined();
+      expect(result.anyOf[0].properties).toBeUndefined();
+      expect(result.allOf[0].properties).toBeUndefined();
+      expect(result.not.properties).toBeUndefined();
+    });
+
+    it('should traverse object-valued additionalProperties', () => {
+      const schema = {
+        type: 'object',
+        additionalProperties: {
+          type: 'object',
+          properties: { nested: { type: 'string' } },
+        },
+      } as any;
+      const result = SchemaBuilder.truncateDepth(schema, 1) as any;
+
+      expect(result.additionalProperties.properties).toBeUndefined();
+      expect(result.additionalProperties.description).toContain('Truncated');
+    });
+
+    it('should leave leaf nodes and boolean additionalProperties untouched', () => {
+      const schema = {
+        type: 'object',
+        additionalProperties: false,
+        properties: { id: { type: 'string', description: 'kept' } },
+      } as any;
+      const result = SchemaBuilder.truncateDepth(schema, 5) as any;
+
+      expect(result.additionalProperties).toBe(false);
+      expect(result.properties.id).toEqual({ type: 'string', description: 'kept' });
+    });
+  });
+});
+
+describe('SchemaBuilder.truncateDepth cycle safety', () => {
+  it('should terminate on circular schema graphs instead of throwing', () => {
+    const node: any = { type: 'object', properties: { value: { type: 'string' } } };
+    node.properties.next = node; // self-referential cycle
+
+    const result = SchemaBuilder.truncateDepth(node, 3) as any;
+
+    expect(result.properties.next.properties.next.properties.next.description).toContain('Truncated');
+  });
+});
+
+describe('SchemaBuilder.truncateDepth 2020-12 keyword coverage', () => {
+  const deep = { type: 'object', properties: { inner: { type: 'string' } } } as any;
+
+  it('should truncate schemas under patternProperties', () => {
+    const result = SchemaBuilder.truncateDepth({ type: 'object', patternProperties: { '^x-': deep } } as any, 1) as any;
+
+    expect(result.patternProperties['^x-'].properties).toBeUndefined();
+    expect(result.patternProperties['^x-'].description).toContain('Truncated');
+  });
+
+  it('should truncate schemas under $defs and definitions', () => {
+    const result = SchemaBuilder.truncateDepth({ $defs: { Node: deep }, definitions: { Legacy: deep } } as any, 1) as any;
+
+    expect(result.$defs.Node.properties).toBeUndefined();
+    expect(result.definitions.Legacy.properties).toBeUndefined();
+  });
+
+  it('should truncate schemas under dependentSchemas', () => {
+    const result = SchemaBuilder.truncateDepth({ type: 'object', dependentSchemas: { flag: deep } } as any, 1) as any;
+
+    expect(result.dependentSchemas.flag.properties).toBeUndefined();
+  });
+
+  it('should truncate schemas under prefixItems', () => {
+    const result = SchemaBuilder.truncateDepth({ type: 'array', prefixItems: [deep, { type: 'number' }] } as any, 1) as any;
+
+    expect(result.prefixItems[0].properties).toBeUndefined();
+    expect(result.prefixItems[1]).toEqual({ type: 'number' });
+  });
+
+  it('should truncate schemas under if/then/else, propertyNames, and contains', () => {
+    const result = SchemaBuilder.truncateDepth(
+      {
+        if: deep,
+        then: deep,
+        else: deep,
+        propertyNames: { pattern: '^a' },
+        contains: deep,
+      } as any,
+      1,
+    ) as any;
+
+    expect(result.if.properties).toBeUndefined();
+    expect(result.then.properties).toBeUndefined();
+    expect(result.else.properties).toBeUndefined();
+    expect(result.contains.properties).toBeUndefined();
+    expect(result.propertyNames).toEqual({ pattern: '^a' }); // leaf: untouched
+  });
+
+  it('should strip deep keyword children at the truncation boundary', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        level1: { type: 'object', patternProperties: { '^x-': deep }, $defs: { N: deep } },
+      },
+    } as any;
+    const result = SchemaBuilder.truncateDepth(schema, 1) as any;
+
+    expect(result.properties.level1.patternProperties).toBeUndefined();
+    expect(result.properties.level1.$defs).toBeUndefined();
+    expect(result.properties.level1.description).toContain('Truncated');
+  });
+});
+
+describe('SchemaBuilder.truncateDepth depth-bound validation', () => {
+  const deep = { type: 'object', properties: { inner: { type: 'object', properties: { leaf: { type: 'string' } } } } } as any;
+
+  it('should fall back to the default bound for NaN', () => {
+    const node: any = { type: 'object', properties: { value: { type: 'string' } } };
+    node.properties.next = node; // circular: unbounded traversal would hang
+
+    const result = SchemaBuilder.truncateDepth(node, NaN) as any;
+
+    expect(JSON.stringify(result)).toContain('Truncated'); // bounded at the default of 10
+  });
+
+  it('should fall back to the default bound for Infinity', () => {
+    const node: any = { type: 'object', properties: { value: { type: 'string' } } };
+    node.properties.next = node;
+
+    const result = SchemaBuilder.truncateDepth(node, Infinity) as any;
+
+    expect(JSON.stringify(result)).toContain('Truncated');
+  });
+
+  it('should floor fractional depths', () => {
+    const result = SchemaBuilder.truncateDepth(deep, 1.9) as any;
+
+    // floors to 1: level-1 children stripped
+    expect(result.properties.inner.properties).toBeUndefined();
+  });
+
+  it('should clamp negative depths to 0 (root truncation)', () => {
+    const result = SchemaBuilder.truncateDepth(deep, -5) as any;
+
+    expect(result.properties).toBeUndefined();
+    expect(result.description).toContain('Truncated');
+  });
+
+  it('should truncate schemas under contentSchema', () => {
+    const schema = {
+      type: 'string',
+      contentMediaType: 'application/json',
+      contentSchema: deep,
+    } as any;
+    const result = SchemaBuilder.truncateDepth(schema, 1) as any;
+
+    expect(result.contentSchema.properties).toBeUndefined();
+    expect(result.contentSchema.description).toContain('Truncated');
+  });
 });

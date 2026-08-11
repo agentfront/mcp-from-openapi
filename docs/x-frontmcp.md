@@ -8,6 +8,8 @@
 
 The `x-frontmcp` extension allows you to add MCP-specific configuration directly in your OpenAPI spec. This data flows through to `tool.metadata.frontmcp` on generated tools.
 
+`x-frontmcp` is the **canonical** extension of the `x-mcp` family: its `annotations` block (including `annotations.title`) also feeds the tool-level `title` and `annotations` fields, taking precedence over `x-mcp` and `x-speakeasy-mcp` and over HTTP-method annotation inference. See [Annotations & Extensions](./annotations.md).
+
 ---
 
 ## Usage in OpenAPI

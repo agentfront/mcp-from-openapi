@@ -63,6 +63,13 @@ export function isReferenceObject(obj: any): obj is ReferenceObject {
  * Convert OpenAPI schema to JsonSchema
  * Note: OpenAPI 3.0 uses a subset of JSON Schema Draft 4
  * OpenAPI 3.1 uses JSON Schema Draft 2020-12
+ *
+ * Normalizations applied for clean JSON Schema 2020-12 output (MCP's default
+ * dialect since spec revision 2025-11-25):
+ * - OpenAPI 3.0 `nullable: true` -> `type: [..., 'null']` union
+ * - OpenAPI 3.0 boolean `exclusiveMinimum`/`exclusiveMaximum` -> numeric form
+ * - OpenAPI `example` (singular) -> `examples` array (2020-12 keyword)
+ * - OpenAPI-only `xml` metadata is dropped
  */
 export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema {
   if (isReferenceObject(schema)) {
@@ -72,8 +79,40 @@ export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema
   // Handle OpenAPI 3.0 boolean exclusiveMaximum/exclusiveMinimum
   // by converting them to JSON Schema Draft 7 numeric format
   const { exclusiveMaximum, exclusiveMinimum, maximum, minimum, ...rest } = schema;
+  // OpenAPI-only keywords pulled out of the JSON Schema output. `nullable` and
+  // `example` carry validation/annotation meaning and are converted below; `xml`
+  // is serialization metadata with no JSON Schema equivalent.
+  const { nullable, example, ...cleanRest } = rest as Record<string, unknown> & {
+    nullable?: boolean;
+    example?: unknown;
+  };
 
-  const result: Record<string, unknown> = { ...rest };
+  const result: Record<string, unknown> = { ...cleanRest };
+  delete result['xml'];
+
+  // OpenAPI 3.0 `nullable: true` -> JSON Schema type union with 'null'.
+  // Type-less nullable schemas (compositions, enum-only) can't take a type
+  // union — they are wrapped in `anyOf: [<schema>, { type: 'null' }]` at the
+  // end of processing instead, so nullability is never silently lost.
+  let wrapNullable = false;
+  if (nullable === true) {
+    const type = result['type'];
+    if (type === undefined) {
+      wrapNullable = true;
+    } else if (Array.isArray(type)) {
+      if (!type.includes('null')) {
+        result['type'] = [...type, 'null'];
+      }
+    } else if (type !== 'null') {
+      result['type'] = [type, 'null'];
+    }
+  }
+
+  // OpenAPI `example` (singular) -> JSON Schema 2020-12 `examples` array.
+  // When the schema already declares an `examples` array (OpenAPI 3.1), it wins.
+  if (example !== undefined && !Array.isArray(result['examples'])) {
+    result['examples'] = [example];
+  }
 
   // Handle exclusiveMaximum conversion
   if (typeof exclusiveMaximum === 'boolean') {
@@ -148,7 +187,86 @@ export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema
     result['not'] = toJsonSchema(result['not'] as SchemaObject | ReferenceObject);
   }
 
+  // Remaining JSON Schema 2020-12 structural keywords, so nested `nullable`/
+  // `example`/`xml` under them receive the same normalization as the root.
+  // Map-of-schemas keywords:
+  for (const key of ['patternProperties', '$defs', 'definitions', 'dependentSchemas'] as const) {
+    const value = result[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const mapped: Record<string, JsonSchema> = {};
+      for (const [name, sub] of Object.entries(value as Record<string, SchemaObject | ReferenceObject>)) {
+        mapped[name] = toJsonSchema(sub);
+      }
+      result[key] = mapped;
+    }
+  }
+  // Single-schema keywords (`unevaluated*` may be boolean — object guard skips those):
+  for (const key of [
+    'contains',
+    'propertyNames',
+    'if',
+    'then',
+    'else',
+    'contentSchema',
+    'unevaluatedItems',
+    'unevaluatedProperties',
+  ] as const) {
+    const value = result[key];
+    if (value && typeof value === 'object') {
+      result[key] = toJsonSchema(value as SchemaObject | ReferenceObject);
+    }
+  }
+  // Array-of-schemas keyword:
+  if (Array.isArray(result['prefixItems'])) {
+    result['prefixItems'] = (result['prefixItems'] as (SchemaObject | ReferenceObject)[]).map(toJsonSchema);
+  }
+
+  if (wrapNullable) {
+    // Hoist pure annotation keywords onto the wrapper so descriptions and
+    // examples stay visible at the top level instead of buried in anyOf[0].
+    const wrapper: Record<string, unknown> = {};
+    for (const key of ['title', 'description', 'deprecated', 'examples'] as const) {
+      if (result[key] !== undefined) {
+        wrapper[key] = result[key];
+        delete result[key];
+      }
+    }
+    wrapper['anyOf'] = [result, { type: 'null' }];
+    return wrapper as JsonSchema;
+  }
+
   return result as JsonSchema;
+}
+
+/**
+ * MCP tool annotations — behavior hints for clients (MCP spec 2025-03-26).
+ * Hints are advisory: clients must not treat them as security guarantees.
+ */
+export interface ToolAnnotations {
+  /**
+   * Legacy display-name slot inside annotations. Prefer the tool-level `title`.
+   */
+  title?: string;
+
+  /**
+   * Tool only reads data, never modifies state.
+   */
+  readOnlyHint?: boolean;
+
+  /**
+   * Tool may perform destructive updates (delete, overwrite).
+   */
+  destructiveHint?: boolean;
+
+  /**
+   * Calling repeatedly with the same arguments has no additional effect.
+   */
+  idempotentHint?: boolean;
+
+  /**
+   * Tool interacts with an open world of external entities.
+   */
+  openWorldHint?: boolean;
 }
 
 /**
@@ -161,9 +279,23 @@ export interface McpOpenAPITool {
   name: string;
 
   /**
+   * Human-readable display name (MCP `Tool.title`, spec 2025-06-18).
+   * From extension overrides or the operation summary.
+   */
+  title?: string;
+
+  /**
    * Tool description (from operation summary/description)
    */
   description: string;
+
+  /**
+   * MCP tool annotations. Inferred from HTTP method semantics by default
+   * (see `GenerateOptions.inferAnnotations`) and overridable via the
+   * `x-speakeasy-mcp` / `x-mcp` / `x-frontmcp` extensions (in ascending
+   * precedence).
+   */
+  annotations?: ToolAnnotations;
 
   /**
    * Combined input schema including all parameters
@@ -228,6 +360,15 @@ export interface ParameterMapper {
   serialization?: SerializationInfo;
 
   /**
+   * When true, this input value IS the entire request body — set for
+   * non-object bodies (arrays, primitives, binary) and for `oneOf`/`anyOf`
+   * union bodies that cannot be flattened into named properties. Consumers
+   * building requests must send the value directly as the body instead of
+   * wrapping it in an object keyed by `key`.
+   */
+  wholeBody?: boolean;
+
+  /**
    * Security scheme information (if this is an auth parameter)
    * This allows frameworks to resolve auth from context, env vars, etc.
    */
@@ -244,9 +385,17 @@ export interface SerializationInfo {
   contentType?: string;
 
   /**
-   * Encoding rules
+   * Encoding rules from the request body's media type (OpenAPI `encoding`).
+   * For a flattened body-property parameter this contains only that
+   * property's entry; for a whole-body parameter it is the full map.
    */
   encoding?: Record<string, EncodingObject>;
+
+  /**
+   * File-upload marker: the parameter schema declares binary content
+   * (`format: binary`), e.g. a multipart file part or a raw binary body.
+   */
+  binary?: boolean;
 }
 
 /**
@@ -367,15 +516,10 @@ export interface ToolMetadata {
  */
 export interface FrontMcpExtensionData {
   /**
-   * Tool annotations for AI behavior hints.
+   * Tool annotations for AI behavior hints (same contract as the tool-level
+   * `annotations` field).
    */
-  annotations?: {
-    title?: string;
-    readOnlyHint?: boolean;
-    destructiveHint?: boolean;
-    idempotentHint?: boolean;
-    openWorldHint?: boolean;
-  };
+  annotations?: ToolAnnotations;
 
   /**
    * Cache configuration for response caching.
@@ -623,13 +767,19 @@ export interface GenerateOptions {
   includeAllResponses?: boolean;
 
   /**
-   * Maximum depth for dereferencing schemas
+   * Maximum schema nesting depth retained in generated input/output schemas.
+   * Structures nested deeper than this are truncated: child schemas are
+   * stripped and a truncation note is appended to the node's description.
+   * Clamped to a minimum of 1 so the root schema always keeps its properties.
    * @default 10
    */
   maxSchemaDepth?: number;
 
   /**
-   * Whether to include examples in schemas
+   * Include OpenAPI parameter-level and media-type-level `example`/`examples`
+   * values in generated schemas (as JSON Schema `examples` arrays). These
+   * override schema-level examples where present. Schema-level `example`
+   * keywords are always normalized to `examples` regardless of this option.
    * @default false
    */
   includeExamples?: boolean;
@@ -641,6 +791,29 @@ export interface GenerateOptions {
    * @default false
    */
   includeSecurityInInput?: boolean;
+
+  /**
+   * Infer MCP tool annotations from HTTP method semantics:
+   * GET/HEAD/OPTIONS/TRACE -> read-only + idempotent; PUT/DELETE ->
+   * destructive + idempotent; POST/PATCH -> destructive, not idempotent.
+   * `openWorldHint` defaults to false (a known API backend is a closed world).
+   * Extension overrides (`x-speakeasy-mcp`, `x-mcp`, `x-frontmcp`) are applied
+   * on top of the inferred values regardless of this flag.
+   * @default true
+   */
+  inferAnnotations?: boolean;
+
+  /**
+   * Maximum length for generated tool names. Names longer than this are
+   * truncated and given a short hash suffix derived from the full name, so
+   * truncated names stay unique and stable across regenerations.
+   *
+   * MCP tool names may be 1-128 characters of `[A-Za-z0-9_.-]` (values above
+   * 128 are clamped to 128). The default of 64 matches the strictest common
+   * client limits (Claude / Bedrock cap tool names at 64 characters).
+   * @default 64
+   */
+  maxToolNameLength?: number;
 
   /**
    * Enable built-in format-to-schema resolution.

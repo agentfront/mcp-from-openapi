@@ -862,7 +862,9 @@ paths:
         },
       });
 
-      expect(tool.name).toBe('get__users_{id}');
+      // Custom generator output is still normalized to MCP name rules:
+      // `{`/`}` are invalid characters and consecutive underscores collapse.
+      expect(tool.name).toBe('get_users_id');
     });
   });
 
@@ -2540,5 +2542,1007 @@ describe('External $ref resolution over the SSRF-safe pinned transport', () => {
       validate: false,
     });
     await expect(generator.generateTools()).rejects.toThrow(/dereference/i);
+  });
+});
+
+describe('includeExamples option', () => {
+  const specWithExamples: any = {
+    openapi: '3.0.0',
+    info: { title: 'Examples API', version: '1.0.0' },
+    paths: {
+      '/search': {
+        get: {
+          operationId: 'search',
+          parameters: [
+            {
+              name: 'q',
+              in: 'query',
+              schema: { type: 'string' },
+              example: 'hello world',
+            },
+            {
+              name: 'limit',
+              in: 'query',
+              schema: { type: 'integer', example: 5 },
+              examples: {
+                small: { value: 10 },
+                large: { value: 100 },
+              },
+            },
+          ],
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+      '/import': {
+        post: {
+          operationId: 'importItems',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { type: 'array', items: { type: 'string' } },
+                example: ['a', 'b'],
+              },
+            },
+          },
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+    },
+  };
+
+  it('should omit parameter-level examples by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithExamples);
+    const tool = await generator.generateTool('/search', 'get');
+    const props = (tool.inputSchema as any).properties;
+
+    expect(props.q.examples).toBeUndefined();
+  });
+
+  it('should include singular parameter examples when enabled', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithExamples);
+    const tool = await generator.generateTool('/search', 'get', { includeExamples: true });
+    const props = (tool.inputSchema as any).properties;
+
+    expect(props.q.examples).toEqual(['hello world']);
+  });
+
+  it('should prefer the parameter examples map over schema-level example', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithExamples);
+    const tool = await generator.generateTool('/search', 'get', { includeExamples: true });
+    const props = (tool.inputSchema as any).properties;
+
+    expect(props.limit.examples).toEqual([10, 100]);
+  });
+
+  it('should attach media-type examples to non-object whole-body parameters', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithExamples);
+    const tool = await generator.generateTool('/import', 'post', { includeExamples: true });
+    const props = (tool.inputSchema as any).properties;
+
+    expect(props.body.examples).toEqual([['a', 'b']]);
+  });
+
+  it('should still normalize schema-level example to examples without the option', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithExamples);
+    const tool = await generator.generateTool('/search', 'get');
+    const props = (tool.inputSchema as any).properties;
+
+    // schema-level example on `limit` is normalized by toJsonSchema regardless
+    expect(props.limit.examples).toEqual([5]);
+  });
+});
+
+describe('maxSchemaDepth option', () => {
+  const nested = (depth: number): any => {
+    let schema: any = { type: 'string' };
+    for (let i = 0; i < depth; i++) {
+      schema = { type: 'object', properties: { [`level${depth - i}`]: schema } };
+    }
+    return schema;
+  };
+
+  const specWithDeepBody: any = {
+    openapi: '3.0.0',
+    info: { title: 'Deep API', version: '1.0.0' },
+    paths: {
+      '/deep': {
+        post: {
+          operationId: 'createDeep',
+          requestBody: {
+            content: {
+              'application/json': {
+                schema: { type: 'object', properties: { root: nested(15) } },
+              },
+            },
+          },
+          responses: {
+            '200': {
+              description: 'OK',
+              content: { 'application/json': { schema: nested(15) } },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const depthOf = (schema: any): number => {
+    let depth = 0;
+    let node = schema;
+    while (node && typeof node === 'object' && node.properties) {
+      depth++;
+      node = Object.values(node.properties)[0];
+    }
+    return depth;
+  };
+
+  it('should truncate schemas deeper than the default of 10', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithDeepBody);
+    const tool = await generator.generateTool('/deep', 'post');
+
+    expect(depthOf(tool.inputSchema)).toBeLessThanOrEqual(10);
+    expect(depthOf(tool.outputSchema)).toBeLessThanOrEqual(10);
+    expect(JSON.stringify(tool.inputSchema)).toContain('Truncated');
+    expect(JSON.stringify(tool.outputSchema)).toContain('Truncated');
+  });
+
+  it('should respect a custom maxSchemaDepth', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithDeepBody);
+    const tool = await generator.generateTool('/deep', 'post', { maxSchemaDepth: 3 });
+
+    expect(depthOf(tool.inputSchema)).toBeLessThanOrEqual(3);
+    expect(depthOf(tool.outputSchema)).toBeLessThanOrEqual(3);
+  });
+
+  it('should not modify schemas shallower than maxSchemaDepth', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Shallow API', version: '1.0.0' },
+      paths: {
+        '/shallow': {
+          get: {
+            operationId: 'getShallow',
+            parameters: [{ name: 'id', in: 'query', schema: { type: 'string' } }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/shallow', 'get');
+
+    expect(JSON.stringify(tool.inputSchema)).not.toContain('Truncated');
+    expect((tool.inputSchema as any).properties.id).toEqual({
+      type: 'string',
+      'x-parameter-location': 'query',
+    });
+  });
+});
+
+describe('Tool name normalization (MCP name rules)', () => {
+  const specWithOp = (operationId: string | undefined, path = '/things'): any => ({
+    openapi: '3.0.0',
+    info: { title: 'Naming API', version: '1.0.0' },
+    paths: {
+      [path]: {
+        get: {
+          ...(operationId ? { operationId } : {}),
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+    },
+  });
+
+  it('should sanitize invalid characters to underscores', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp('get user (v2)!'));
+    const tool = await generator.generateTool('/things', 'get');
+
+    expect(tool.name).toBe('get_user_v2');
+  });
+
+  it('should leave valid names unchanged', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp('billing.invoices-list_v2'));
+    const tool = await generator.generateTool('/things', 'get');
+
+    expect(tool.name).toBe('billing.invoices-list_v2');
+  });
+
+  it('should truncate long names to 64 chars with a stable hash suffix', async () => {
+    const longId = 'veryLongOperationName'.repeat(5); // 105 chars
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp(longId));
+    const tool1 = await generator.generateTool('/things', 'get');
+    const tool2 = await generator.generateTool('/things', 'get');
+
+    expect(tool1.name).toHaveLength(64);
+    expect(tool1.name).toMatch(/^[A-Za-z0-9_.-]+$/);
+    expect(tool1.name).toMatch(/_[0-9a-f]{8}$/);
+    expect(tool1.name.startsWith('veryLongOperationName')).toBe(true);
+    expect(tool2.name).toBe(tool1.name); // deterministic
+  });
+
+  it('should clamp maxToolNameLength to the MCP hard limit of 128', async () => {
+    const longId = 'x'.repeat(150);
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp(longId));
+    const tool = await generator.generateTool('/things', 'get', { maxToolNameLength: 500 });
+
+    expect(tool.name).toHaveLength(128);
+  });
+
+  it('should honor a custom maxToolNameLength', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp('someReasonablyLongOperationId'));
+    const tool = await generator.generateTool('/things', 'get', { maxToolNameLength: 20 });
+
+    expect(tool.name).toHaveLength(20);
+    expect(tool.name).toMatch(/_[0-9a-f]{8}$/);
+  });
+
+  it('should fall back to a bare hash for tiny maxToolNameLength values', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp('someReasonablyLongOperationId'));
+    const tool = await generator.generateTool('/things', 'get', { maxToolNameLength: 8 });
+
+    expect(tool.name).toHaveLength(8);
+    expect(tool.name).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('should generate a fallback name when sanitization leaves nothing', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp('!!!'));
+    const tool = await generator.generateTool('/things', 'get');
+
+    expect(tool.name).toMatch(/^tool_[0-9a-f]{8}$/);
+  });
+
+  it('should sanitize custom toolNameGenerator output too', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp('getThings'));
+    const tool = await generator.generateTool('/things', 'get', {
+      namingStrategy: {
+        conflictResolver: (name) => name,
+        toolNameGenerator: () => 'my tool!',
+      },
+    });
+
+    expect(tool.name).toBe('my_tool');
+  });
+
+  it('should deduplicate colliding names with a stable content-derived suffix', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Dup API', version: '1.0.0' },
+      paths: {
+        '/a': { get: { operationId: 'dupOp', responses: { '200': { description: 'OK' } } } },
+        '/b': { post: { operationId: 'dupOp', responses: { '200': { description: 'OK' } } } },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tools = await generator.generateTools();
+    const names = tools.map((t) => t.name);
+
+    expect(names).toHaveLength(2);
+    expect(new Set(names).size).toBe(2);
+    expect(names[0]).toBe('dupOp');
+    expect(names[1]).toMatch(/^dupOp_[0-9a-f]{8}$/);
+
+    // deterministic across regenerations
+    const again = (await generator.generateTools()).map((t) => t.name);
+    expect(again).toEqual(names);
+  });
+
+  it('should keep deduplicated names within the length cap', async () => {
+    const longId = 'duplicatedVeryLongOperationName'.repeat(3); // 93 chars
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Dup API', version: '1.0.0' },
+      paths: {
+        '/a': { get: { operationId: longId, responses: { '200': { description: 'OK' } } } },
+        '/b': { post: { operationId: longId, responses: { '200': { description: 'OK' } } } },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tools = await generator.generateTools();
+
+    expect(tools.map((t) => t.name.length)).toEqual([64, 64]);
+    expect(new Set(tools.map((t) => t.name)).size).toBe(2);
+  });
+});
+
+describe('Tool title and annotations', () => {
+  const annotatedSpec: any = {
+    openapi: '3.0.0',
+    info: { title: 'Annotated API', version: '1.0.0' },
+    paths: {
+      '/items': {
+        get: {
+          operationId: 'listItems',
+          summary: 'List all items',
+          responses: { '200': { description: 'OK' } },
+        },
+        post: {
+          operationId: 'createItem',
+          responses: { '201': { description: 'Created' } },
+        },
+        delete: {
+          operationId: 'clearItems',
+          responses: { '204': { description: 'Cleared' } },
+        },
+      },
+      '/hidden': {
+        get: {
+          operationId: 'hiddenOp',
+          'x-mcp': false,
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+      '/legacy-hidden': {
+        get: {
+          operationId: 'legacyHiddenOp',
+          'x-speakeasy-mcp': { disabled: true },
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+      '/customized': {
+        post: {
+          operationId: 'rawName',
+          summary: 'Original summary',
+          'x-mcp': {
+            name: 'custom name!',
+            title: 'Custom Title',
+            description: 'Agent-facing description',
+            annotations: { destructiveHint: false, idempotentHint: true },
+          },
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+    },
+  };
+
+  it('should infer annotations from the HTTP method by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+
+    const get = await generator.generateTool('/items', 'get');
+    expect(get.annotations).toEqual({
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+
+    const post = await generator.generateTool('/items', 'post');
+    expect(post.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    });
+
+    const del = await generator.generateTool('/items', 'delete');
+    expect(del.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+  });
+
+  it('should set title from the operation summary', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+    const tool = await generator.generateTool('/items', 'get');
+
+    expect(tool.title).toBe('List all items');
+  });
+
+  it('should omit title when there is no summary or override', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+    const tool = await generator.generateTool('/items', 'post');
+
+    expect(tool.title).toBeUndefined();
+    expect('title' in tool).toBe(false);
+  });
+
+  it('should not infer annotations when inferAnnotations is false', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+    const tool = await generator.generateTool('/items', 'get', { inferAnnotations: false });
+
+    expect(tool.annotations).toBeUndefined();
+  });
+
+  it('should keep extension annotations when inference is disabled', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+    const tool = await generator.generateTool('/customized', 'post', { inferAnnotations: false });
+
+    expect(tool.annotations).toEqual({ destructiveHint: false, idempotentHint: true });
+  });
+
+  it('should apply extension overrides for name, title, description, and annotations', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+    const tool = await generator.generateTool('/customized', 'post');
+
+    expect(tool.name).toBe('custom_name'); // override still normalized
+    expect(tool.title).toBe('Custom Title');
+    expect(tool.description).toBe('Agent-facing description');
+    // inferred POST annotations with extension overrides merged on top
+    expect(tool.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+  });
+
+  it('should exclude x-mcp:false and x-speakeasy-mcp disabled operations from generateTools', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(annotatedSpec, { validate: false });
+    const tools = await generator.generateTools();
+    const names = tools.map((t) => t.name);
+
+    expect(names).not.toContain('hiddenOp');
+    expect(names).not.toContain('legacyHiddenOp');
+    expect(names).toContain('listItems');
+  });
+});
+
+describe('Tool annotations with uppercase method argument', () => {
+  it('should infer annotations when generateTool receives an uppercase method', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Case API', version: '1.0.0' },
+      paths: {
+        '/items': { get: { operationId: 'listItems', responses: { '200': { description: 'OK' } } } },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/items', 'GET');
+
+    expect(tool.annotations?.readOnlyHint).toBe(true);
+  });
+});
+
+describe('Deterministic tool ordering', () => {
+  it('should order tools by path, then canonical method order, regardless of spec key order', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Order API', version: '1.0.0' },
+      paths: {
+        '/zebra': { get: { operationId: 'zebraGet', responses: { '200': { description: 'OK' } } } },
+        '/alpha': {
+          // post declared before get: canonical method order must win
+          post: { operationId: 'alphaPost', responses: { '200': { description: 'OK' } } },
+          get: { operationId: 'alphaGet', responses: { '200': { description: 'OK' } } },
+        },
+        '/mango': { delete: { operationId: 'mangoDelete', responses: { '204': { description: 'OK' } } } },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const names = (await generator.generateTools()).map((t) => t.name);
+
+    expect(names).toEqual(['alphaGet', 'alphaPost', 'mangoDelete', 'zebraGet']);
+  });
+
+  it('should produce identical ordering for re-serialized specs with different key order', async () => {
+    const opsA: any = {
+      '/b': { get: { operationId: 'bGet', responses: { '200': { description: 'OK' } } } },
+      '/a': { get: { operationId: 'aGet', responses: { '200': { description: 'OK' } } } },
+    };
+    const opsB: any = {
+      '/a': { get: { operationId: 'aGet', responses: { '200': { description: 'OK' } } } },
+      '/b': { get: { operationId: 'bGet', responses: { '200': { description: 'OK' } } } },
+    };
+    const base = { openapi: '3.0.0', info: { title: 'Order API', version: '1.0.0' } };
+
+    const genA = await OpenAPIToolGenerator.fromJSON({ ...base, paths: opsA } as any);
+    const genB = await OpenAPIToolGenerator.fromJSON({ ...base, paths: opsB } as any);
+
+    expect((await genA.generateTools()).map((t) => t.name)).toEqual(
+      (await genB.generateTools()).map((t) => t.name),
+    );
+  });
+});
+
+describe('Deep request-body handling', () => {
+  const bodySpec = (requestBody: any): any => ({
+    openapi: '3.0.0',
+    info: { title: 'Body API', version: '1.0.0' },
+    paths: {
+      '/submit': {
+        post: {
+          operationId: 'submit',
+          requestBody,
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+    },
+  });
+
+  it('should flatten allOf request bodies into named parameters', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              allOf: [
+                { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+                { type: 'object', properties: { age: { type: 'integer' } }, required: ['age'] },
+              ],
+            },
+          },
+        },
+      }),
+      { dereference: false },
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const props = (tool.inputSchema as any).properties;
+
+    expect(Object.keys(props).sort()).toEqual(['age', 'name']);
+    expect((tool.inputSchema as any).required.sort()).toEqual(['age', 'name']);
+    expect(tool.mapper.filter((m) => m.type === 'body')).toHaveLength(2);
+    expect(tool.mapper.every((m) => !m.wholeBody)).toBe(true);
+  });
+
+  it('should merge nested allOf members and direct properties', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/json': {
+            schema: {
+              allOf: [
+                {
+                  allOf: [{ type: 'object', properties: { deep: { type: 'string' } } }],
+                },
+                { type: 'object', properties: { shallow: { type: 'boolean' } } },
+              ],
+              properties: { direct: { type: 'number' } },
+            },
+          },
+        },
+      }),
+      { dereference: false },
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const props = (tool.inputSchema as any).properties;
+
+    expect(Object.keys(props).sort()).toEqual(['deep', 'direct', 'shallow']);
+  });
+
+  it('should flatten object bodies that declare properties without an explicit type', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/json': {
+            schema: { properties: { untyped: { type: 'string' } } },
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+
+    expect((tool.inputSchema as any).properties.untyped).toBeDefined();
+  });
+
+  it('should keep oneOf union bodies whole with a wholeBody mapper flag', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              oneOf: [
+                { type: 'object', properties: { email: { type: 'string' } }, required: ['email'] },
+                { type: 'object', properties: { phone: { type: 'string' } }, required: ['phone'] },
+              ],
+            },
+          },
+        },
+      }),
+      { dereference: false },
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const props = (tool.inputSchema as any).properties;
+    const bodyMapper = tool.mapper.find((m) => m.type === 'body');
+
+    expect(Object.keys(props)).toEqual(['body']);
+    expect(props.body.oneOf).toHaveLength(2);
+    expect(bodyMapper?.wholeBody).toBe(true);
+    expect(bodyMapper?.required).toBe(true);
+  });
+
+  it('should keep anyOf union bodies whole', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/json': {
+            schema: { anyOf: [{ type: 'string' }, { type: 'integer' }] },
+          },
+        },
+      }),
+      { dereference: false },
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const bodyMapper = tool.mapper.find((m) => m.type === 'body');
+
+    expect((tool.inputSchema as any).properties.body.anyOf).toHaveLength(2);
+    expect(bodyMapper?.wholeBody).toBe(true);
+  });
+
+  it('should flag array bodies as wholeBody', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/json': {
+            schema: { type: 'array', items: { type: 'string' } },
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const bodyMapper = tool.mapper.find((m) => m.type === 'body');
+
+    expect(bodyMapper?.wholeBody).toBe(true);
+  });
+
+  it('should mark multipart file parts as binary and propagate encoding', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        required: true,
+        content: {
+          'multipart/form-data': {
+            schema: {
+              type: 'object',
+              properties: {
+                file: { type: 'string', format: 'binary' },
+                caption: { type: 'string' },
+              },
+              required: ['file'],
+            },
+            encoding: {
+              file: { contentType: 'application/octet-stream' },
+            },
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const fileMapper = tool.mapper.find((m) => m.inputKey === 'file');
+    const captionMapper = tool.mapper.find((m) => m.inputKey === 'caption');
+
+    expect(fileMapper?.serialization?.contentType).toBe('multipart/form-data');
+    expect(fileMapper?.serialization?.binary).toBe(true);
+    expect(fileMapper?.serialization?.encoding).toEqual({ file: { contentType: 'application/octet-stream' } });
+    expect(fileMapper?.required).toBe(true);
+    expect(captionMapper?.serialization?.binary).toBeUndefined();
+    expect(captionMapper?.serialization?.encoding).toBeUndefined();
+  });
+
+  it('should mark raw binary whole bodies as binary', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/octet-stream': {
+            schema: { type: 'string', format: 'binary' },
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const bodyMapper = tool.mapper.find((m) => m.type === 'body');
+
+    expect(bodyMapper?.wholeBody).toBe(true);
+    expect(bodyMapper?.serialization?.binary).toBe(true);
+    expect(bodyMapper?.serialization?.contentType).toBe('application/octet-stream');
+  });
+
+  it('should mark OpenAPI 3.1 contentMediaType schemas as binary only when type is omitted', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'multipart/form-data': {
+            schema: {
+              type: 'object',
+              properties: {
+                // 3.1 raw binary: contentMediaType with NO declared type
+                image: { contentMediaType: 'image/png' },
+                // base64-encoded content is a string payload, not raw binary
+                doc: { type: 'string', contentMediaType: 'text/plain', contentEncoding: 'base64' },
+                // an ordinary string that HAPPENS to carry embedded content
+                html: { type: 'string', contentMediaType: 'text/html' },
+              },
+            },
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+
+    expect(tool.mapper.find((m) => m.inputKey === 'image')?.serialization?.binary).toBe(true);
+    expect(tool.mapper.find((m) => m.inputKey === 'doc')?.serialization?.binary).toBeUndefined();
+    expect(tool.mapper.find((m) => m.inputKey === 'html')?.serialization?.binary).toBeUndefined();
+  });
+
+  it('should keep required fields contributed by properties-less allOf members', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              allOf: [
+                { type: 'object', properties: { x: { type: 'string' }, y: { type: 'string' } } },
+                { required: ['x'] }, // base-$ref + required-tightening pattern
+              ],
+            },
+          },
+        },
+      }),
+      { dereference: false },
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+
+    expect((tool.inputSchema as any).required).toEqual(['x']);
+  });
+
+  it('should keep the body whole when an allOf member is a union', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              allOf: [
+                { type: 'object', properties: { a: { type: 'string' } } },
+                {
+                  oneOf: [
+                    { type: 'object', properties: { b: { type: 'string' } }, required: ['b'] },
+                    { type: 'object', properties: { c: { type: 'string' } }, required: ['c'] },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      }),
+      { dereference: false },
+    );
+    const tool = await generator.generateTool('/submit', 'post');
+    const props = (tool.inputSchema as any).properties;
+    const bodyMapper = tool.mapper.find((m) => m.type === 'body');
+
+    // the union constraint survives intact instead of being flattened away
+    expect(Object.keys(props)).toEqual(['body']);
+    expect(props.body.allOf).toHaveLength(2);
+    expect(props.body.allOf[1].oneOf).toHaveLength(2);
+    expect(bodyMapper?.wholeBody).toBe(true);
+  });
+
+  it('should distribute media-type examples onto flattened body properties', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/json': {
+            schema: { type: 'object', properties: { name: { type: 'string' }, age: { type: 'integer' } } },
+            example: { name: 'Ada' }, // no age key on purpose
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post', { includeExamples: true });
+    const props = (tool.inputSchema as any).properties;
+
+    expect(props.name.examples).toEqual(['Ada']);
+    expect(props.age.examples).toBeUndefined();
+  });
+
+  it('should ignore non-object media-type examples for flattened bodies', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      bodySpec({
+        content: {
+          'application/json': {
+            schema: { type: 'object', properties: { name: { type: 'string' } } },
+            example: 'not-an-object',
+          },
+        },
+      }),
+    );
+    const tool = await generator.generateTool('/submit', 'post', { includeExamples: true });
+
+    expect(((tool.inputSchema as any).properties.name as any).examples).toBeUndefined();
+  });
+});
+
+describe('Whole-body parameters in edge positions', () => {
+  it('should keep the wholeBody flag through name-conflict resolution', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Conflict API', version: '1.0.0' },
+      paths: {
+        '/things': {
+          post: {
+            operationId: 'createThing',
+            parameters: [{ name: 'body', in: 'query', schema: { type: 'string' } }],
+            requestBody: {
+              content: {
+                'application/json': { schema: { type: 'array', items: { type: 'string' } } },
+              },
+            },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/things', 'post');
+
+    const bodyEntry = tool.mapper.find((m) => m.type === 'body');
+    const queryEntry = tool.mapper.find((m) => m.type === 'query');
+
+    expect(bodyEntry?.wholeBody).toBe(true);
+    expect(queryEntry?.wholeBody).toBeUndefined();
+    // conflict resolution renamed both sides
+    expect(bodyEntry?.inputKey).not.toBe(queryEntry?.inputKey);
+  });
+
+  it('should carry the full encoding map on whole-body parameters', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Encoding API', version: '1.0.0' },
+      paths: {
+        '/upload': {
+          post: {
+            operationId: 'upload',
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: { type: 'array', items: { type: 'string' } },
+                  encoding: { part: { contentType: 'text/plain' } },
+                },
+              },
+            },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/upload', 'post');
+    const bodyEntry = tool.mapper.find((m) => m.type === 'body');
+
+    expect(bodyEntry?.serialization?.encoding).toEqual({ part: { contentType: 'text/plain' } });
+  });
+});
+
+describe('Collision dedup recheck', () => {
+  // replicate the library's FNV-1a suffix so the test can pre-take the renamed slot
+  const fnv1aHex = (input: string): string => {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < input.length; i++) {
+      hash ^= input.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+  };
+
+  it('should re-resolve when the deduplicated name is itself already taken', async () => {
+    // '/a' pre-takes the exact name that deduping POST /b would produce
+    const stolen = `foo_${fnv1aHex('post /b')}`;
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Dup API', version: '1.0.0' },
+      paths: {
+        '/a': { get: { operationId: stolen, responses: { '200': { description: 'OK' } } } },
+        '/b': {
+          get: { operationId: 'foo', responses: { '200': { description: 'OK' } } },
+          post: { operationId: 'foo', responses: { '200': { description: 'OK' } } },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const names = (await generator.generateTools()).map((t) => t.name);
+
+    expect(names).toHaveLength(3);
+    expect(new Set(names).size).toBe(3); // no silent duplicates
+    expect(names).toContain(stolen);
+    expect(names).toContain('foo');
+  });
+});
+
+describe('maxSchemaDepth floor', () => {
+  it('should clamp maxSchemaDepth 0 to 1 so the root inputSchema keeps its properties', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Floor API', version: '1.0.0' },
+      paths: {
+        '/things': {
+          get: {
+            operationId: 'listThings',
+            parameters: [{ name: 'id', in: 'query', required: true, schema: { type: 'string' } }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/things', 'get', { maxSchemaDepth: 0 });
+
+    // the mapper lists `id`, so the root schema must still declare it
+    expect((tool.inputSchema as any).properties.id).toBeDefined();
+    expect((tool.inputSchema as any).required).toEqual(['id']);
+  });
+});
+
+describe('hasExternalRefs cycle guard', () => {
+  // The public API JSON-round-trips documents before this walk (cycles throw,
+  // shared refs get duplicated), so the guard is exercised directly: it is the
+  // property that keeps the walk terminating on shared/cyclic object graphs.
+  const hasExternalRefs = (node: unknown) => (OpenAPIToolGenerator as any).hasExternalRefs(node);
+
+  it('terminates on cyclic documents', () => {
+    const node: any = { a: { type: 'string' } };
+    node.self = node;
+
+    expect(hasExternalRefs(node)).toBe(false);
+  });
+
+  it('visits shared nodes once and still detects external refs elsewhere', () => {
+    const shared: any = { $ref: '#/components/schemas/X' };
+    expect(hasExternalRefs({ one: shared, two: shared })).toBe(false);
+
+    const cyclic: any = { ref: { $ref: 'https://example.com/schema.json' } };
+    cyclic.self = cyclic;
+    expect(hasExternalRefs(cyclic)).toBe(true);
+  });
+});
+
+describe('Tool name hashing uses the raw name', () => {
+  const specFor = (operationId: string): any => ({
+    openapi: '3.0.0',
+    info: { title: 'Raw Hash API', version: '1.0.0' },
+    paths: {
+      '/things': { get: { operationId, responses: { '200': { description: 'OK' } } } },
+    },
+  });
+
+  it('should give distinct suffixes to long names differing only by invalid characters', async () => {
+    const base = 'y'.repeat(70);
+    const genA = await OpenAPIToolGenerator.fromJSON(specFor(`${base}!end`));
+    const genB = await OpenAPIToolGenerator.fromJSON(specFor(`${base}?end`));
+
+    const nameA = (await genA.generateTool('/things', 'get')).name;
+    const nameB = (await genB.generateTool('/things', 'get')).name;
+
+    // both sanitize to the same base, so only the raw-name hash separates them
+    expect(nameA).toHaveLength(64);
+    expect(nameB).toHaveLength(64);
+    expect(nameA.slice(0, 55)).toBe(nameB.slice(0, 55));
+    expect(nameA).not.toBe(nameB);
+  });
+
+  it('should use the fallback seed for empty-sanitized names under tiny caps', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specFor('!!!'));
+    const tool = await generator.generateTool('/things', 'get', { maxToolNameLength: 8 });
+
+    expect(tool.name).toMatch(/^[0-9a-f]{8}$/);
+  });
+});
+
+describe('Collision dedup exhaustion', () => {
+  it('should fail loudly (per-tool) when a tiny cap exhausts the name space', async () => {
+    // 17 operations, all colliding, under a 1-char cap: only 16 hex names exist
+    const paths: Record<string, unknown> = {};
+    for (let i = 0; i < 17; i++) {
+      paths[`/p${i}`] = { get: { operationId: 'same', responses: { '200': { description: 'OK' } } } };
+    }
+    const spec: any = { openapi: '3.0.0', info: { title: 'Exhaust API', version: '1.0.0' }, paths };
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+      const tools = await generator.generateTools({ maxToolNameLength: 1 });
+      const names = tools.map((t) => t.name);
+
+      // all 16 possible names taken, every emitted name unique, 17th dropped
+      expect(new Set(names).size).toBe(names.length);
+      expect(names.length).toBeLessThan(17);
+      const messages = warnSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(messages).toContain('name space');
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

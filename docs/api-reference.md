@@ -170,8 +170,10 @@ The main output type -- a generated MCP tool definition.
 
 ```typescript
 interface McpOpenAPITool {
-  name: string;                  // Operation ID or generated name
-  description: string;           // From operation summary/description
+  name: string;                  // Normalized tool name (MCP name rules enforced)
+  title?: string;                // Display name (MCP Tool.title) from summary/extension
+  description: string;           // From operation summary/description (or extension override)
+  annotations?: ToolAnnotations; // MCP behavior hints (inferred + extension overrides)
   inputSchema: JsonSchema;       // Combined input schema (all params)
   outputSchema?: JsonSchema;     // Response schema (can be oneOf union)
   mapper: ParameterMapper[];     // Input -> request mapping
@@ -180,6 +182,22 @@ interface McpOpenAPITool {
 ```
 
 > **Note:** `JsonSchema` is the `JSONSchema` type from `zod/v4/core`, not `JSONSchema7`.
+
+---
+
+### ToolAnnotations
+
+MCP tool annotations — behavior hints for clients. Inferred from HTTP method semantics by default and overridable via the `x-mcp` extension family. See [Annotations & Extensions](./annotations.md).
+
+```typescript
+interface ToolAnnotations {
+  title?: string;            // Legacy display-name slot; prefer tool-level `title`
+  readOnlyHint?: boolean;    // Tool only reads data
+  destructiveHint?: boolean; // Tool may delete/overwrite state
+  idempotentHint?: boolean;  // Repeat calls have no additional effect
+  openWorldHint?: boolean;   // Tool touches an open world of external entities
+}
+```
 
 ---
 
@@ -195,10 +213,13 @@ interface ParameterMapper {
   required?: boolean;
   style?: string;                      // 'simple', 'form', 'matrix', etc.
   explode?: boolean;                   // Array/object explosion
-  serialization?: SerializationInfo;   // Content-type, encoding rules
+  serialization?: SerializationInfo;   // Content-type, encoding rules, binary marker
+  wholeBody?: boolean;                 // Input value IS the entire request body
   security?: SecurityParameterInfo;    // Auth parameter metadata
 }
 ```
+
+`wholeBody` is set for non-object bodies (arrays, primitives, binary) and root `oneOf`/`anyOf` union bodies: send `input[inputKey]` directly as the request body instead of wrapping it in `{ [key]: value }`. See [SerializationInfo](#serializationinfo) for the content-type, encoding, and binary markers.
 
 ---
 
@@ -269,8 +290,9 @@ Serialization details for complex parameters.
 
 ```typescript
 interface SerializationInfo {
-  contentType?: string;
-  encoding?: Record<string, EncodingObject>;
+  contentType?: string;                      // Body content type
+  encoding?: Record<string, EncodingObject>; // OpenAPI media-type encoding rules
+  binary?: boolean;                          // File part / raw binary body (format: binary)
 }
 ```
 
@@ -452,9 +474,13 @@ interface GenerateOptions {
   preferredStatusCodes?: number[];   // default: [200, 201, 204, 202, 203, 206]
   includeDeprecated?: boolean;       // default: false
   includeAllResponses?: boolean;     // default: true
-  maxSchemaDepth?: number;           // default: 10
-  includeExamples?: boolean;         // default: false
+  maxSchemaDepth?: number;           // default: 10 (deeper structures truncated)
+  includeExamples?: boolean;         // default: false (parameter/media-type examples)
   includeSecurityInInput?: boolean;  // default: false
+  inferAnnotations?: boolean;        // default: true (HTTP-method annotation inference)
+  maxToolNameLength?: number;        // default: 64 (clamped to MCP's 128 max)
+  resolveFormats?: boolean;          // default: false
+  formatResolvers?: Record<string, FormatResolver>;
 }
 ```
 
