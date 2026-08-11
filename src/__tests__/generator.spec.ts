@@ -3711,3 +3711,145 @@ describe('x-mcp precedence across root, path, and operation', () => {
     expect(names).toEqual(['visibleOp']);
   });
 });
+
+describe('includeSecurityInInput per-scheme selection', () => {
+  const securedSpec: any = {
+    openapi: '3.0.0',
+    info: { title: 'Secured API', version: '1.0.0' },
+    security: [{ BearerAuth: [] }, { ApiKeyAuth: [] }],
+    components: {
+      securitySchemes: {
+        BearerAuth: { type: 'http', scheme: 'bearer' },
+        ApiKeyAuth: { type: 'apiKey', name: 'X-API-Key', in: 'header' },
+      },
+    },
+    paths: {
+      '/data': { get: { operationId: 'getData', responses: { '200': { description: 'OK' } } } },
+    },
+  };
+
+  it('true puts every scheme in the input schema', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(securedSpec);
+    const tool = await generator.generateTool('/data', 'get', { includeSecurityInInput: true });
+    const props = Object.keys((tool.inputSchema as any).properties);
+
+    expect(props).toEqual(expect.arrayContaining(['BearerAuth', 'ApiKeyAuth']));
+  });
+
+  it('an array selects which schemes appear in input while the mapper keeps all', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(securedSpec);
+    const tool = await generator.generateTool('/data', 'get', { includeSecurityInInput: ['ApiKeyAuth'] });
+    const props = Object.keys((tool.inputSchema as any).properties);
+    const securitySchemes = tool.mapper.filter((m) => m.security).map((m) => m.security!.scheme);
+
+    expect(props).toContain('ApiKeyAuth');
+    expect(props).not.toContain('BearerAuth');
+    expect((tool.inputSchema as any).required).toEqual(['ApiKeyAuth']);
+    expect(securitySchemes).toEqual(expect.arrayContaining(['BearerAuth', 'ApiKeyAuth']));
+  });
+
+  it('an empty array behaves like false for the input schema', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(securedSpec);
+    const tool = await generator.generateTool('/data', 'get', { includeSecurityInInput: [] });
+
+    expect(Object.keys((tool.inputSchema as any).properties)).toHaveLength(0);
+    expect(tool.mapper.filter((m) => m.security)).toHaveLength(2);
+  });
+});
+
+describe('secureDefaults load preset', () => {
+  it('disables external $ref resolution', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Ref API', version: '1.0.0' },
+      paths: {
+        '/thing': {
+          get: {
+            operationId: 'getThing',
+            parameters: [{ name: 'q', in: 'query', schema: { $ref: 'https://schemas.example.com/q.json' } }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { secureDefaults: true, validate: false });
+    const tools = await generator.generateTools();
+
+    // the external ref is left unresolved instead of being fetched
+    expect(JSON.stringify(tools[0].inputSchema)).toContain('https://schemas.example.com/q.json');
+  });
+
+  it('refuses spec-URL redirects', async () => {
+    let redirected = false;
+    const handler: LoopbackHandler = (req, res) => {
+      if (req.url === '/spec.json') {
+        res.writeHead(302, { Location: '/real.json' });
+        res.end();
+      } else {
+        redirected = true;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ openapi: '3.0.0', info: { title: 'T', version: '1' }, paths: {} }));
+      }
+    };
+    const loopback = createLoopbackServer(() => handler);
+    const baseUrl = await loopback.listen();
+    try {
+      await expect(
+        OpenAPIToolGenerator.fromURL(`${baseUrl}/spec.json`, {
+          secureDefaults: true,
+          refResolution: { allowInternalIPs: true },
+        }),
+      ).rejects.toThrow();
+      expect(redirected).toBe(false);
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  it('lets explicit options win over the preset', async () => {
+    const handler: LoopbackHandler = (req, res) => {
+      if (req.url === '/spec.json') {
+        res.writeHead(302, { Location: '/real.json' });
+        res.end();
+      } else {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ openapi: '3.0.0', info: { title: 'T', version: '1.0.0' }, paths: {} }));
+      }
+    };
+    const loopback = createLoopbackServer(() => handler);
+    const baseUrl = await loopback.listen();
+    try {
+      const generator = await OpenAPIToolGenerator.fromURL(`${baseUrl}/spec.json`, {
+        secureDefaults: true,
+        followRedirects: true, // explicit value beats the preset
+        refResolution: { allowInternalIPs: true },
+      });
+      expect(generator).toBeInstanceOf(OpenAPIToolGenerator);
+    } finally {
+      await loopback.close();
+    }
+  });
+});
+
+describe('Generic tool metadata (McpOpenAPITool<TMeta>)', () => {
+  it('lets frameworks extend metadata without casting through unknown', async () => {
+    type ExtendedMeta = import('../types').ToolMetadata & { adapterState?: { cached: boolean } };
+
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Meta API', version: '1.0.0' },
+      paths: { '/x': { get: { operationId: 'getX', responses: { '200': { description: 'OK' } } } } },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const base = await generator.generateTool('/x', 'get');
+
+    // a framework layers its own metadata on top, typed end to end
+    const extended: import('../types').McpOpenAPITool<ExtendedMeta> = {
+      ...base,
+      metadata: { ...base.metadata, adapterState: { cached: true } },
+    };
+
+    expect(extended.metadata.adapterState?.cached).toBe(true);
+    expect(extended.metadata.path).toBe('/x');
+  });
+});

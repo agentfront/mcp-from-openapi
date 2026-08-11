@@ -46,6 +46,19 @@ const DEFAULT_MAX_TOOL_NAME_LENGTH = 64;
 const MAX_NAME_DEDUP_ATTEMPTS = 256;
 
 /**
+ * Apply the `secureDefaults` load preset: redirects off, external `$ref`
+ * resolution disabled. Explicitly-set options always win over the preset.
+ */
+function applySecureDefaults(options: LoadOptions): LoadOptions {
+  if (!options.secureDefaults) return options;
+  return {
+    ...options,
+    followRedirects: options.followRedirects ?? false,
+    refResolution: options.refResolution ?? { allowedProtocols: [] },
+  };
+}
+
+/**
  * Convert a path glob to a RegExp: `*` matches within one path segment,
  * `**` across segments, `?` a single non-slash character.
  */
@@ -132,8 +145,9 @@ export class OpenAPIToolGenerator {
   /**
    * Private constructor - use static factory methods to create instances
    */
-  private constructor(document: OpenAPIDocument, options: LoadOptions = {}) {
+  private constructor(document: OpenAPIDocument, rawOptions: LoadOptions = {}) {
     this.document = document;
+    const options = applySecureDefaults(rawOptions);
     this.options = {
       dereference: options.dereference ?? true,
       baseUrl: options.baseUrl ?? '',
@@ -142,13 +156,15 @@ export class OpenAPIToolGenerator {
       validate: options.validate ?? true,
       followRedirects: options.followRedirects ?? true,
       refResolution: options.refResolution ?? {},
+      secureDefaults: options.secureDefaults ?? false,
     };
   }
 
   /**
    * Create generator from a URL
    */
-  static async fromURL(url: string, options: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
+  static async fromURL(url: string, rawOptions: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
+    const options = applySecureDefaults(rawOptions);
     try {
       // SECURITY: validate the spec URL — and every redirect hop — against the
       // SSRF guard before fetching (resolves DNS and rejects internal targets),

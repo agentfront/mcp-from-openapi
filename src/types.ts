@@ -270,9 +270,12 @@ export interface ToolAnnotations {
 }
 
 /**
- * Main MCP Tool definition generated from OpenAPI
+ * Main MCP Tool definition generated from OpenAPI.
+ *
+ * `TMeta` lets embedding frameworks extend the metadata contract without
+ * casting — e.g. `McpOpenAPITool<ToolMetadata & { adapter: AdapterState }>`.
  */
-export interface McpOpenAPITool {
+export interface McpOpenAPITool<TMeta extends ToolMetadata = ToolMetadata> {
   /**
    * Unique tool name (from operationId or generated)
    */
@@ -317,7 +320,7 @@ export interface McpOpenAPITool {
   /**
    * Additional metadata about the tool
    */
-  metadata: ToolMetadata;
+  metadata: TMeta;
 }
 
 /**
@@ -707,9 +710,19 @@ export interface LoadOptions {
    * Whether to follow HTTP redirects when fetching the spec URL. Each redirect
    * hop is re-validated against the SSRF guard before being followed (a 3xx to
    * an internal target is refused), so following is safe by default.
-   * @default true
+   * @default true (false when `secureDefaults` is set)
    */
   followRedirects?: boolean;
+
+  /**
+   * Opt into the strictest loading posture in one flag: redirects are not
+   * followed and external `$ref` resolution is disabled entirely
+   * (`refResolution.allowedProtocols: []`) — the right default when loading
+   * untrusted specs. Explicitly-set `followRedirects`/`refResolution` values
+   * still win over the preset.
+   * @default false
+   */
+  secureDefaults?: boolean;
 
   /**
    * Controls spec-loading security: external `$ref` resolution AND the host
@@ -830,12 +843,16 @@ export interface GenerateOptions {
   includeExamples?: boolean;
 
   /**
-   * Whether to include security requirements as input parameters
-   * If false, security is only in mapper (frameworks resolve from context/env/etc.)
-   * If true, security is added to inputSchema as explicit parameters
+   * Whether to include security requirements as input parameters.
+   * - `false` (default): security lives only in the mapper (frameworks
+   *   resolve credentials from context/env/vaults)
+   * - `true`: every security scheme is added to inputSchema as a required
+   *   string property
+   * - `string[]`: only the named schemes appear in inputSchema; the rest stay
+   *   mapper-only (all schemes are always present in the mapper)
    * @default false
    */
-  includeSecurityInInput?: boolean;
+  includeSecurityInInput?: boolean | string[];
 
   /**
    * Infer MCP tool annotations from HTTP method semantics:
