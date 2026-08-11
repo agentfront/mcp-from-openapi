@@ -13,7 +13,7 @@ Complete reference for all exports from `mcp-from-openapi`.
 Main entry point. Loads OpenAPI specs and generates MCP tool definitions.
 
 ```typescript
-import { OpenAPIToolGenerator } from 'mcp-from-openapi';
+import { OpenAPIToolGenerator } from "mcp-from-openapi";
 ```
 
 #### Static Factory Methods
@@ -41,7 +41,7 @@ async validate(): Promise<ValidationResult>
 Framework-agnostic authentication resolver. Maps OpenAPI security schemes to actual auth values (headers, query params, cookies).
 
 ```typescript
-import { SecurityResolver } from 'mcp-from-openapi';
+import { SecurityResolver } from "mcp-from-openapi";
 ```
 
 #### Methods
@@ -61,7 +61,7 @@ See [Security](./security.md) for detailed usage.
 Static utility class for building and manipulating JSON schemas.
 
 ```typescript
-import { SchemaBuilder } from 'mcp-from-openapi';
+import { SchemaBuilder } from "mcp-from-openapi";
 ```
 
 See [SchemaBuilder](./schema-builder.md) for all methods.
@@ -73,7 +73,7 @@ See [SchemaBuilder](./schema-builder.md) for all methods.
 Resolves parameters from OpenAPI operations, detects naming conflicts, and generates input schemas with mapper entries.
 
 ```typescript
-import { ParameterResolver } from 'mcp-from-openapi';
+import { ParameterResolver } from "mcp-from-openapi";
 ```
 
 #### Methods
@@ -83,7 +83,7 @@ resolve(
   operation: OperationObject,
   pathParameters?: ParameterObject[],
   securityRequirements?: SecurityRequirement[],
-  includeSecurityInInput?: boolean
+  includeSecurityInInput?: boolean | string[]
 ): { inputSchema: JsonSchema; mapper: ParameterMapper[] }
 ```
 
@@ -94,7 +94,7 @@ resolve(
 Extracts and combines response schemas from OpenAPI operations.
 
 ```typescript
-import { ResponseBuilder } from 'mcp-from-openapi';
+import { ResponseBuilder } from "mcp-from-openapi";
 ```
 
 #### Methods
@@ -112,7 +112,7 @@ See [Response Schemas](./response-schemas.md) for details.
 Validates OpenAPI 3.0.x and 3.1.x documents.
 
 ```typescript
-import { Validator } from 'mcp-from-openapi';
+import { Validator } from "mcp-from-openapi";
 ```
 
 #### Methods
@@ -125,12 +125,43 @@ async validate(document: OpenAPIDocument): Promise<ValidationResult>
 
 ## Utility Functions
 
+### buildHttpRequest
+
+Build a ready-to-send HTTP request from a tool and its input values — the full OpenAPI serialization table applied. See [Request Builder](./request-builder.md).
+
+```typescript
+buildHttpRequest(tool: McpOpenAPITool, input: Record<string, unknown>, options?: BuildHttpRequestOptions): BuiltHttpRequest
+```
+
+### applyClientTarget
+
+Apply a client dialect's schema transforms (`'claude' | 'openai' | 'gemini' | 'strict'`). The individual transforms (`inlineLocalRefs`, `ensureArrayItems`, `collapseRootCompositions`, `collapseNestedUnions`, `demoteFormats`, `enforceClosedObjects`) are exported too. See [Client Targets](./client-targets.md).
+
+```typescript
+applyClientTarget(schema: JsonSchema, target: ClientTarget): JsonSchema
+```
+
+### toSdkTool
+
+Shape a tool for the official MCP SDK's `registerTool(name, config, handler)` — pass the SDK v2 `fromJsonSchema` to wrap schemas; without it, raw JSON Schemas are returned.
+
+```typescript
+toSdkTool(tool: McpOpenAPITool): [string, SdkToolConfig]
+toSdkTool<TSchema>(tool: McpOpenAPITool, wrapper?: SdkSchemaWrapper<TSchema>): [string, SdkToolConfig<TSchema>]
+
+// SdkSchemaWrapper<TSchema> = { fromJsonSchema: (schema: JsonSchema) => TSchema }
+```
+
+### inferAnnotationsFromMethod / extractExtensionOverrides / resolveExtensionEnabled
+
+Annotation inference and `x-mcp` extension family parsing. See [Annotations & Extensions](./annotations.md).
+
 ### createSecurityContext
 
 Helper to create a `SecurityContext` from partial auth data.
 
 ```typescript
-import { createSecurityContext } from 'mcp-from-openapi';
+import { createSecurityContext } from "mcp-from-openapi";
 
 const context = createSecurityContext({
   jwt: process.env.JWT_TOKEN,
@@ -143,7 +174,7 @@ const context = createSecurityContext({
 Type guard to check if an object is a JSON `$ref` reference.
 
 ```typescript
-import { isReferenceObject } from 'mcp-from-openapi';
+import { isReferenceObject } from "mcp-from-openapi";
 
 if (isReferenceObject(schema)) {
   console.log(schema.$ref);
@@ -155,7 +186,7 @@ if (isReferenceObject(schema)) {
 Converts OpenAPI schema objects to JSON Schema format. Handles OpenAPI 3.0's boolean `exclusiveMinimum`/`exclusiveMaximum` conversion to numeric format.
 
 ```typescript
-import { toJsonSchema } from 'mcp-from-openapi';
+import { toJsonSchema } from "mcp-from-openapi";
 
 const jsonSchema = toJsonSchema(openApiSchema);
 ```
@@ -169,15 +200,15 @@ const jsonSchema = toJsonSchema(openApiSchema);
 The main output type -- a generated MCP tool definition.
 
 ```typescript
-interface McpOpenAPITool {
-  name: string;                  // Normalized tool name (MCP name rules enforced)
-  title?: string;                // Display name (MCP Tool.title) from summary/extension
-  description: string;           // From operation summary/description (or extension override)
+interface McpOpenAPITool<TMeta extends ToolMetadata = ToolMetadata> {
+  name: string; // Normalized tool name (MCP name rules enforced)
+  title?: string; // Display name (MCP Tool.title) from summary/extension
+  description: string; // From operation summary/description (or extension override)
   annotations?: ToolAnnotations; // MCP behavior hints (inferred + extension overrides)
-  inputSchema: JsonSchema;       // Combined input schema (all params)
-  outputSchema?: JsonSchema;     // Response schema (can be oneOf union)
-  mapper: ParameterMapper[];     // Input -> request mapping
-  metadata: ToolMetadata;        // Auth, servers, tags, etc.
+  inputSchema: JsonSchema; // Combined input schema (all params)
+  outputSchema?: JsonSchema; // Response schema (can be oneOf union)
+  mapper: ParameterMapper[]; // Input -> request mapping
+  metadata: TMeta; // Auth, servers, tags, etc. — extendable by frameworks
 }
 ```
 
@@ -191,11 +222,11 @@ MCP tool annotations — behavior hints for clients. Inferred from HTTP method s
 
 ```typescript
 interface ToolAnnotations {
-  title?: string;            // Legacy display-name slot; prefer tool-level `title`
-  readOnlyHint?: boolean;    // Tool only reads data
+  title?: string; // Legacy display-name slot; prefer tool-level `title`
+  readOnlyHint?: boolean; // Tool only reads data
   destructiveHint?: boolean; // Tool may delete/overwrite state
-  idempotentHint?: boolean;  // Repeat calls have no additional effect
-  openWorldHint?: boolean;   // Tool touches an open world of external entities
+  idempotentHint?: boolean; // Repeat calls have no additional effect
+  openWorldHint?: boolean; // Tool touches an open world of external entities
 }
 ```
 
@@ -207,15 +238,16 @@ Maps input schema properties to their actual HTTP request locations.
 
 ```typescript
 interface ParameterMapper {
-  inputKey: string;                    // Property name in inputSchema
-  type: ParameterLocation;             // 'path' | 'query' | 'header' | 'cookie' | 'body'
-  key: string;                         // Original parameter name
+  inputKey: string; // Property name in inputSchema
+  type: ParameterLocation; // 'path' | 'query' | 'header' | 'cookie' | 'body'
+  key: string; // Original parameter name
   required?: boolean;
-  style?: string;                      // 'simple', 'form', 'matrix', etc.
-  explode?: boolean;                   // Array/object explosion
-  serialization?: SerializationInfo;   // Content-type, encoding rules, binary marker
-  wholeBody?: boolean;                 // Input value IS the entire request body
-  security?: SecurityParameterInfo;    // Auth parameter metadata
+  style?: string; // 'simple', 'form', 'matrix', etc.
+  explode?: boolean; // Array/object explosion
+  allowReserved?: boolean; // Query only: RFC 3986 reserved characters stay unencoded
+  serialization?: SerializationInfo; // Content-type, encoding rules, binary marker
+  wholeBody?: boolean; // Input value IS the entire request body
+  security?: SecurityParameterInfo; // Auth parameter metadata
 }
 ```
 
@@ -229,18 +261,18 @@ Additional metadata about the generated tool.
 
 ```typescript
 interface ToolMetadata {
-  path: string;                        // OpenAPI path (e.g., '/users/{id}')
-  method: HTTPMethod;                  // HTTP verb
+  path: string; // OpenAPI path (e.g., '/users/{id}')
+  method: HTTPMethod; // HTTP verb
   operationId?: string;
-  operationSummary?: string;           // Short description
-  operationDescription?: string;       // Detailed description
+  operationSummary?: string; // Short description
+  operationDescription?: string; // Detailed description
   tags?: string[];
   deprecated?: boolean;
   security?: SecurityRequirement[];
   servers?: ServerInfo[];
-  responseStatusCodes?: number[];      // From output schema
+  responseStatusCodes?: number[]; // From output schema
   externalDocs?: ExternalDocumentationObject;
-  frontmcp?: FrontMcpExtensionData;    // x-frontmcp extension data
+  frontmcp?: FrontMcpExtensionData; // x-frontmcp extension data
 }
 ```
 
@@ -252,13 +284,13 @@ Security scheme information attached to mapper entries.
 
 ```typescript
 interface SecurityParameterInfo {
-  scheme: string;           // Scheme name from OpenAPI (e.g., "BearerAuth")
-  type: AuthType;           // 'apiKey' | 'http' | 'oauth2' | 'openIdConnect' | 'mutualTLS'
-  httpScheme?: string;      // 'bearer', 'basic', 'digest', etc.
-  bearerFormat?: string;    // e.g., 'JWT'
-  scopes?: string[];        // Required OAuth2 scopes
-  apiKeyName?: string;      // API key parameter name
-  apiKeyIn?: 'query' | 'header' | 'cookie';
+  scheme: string; // Scheme name from OpenAPI (e.g., "BearerAuth")
+  type: AuthType; // 'apiKey' | 'http' | 'oauth2' | 'openIdConnect' | 'mutualTLS'
+  httpScheme?: string; // 'bearer', 'basic', 'digest', etc.
+  bearerFormat?: string; // e.g., 'JWT'
+  scopes?: string[]; // Required OAuth2 scopes
+  apiKeyName?: string; // API key parameter name
+  apiKeyIn?: "query" | "header" | "cookie";
   description?: string;
 }
 ```
@@ -274,9 +306,9 @@ interface SecurityRequirement {
   scheme: string;
   type: AuthType;
   scopes?: string[];
-  name?: string;              // API key parameter name
-  in?: 'query' | 'header' | 'cookie';
-  httpScheme?: string;        // 'bearer', 'basic', etc.
+  name?: string; // API key parameter name
+  in?: "query" | "header" | "cookie";
+  httpScheme?: string; // 'bearer', 'basic', etc.
   bearerFormat?: string;
   description?: string;
 }
@@ -290,9 +322,9 @@ Serialization details for complex parameters.
 
 ```typescript
 interface SerializationInfo {
-  contentType?: string;                      // Body content type
+  contentType?: string; // Body content type
   encoding?: Record<string, EncodingObject>; // OpenAPI media-type encoding rules
-  binary?: boolean;                          // File part / raw binary body (format: binary)
+  binary?: boolean; // File part / raw binary body (format: binary)
 }
 ```
 
@@ -353,21 +385,26 @@ Auth context provided to `SecurityResolver.resolve()`.
 
 ```typescript
 interface SecurityContext {
-  jwt?: string;                    // Bearer token
-  basic?: string;                  // Base64 "username:password"
-  digest?: DigestAuthCredentials;  // Digest auth credentials
-  apiKey?: string;                 // Single API key
+  jwt?: string; // Bearer token
+  basic?: string; // Base64 "username:password"
+  digest?: DigestAuthCredentials; // Digest auth credentials
+  apiKey?: string; // Single API key
   apiKeys?: Record<string, string>; // Multiple API keys by name
-  oauth2Token?: string;            // OAuth2 access token
+  oauth2Token?: string; // OAuth2 access token
   clientCertificate?: ClientCertificate;
-  privateKey?: string;             // For signature-based auth
+  privateKey?: string; // For signature-based auth
   publicKey?: string;
-  hmacSecret?: string;             // For HMAC auth
+  hmacSecret?: string; // For HMAC auth
   awsCredentials?: AWSCredentials; // AWS Signature V4
   customHeaders?: Record<string, string>;
   cookies?: Record<string, string>;
-  customResolver?: (security: SecurityParameterInfo) => string | Promise<string | undefined>;
-  signatureGenerator?: (data: SignatureData, security: SecurityParameterInfo) => string | Promise<string>;
+  customResolver?: (
+    security: SecurityParameterInfo,
+  ) => string | Promise<string | undefined>;
+  signatureGenerator?: (
+    data: SignatureData,
+    security: SecurityParameterInfo,
+  ) => string | Promise<string>;
 }
 ```
 
@@ -410,8 +447,8 @@ interface DigestAuthCredentials {
 
 ```typescript
 interface ClientCertificate {
-  cert: string;         // PEM format
-  key: string;          // PEM format
+  cert: string; // PEM format
+  key: string; // PEM format
   passphrase?: string;
   ca?: string | string[];
 }
@@ -451,13 +488,14 @@ Options for loading OpenAPI specifications. See [Configuration](./configuration.
 
 ```typescript
 interface LoadOptions {
-  dereference?: boolean;             // default: true
+  dereference?: boolean; // default: true
   baseUrl?: string;
   headers?: Record<string, string>;
-  timeout?: number;                  // default: 30000 (ms)
-  validate?: boolean;                // default: true
-  followRedirects?: boolean;         // default: true
+  timeout?: number; // default: 30000 (ms)
+  validate?: boolean; // default: true
+  followRedirects?: boolean; // default: true (false under secureDefaults)
   refResolution?: RefResolutionOptions;
+  secureDefaults?: boolean; // default: false (redirects off + external refs off)
 }
 ```
 
@@ -470,16 +508,24 @@ interface GenerateOptions {
   includeOperations?: string[];
   excludeOperations?: string[];
   filterFn?: (operation: OperationWithContext) => boolean;
+  includeTags?: string[]; // filter by OpenAPI tags
+  excludeTags?: string[];
+  includeMethods?: HTTPMethod[]; // filter by HTTP method
+  excludeMethods?: HTTPMethod[];
+  includePaths?: string[]; // path globs: * per segment, ** across, ? one char
+  excludePaths?: string[];
+  readOnlyOnly?: boolean; // default: false (safety switch)
   namingStrategy?: NamingStrategy;
-  preferredStatusCodes?: number[];   // default: [200, 201, 204, 202, 203, 206]
-  includeDeprecated?: boolean;       // default: false
-  includeAllResponses?: boolean;     // default: true
-  maxSchemaDepth?: number;           // default: 10 (deeper structures truncated)
-  includeExamples?: boolean;         // default: false (parameter/media-type examples)
-  includeSecurityInInput?: boolean;  // default: false
-  inferAnnotations?: boolean;        // default: true (HTTP-method annotation inference)
-  maxToolNameLength?: number;        // default: 64 (clamped to MCP's 128 max)
-  resolveFormats?: boolean;          // default: false
+  preferredStatusCodes?: number[]; // default: [200, 201, 204, 202, 203, 206]
+  includeDeprecated?: boolean; // default: false
+  includeAllResponses?: boolean; // default: true
+  maxSchemaDepth?: number; // default: 10 (deeper structures truncated)
+  includeExamples?: boolean; // default: false (parameter/media-type examples)
+  includeSecurityInInput?: boolean | string[]; // default: false; array = per-scheme selection
+  target?: ClientTarget; // per-client schema dialect transforms
+  inferAnnotations?: boolean; // default: true (HTTP-method annotation inference)
+  maxToolNameLength?: number; // default: 64 (clamped to MCP's 128 max)
+  resolveFormats?: boolean; // default: false
   formatResolvers?: Record<string, FormatResolver>;
 }
 ```
@@ -490,10 +536,10 @@ Security configuration for `$ref` resolution. See [SSRF Prevention](./ssrf-preve
 
 ```typescript
 interface RefResolutionOptions {
-  allowedProtocols?: string[];       // default: ['http', 'https']
+  allowedProtocols?: string[]; // default: ['http', 'https']
   allowedHosts?: string[];
   blockedHosts?: string[];
-  allowInternalIPs?: boolean;        // default: false
+  allowInternalIPs?: boolean; // default: false
 }
 ```
 
@@ -503,8 +549,16 @@ Custom naming for parameter conflict resolution and tool names. See [Naming Stra
 
 ```typescript
 interface NamingStrategy {
-  conflictResolver: (paramName: string, location: ParameterLocation, index: number) => string;
-  toolNameGenerator?: (path: string, method: HTTPMethod, operationId?: string) => string;
+  conflictResolver: (
+    paramName: string,
+    location: ParameterLocation,
+    index: number,
+  ) => string;
+  toolNameGenerator?: (
+    path: string,
+    method: HTTPMethod,
+    operationId?: string,
+  ) => string;
 }
 ```
 
@@ -538,7 +592,7 @@ interface ValidationResult {
 ```typescript
 interface ValidationErrorDetail {
   message: string;
-  path?: string;    // JSON pointer
+  path?: string; // JSON pointer
   code?: string;
 }
 ```
@@ -559,25 +613,26 @@ interface ValidationWarning {
 
 See [Error Handling](./error-handling.md) for usage patterns.
 
-| Class | Thrown When |
-|-------|-----------|
-| `OpenAPIToolError` | Base class for all errors |
-| `LoadError` | URL fetch or file read fails |
-| `ParseError` | YAML/JSON parsing or dereferencing fails |
-| `ValidationError` | OpenAPI document is invalid |
-| `GenerationError` | Tool generation fails |
-| `SchemaError` | Schema manipulation fails |
+| Class              | Thrown When                              |
+| ------------------ | ---------------------------------------- |
+| `OpenAPIToolError` | Base class for all errors                |
+| `LoadError`        | URL fetch or file read fails             |
+| `ParseError`       | YAML/JSON parsing or dereferencing fails |
+| `ValidationError`  | OpenAPI document is invalid              |
+| `GenerationError`  | Tool generation fails                    |
+| `SchemaError`      | Schema manipulation fails                |
 
 ---
 
 ## Basic Types
 
 ```typescript
-type OpenAPIVersion = '3.0.0' | '3.0.1' | '3.0.2' | '3.0.3' | '3.1.0';
+type OpenAPIVersion = "3.0.0" | "3.0.1" | "3.0.2" | "3.0.3" | "3.1.0";
 type OpenAPIDocument = OpenAPIV3.Document | OpenAPIV3_1.Document;
-type HTTPMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options' | 'trace';
-type ParameterLocation = 'path' | 'query' | 'header' | 'cookie' | 'body';
-type AuthType = 'apiKey' | 'http' | 'oauth2' | 'openIdConnect' | 'mutualTLS';
+type HTTPMethod =
+  "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "trace";
+type ParameterLocation = "path" | "query" | "header" | "cookie" | "body";
+type AuthType = "apiKey" | "http" | "oauth2" | "openIdConnect" | "mutualTLS";
 ```
 
 ---

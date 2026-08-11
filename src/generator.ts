@@ -19,13 +19,15 @@ import type {
   OperationWithContext,
   ToolMetadata,
   ServerObject,
+  PathItemObject,
 } from './types';
 import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import { isReferenceObject } from './types';
 import { ParameterResolver } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
 import { SchemaBuilder } from './schema-builder';
-import { extractExtensionOverrides, inferAnnotationsFromMethod } from './annotations';
+import { extractExtensionOverrides, inferAnnotationsFromMethod, resolveExtensionEnabled } from './annotations';
+import { applyClientTarget } from './client-targets';
 import { Validator } from './validator';
 import { GenerationError, LoadError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
@@ -43,6 +45,55 @@ const DEFAULT_MAX_TOOL_NAME_LENGTH = 64;
  * entire name space is exhausted fails loudly instead of looping forever.
  */
 const MAX_NAME_DEDUP_ATTEMPTS = 256;
+
+/**
+ * Apply the `secureDefaults` load preset: redirects off, external `$ref`
+ * resolution disabled. Explicitly-set options always win over the preset.
+ */
+function applySecureDefaults(options: LoadOptions): LoadOptions {
+  if (!options.secureDefaults) return options;
+  return {
+    ...options,
+    followRedirects: options.followRedirects ?? false,
+    // Merge PER KEY: a user tightening one refResolution knob (e.g.
+    // blockedHosts) must not silently discard the preset's external-$ref
+    // lockdown. A DEFINED allowedProtocols still wins — but an explicitly
+    // undefined one (programmatic option building) must not defeat the
+    // preset via object spread copying undefined-valued keys.
+    refResolution: {
+      ...options.refResolution,
+      allowedProtocols: options.refResolution?.allowedProtocols ?? [],
+    },
+  };
+}
+
+/**
+ * Convert a path glob to a RegExp: `*` matches within one path segment,
+ * `**` across segments, `?` a single non-slash character.
+ */
+function globToRegExp(glob: string): RegExp {
+  let pattern = '^';
+  for (let i = 0; i < glob.length; i++) {
+    const char = glob[i];
+    if (char === '*') {
+      if (glob[i + 1] === '*') {
+        pattern += '.*';
+        i++;
+      } else {
+        pattern += '[^/]*';
+      }
+    } else if (char === '?') {
+      pattern += '[^/]';
+    } else {
+      pattern += char.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  return new RegExp(`${pattern}$`);
+}
+
+function matchesAnyGlob(path: string, globs: string[]): boolean {
+  return globs.some((glob) => globToRegExp(glob).test(path));
+}
 
 /**
  * 32-bit FNV-1a hash rendered as 8 hex chars. Used for stable, content-derived
@@ -103,8 +154,9 @@ export class OpenAPIToolGenerator {
   /**
    * Private constructor - use static factory methods to create instances
    */
-  private constructor(document: OpenAPIDocument, options: LoadOptions = {}) {
+  private constructor(document: OpenAPIDocument, rawOptions: LoadOptions = {}) {
     this.document = document;
+    const options = applySecureDefaults(rawOptions);
     this.options = {
       dereference: options.dereference ?? true,
       baseUrl: options.baseUrl ?? '',
@@ -113,13 +165,15 @@ export class OpenAPIToolGenerator {
       validate: options.validate ?? true,
       followRedirects: options.followRedirects ?? true,
       refResolution: options.refResolution ?? {},
+      secureDefaults: options.secureDefaults ?? false,
     };
   }
 
   /**
    * Create generator from a URL
    */
-  static async fromURL(url: string, options: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
+  static async fromURL(url: string, rawOptions: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
+    const options = applySecureDefaults(rawOptions);
     try {
       // SECURITY: validate the spec URL — and every redirect hop — against the
       // SSRF guard before fetching (resolves DNS and rejects internal targets),
@@ -462,7 +516,7 @@ export class OpenAPIToolGenerator {
         if (!operation) continue;
 
         // Apply filters
-        if (!this.shouldIncludeOperation(operation, pathStr, method, options)) {
+        if (!this.shouldIncludeOperation(operation, pathStr, method, options, document, pathItem)) {
           continue;
         }
 
@@ -604,6 +658,15 @@ export class OpenAPIToolGenerator {
       resolvedOutputSchema = SchemaBuilder.truncateDepth(resolvedOutputSchema, maxSchemaDepth);
     }
 
+    // Client dialect transforms (final step — the emitted schemas must be
+    // exactly what the targeted client accepts)
+    if (options.target) {
+      resolvedInputSchema = applyClientTarget(resolvedInputSchema, options.target);
+      if (resolvedOutputSchema) {
+        resolvedOutputSchema = applyClientTarget(resolvedOutputSchema, options.target);
+      }
+    }
+
     return {
       name,
       ...(title !== undefined && { title }),
@@ -624,14 +687,43 @@ export class OpenAPIToolGenerator {
     path: string,
     method: string,
     options: GenerateOptions,
+    document: OpenAPIDocument,
+    pathItem: PathItemObject,
   ): boolean {
-    // Explicit extension exclusion (x-mcp: false, x-speakeasy-mcp: disabled)
-    if (extractExtensionOverrides(operation).disabled) {
+    // Extension enable/exclude with root < path < operation precedence
+    // (x-mcp at every level; the whole family at the operation level)
+    if (!resolveExtensionEnabled(document, pathItem, operation)) {
       return false;
     }
 
     // Check deprecated
     if (operation.deprecated && !options.includeDeprecated) {
+      return false;
+    }
+
+    // Method filters
+    const lowerMethod = method.toLowerCase() as HTTPMethod;
+    if (options.includeMethods && !options.includeMethods.includes(lowerMethod)) {
+      return false;
+    }
+    if (options.excludeMethods?.includes(lowerMethod)) {
+      return false;
+    }
+
+    // Path glob filters
+    if (options.includePaths && !matchesAnyGlob(path, options.includePaths)) {
+      return false;
+    }
+    if (options.excludePaths && matchesAnyGlob(path, options.excludePaths)) {
+      return false;
+    }
+
+    // Tag filters
+    const tags = operation.tags ?? [];
+    if (options.includeTags && !tags.some((tag) => options.includeTags!.includes(tag))) {
+      return false;
+    }
+    if (options.excludeTags && tags.some((tag) => options.excludeTags!.includes(tag))) {
       return false;
     }
 
@@ -644,6 +736,19 @@ export class OpenAPIToolGenerator {
 
     if (options.excludeOperations && operation.operationId) {
       if (options.excludeOperations.includes(operation.operationId)) {
+        return false;
+      }
+    }
+
+    // Read-only safety switch: effective annotations must say read-only.
+    // Uses inference + extension overrides even when inferAnnotations is off —
+    // the filter's semantics must not depend on output formatting options.
+    if (options.readOnlyOnly) {
+      const effective = {
+        ...inferAnnotationsFromMethod(lowerMethod),
+        ...extractExtensionOverrides(operation).annotations,
+      };
+      if (effective.readOnlyHint !== true) {
         return false;
       }
     }

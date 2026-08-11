@@ -6,11 +6,30 @@ export { ResponseBuilder } from './response-builder';
 export { Validator } from './validator';
 export { SecurityResolver, createSecurityContext } from './security-resolver';
 export { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
-export { inferAnnotationsFromMethod, extractExtensionOverrides } from './annotations';
+export { inferAnnotationsFromMethod, extractExtensionOverrides, resolveExtensionEnabled } from './annotations';
 export type { ExtensionToolOverrides } from './annotations';
+export {
+  applyClientTarget,
+  inlineLocalRefs,
+  ensureArrayItems,
+  collapseRootCompositions,
+  collapseNestedUnions,
+  demoteFormats,
+  enforceClosedObjects,
+  requireAllProperties,
+} from './client-targets';
+export type { ClientTarget } from './client-targets';
+
+// Request building
+export { buildHttpRequest } from './request-builder';
+export type { BuildHttpRequestOptions, BuiltHttpRequest } from './request-builder';
+
+// MCP SDK integration
+export { toSdkTool } from './sdk';
+export type { SdkToolConfig, SdkSchemaWrapper } from './sdk';
 
 // Error exports
-export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError } from './errors';
+export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError, RequestBuildError } from './errors';
 
 // SSRF protection (shared by spec-URL loading and $ref resolution; usable by
 // consumers that fetch spec URLs themselves, e.g. pollers)

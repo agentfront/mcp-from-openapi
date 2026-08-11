@@ -63,7 +63,7 @@ export class ParameterResolver {
     operation: any,
     pathParameters?: ParameterObject[],
     securityRequirements?: SecurityRequirement[],
-    includeSecurityInInput?: boolean,
+    includeSecurityInInput?: boolean | string[],
   ): {
     inputSchema: JsonSchema;
     mapper: ParameterMapper[];
@@ -133,6 +133,7 @@ export class ParameterResolver {
           required: param.required,
           style: param.style,
           explode: param.explode,
+          allowReserved: param.allowReserved,
           serialization: param.serialization,
           ...(param.wholeBody && { wholeBody: true }),
         });
@@ -153,6 +154,7 @@ export class ParameterResolver {
             required: param.required,
             style: param.style,
             explode: param.explode,
+            allowReserved: param.allowReserved,
             serialization: param.serialization,
             ...(param.wholeBody && { wholeBody: true }),
           });
@@ -332,7 +334,7 @@ export class ParameterResolver {
     properties: Record<string, JsonSchema>,
     required: string[],
     mapper: ParameterMapper[],
-    includeInInput: boolean,
+    includeInInput: boolean | string[],
   ): void {
     for (const secReq of securityRequirements) {
       const { scheme, type, name: apiKeyName, in: apiKeyIn, scopes } = secReq;
@@ -413,8 +415,10 @@ export class ParameterResolver {
         security: securityInfo,
       });
 
-      // Add to inputSchema (only if includeInInput is true)
-      if (includeInInput) {
+      // Add to inputSchema: everything when `true`, per-scheme when an array
+      // (all schemes stay in the mapper either way)
+      const schemeInInput = includeInInput === true || (Array.isArray(includeInInput) && includeInInput.includes(scheme));
+      if (schemeInInput) {
         properties[inputKey] = schema;
         required.push(inputKey);
       }

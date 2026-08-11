@@ -3546,3 +3546,358 @@ describe('Collision dedup exhaustion', () => {
     }
   });
 });
+
+describe('Curation filtering (Tier 2)', () => {
+  const filterSpec: any = {
+    openapi: '3.0.0',
+    info: { title: 'Filter API', version: '1.0.0' },
+    paths: {
+      '/users': {
+        get: { operationId: 'listUsers', tags: ['users', 'public'], responses: { '200': { description: 'OK' } } },
+        post: { operationId: 'createUser', tags: ['users', 'admin'], responses: { '201': { description: 'OK' } } },
+      },
+      '/users/{id}': {
+        get: {
+          operationId: 'getUser',
+          tags: ['users', 'public'],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: { '200': { description: 'OK' } },
+        },
+        delete: {
+          operationId: 'deleteUser',
+          tags: ['users', 'admin'],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: { '204': { description: 'OK' } },
+        },
+      },
+      '/admin/settings': {
+        get: { operationId: 'getSettings', tags: ['admin'], responses: { '200': { description: 'OK' } } },
+      },
+      '/health': {
+        get: { operationId: 'health', responses: { '200': { description: 'OK' } } },
+      },
+    },
+  };
+
+  const namesFor = async (options: any): Promise<string[]> => {
+    const generator = await OpenAPIToolGenerator.fromJSON(filterSpec);
+    return (await generator.generateTools(options)).map((t) => t.name);
+  };
+
+  it('filters by includeTags / excludeTags', async () => {
+    expect(await namesFor({ includeTags: ['public'] })).toEqual(['listUsers', 'getUser']);
+    expect(await namesFor({ excludeTags: ['admin'] })).toEqual(['health', 'listUsers', 'getUser']);
+  });
+
+  it('filters by includeMethods / excludeMethods', async () => {
+    expect(await namesFor({ includeMethods: ['delete'] })).toEqual(['deleteUser']);
+    expect(await namesFor({ excludeMethods: ['get'] })).toEqual(['createUser', 'deleteUser']);
+  });
+
+  it('filters by path globs', async () => {
+    expect(await namesFor({ includePaths: ['/users/*'] })).toEqual(['getUser', 'deleteUser']);
+    expect(await namesFor({ excludePaths: ['/admin/**', '/health'] })).toEqual([
+      'listUsers',
+      'createUser',
+      'getUser',
+      'deleteUser',
+    ]);
+  });
+
+  it('glob semantics: * stays within a segment, ** crosses, ? is one char', async () => {
+    // /users/* matches /users/{id} but not /users (no trailing segment)
+    expect(await namesFor({ includePaths: ['/users/*'] })).not.toContain('listUsers');
+    // ** matches everything below
+    expect(await namesFor({ includePaths: ['/users/**'] })).toEqual(['getUser', 'deleteUser']);
+    // ? matches exactly one character
+    expect(await namesFor({ includePaths: ['/healt?'] })).toEqual(['health']);
+  });
+
+  it('applies readOnlyOnly as a safety switch', async () => {
+    expect(await namesFor({ readOnlyOnly: true })).toEqual(['getSettings', 'health', 'listUsers', 'getUser']);
+  });
+
+  it('readOnlyOnly honors extension overrides in both directions', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'RO API', version: '1.0.0' },
+      paths: {
+        '/reports': {
+          // POST that an extension declares read-only (e.g. a search endpoint)
+          post: {
+            operationId: 'searchReports',
+            'x-mcp': { annotations: { readOnlyHint: true } },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+        '/cache': {
+          // GET that an extension declares NOT read-only
+          get: {
+            operationId: 'rotateCache',
+            'x-mcp': { annotations: { readOnlyHint: false } },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const names = (await generator.generateTools({ readOnlyOnly: true })).map((t) => t.name);
+
+    expect(names).toEqual(['searchReports']);
+  });
+
+  it('combines filters (intersection semantics)', async () => {
+    expect(await namesFor({ includeTags: ['users'], includeMethods: ['get'], excludePaths: ['/users/*'] })).toEqual([
+      'listUsers',
+    ]);
+  });
+
+  it('still applies filterFn last', async () => {
+    expect(
+      await namesFor({ includeTags: ['users'], filterFn: (op: any) => op.operationId !== 'createUser' }),
+    ).toEqual(['listUsers', 'getUser', 'deleteUser']);
+  });
+});
+
+describe('x-mcp precedence across root, path, and operation', () => {
+  it('root x-mcp:false makes generation opt-in; path and operation levels re-enable', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'OptIn API', version: '1.0.0' },
+      'x-mcp': false,
+      paths: {
+        '/excluded': {
+          get: { operationId: 'excludedByRoot', responses: { '200': { description: 'OK' } } },
+        },
+        '/path-enabled': {
+          'x-mcp': true,
+          get: { operationId: 'enabledByPath', responses: { '200': { description: 'OK' } } },
+          post: {
+            operationId: 'reDisabledByOp',
+            'x-mcp': false,
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+        '/op-enabled': {
+          get: {
+            operationId: 'enabledByOp',
+            'x-mcp': { enabled: true },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const names = (await generator.generateTools()).map((t) => t.name);
+
+    expect(names).toEqual(['enabledByOp', 'enabledByPath']);
+  });
+
+  it('path-level x-mcp:false disables its operations unless the operation re-enables', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'PathOff API', version: '1.0.0' },
+      paths: {
+        '/internal': {
+          'x-mcp': { enabled: false },
+          get: { operationId: 'hiddenOp', responses: { '200': { description: 'OK' } } },
+          post: { operationId: 'visibleOp', 'x-mcp': true, responses: { '200': { description: 'OK' } } },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const names = (await generator.generateTools()).map((t) => t.name);
+
+    expect(names).toEqual(['visibleOp']);
+  });
+});
+
+describe('includeSecurityInInput per-scheme selection', () => {
+  const securedSpec: any = {
+    openapi: '3.0.0',
+    info: { title: 'Secured API', version: '1.0.0' },
+    security: [{ BearerAuth: [] }, { ApiKeyAuth: [] }],
+    components: {
+      securitySchemes: {
+        BearerAuth: { type: 'http', scheme: 'bearer' },
+        ApiKeyAuth: { type: 'apiKey', name: 'X-API-Key', in: 'header' },
+      },
+    },
+    paths: {
+      '/data': { get: { operationId: 'getData', responses: { '200': { description: 'OK' } } } },
+    },
+  };
+
+  it('true puts every scheme in the input schema', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(securedSpec);
+    const tool = await generator.generateTool('/data', 'get', { includeSecurityInInput: true });
+    const props = Object.keys((tool.inputSchema as any).properties);
+
+    expect(props).toEqual(expect.arrayContaining(['BearerAuth', 'ApiKeyAuth']));
+  });
+
+  it('an array selects which schemes appear in input while the mapper keeps all', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(securedSpec);
+    const tool = await generator.generateTool('/data', 'get', { includeSecurityInInput: ['ApiKeyAuth'] });
+    const props = Object.keys((tool.inputSchema as any).properties);
+    const securitySchemes = tool.mapper.filter((m) => m.security).map((m) => m.security!.scheme);
+
+    expect(props).toContain('ApiKeyAuth');
+    expect(props).not.toContain('BearerAuth');
+    expect((tool.inputSchema as any).required).toEqual(['ApiKeyAuth']);
+    expect(securitySchemes).toEqual(expect.arrayContaining(['BearerAuth', 'ApiKeyAuth']));
+  });
+
+  it('an empty array behaves like false for the input schema', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(securedSpec);
+    const tool = await generator.generateTool('/data', 'get', { includeSecurityInInput: [] });
+
+    expect(Object.keys((tool.inputSchema as any).properties)).toHaveLength(0);
+    expect(tool.mapper.filter((m) => m.security)).toHaveLength(2);
+  });
+});
+
+describe('secureDefaults load preset', () => {
+  it('disables external $ref resolution', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Ref API', version: '1.0.0' },
+      paths: {
+        '/thing': {
+          get: {
+            operationId: 'getThing',
+            parameters: [{ name: 'q', in: 'query', schema: { $ref: 'https://schemas.example.com/q.json' } }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { secureDefaults: true, validate: false });
+    const tools = await generator.generateTools();
+
+    // the external ref is left unresolved instead of being fetched
+    expect(JSON.stringify(tools[0].inputSchema)).toContain('https://schemas.example.com/q.json');
+  });
+
+  it('refuses spec-URL redirects', async () => {
+    let redirected = false;
+    const handler: LoopbackHandler = (req, res) => {
+      if (req.url === '/spec.json') {
+        res.writeHead(302, { Location: '/real.json' });
+        res.end();
+      } else {
+        redirected = true;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ openapi: '3.0.0', info: { title: 'T', version: '1' }, paths: {} }));
+      }
+    };
+    const loopback = createLoopbackServer(() => handler);
+    const baseUrl = await loopback.listen();
+    try {
+      await expect(
+        OpenAPIToolGenerator.fromURL(`${baseUrl}/spec.json`, {
+          secureDefaults: true,
+          refResolution: { allowInternalIPs: true },
+        }),
+      ).rejects.toThrow();
+      expect(redirected).toBe(false);
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  it('lets explicit options win over the preset', async () => {
+    const handler: LoopbackHandler = (req, res) => {
+      if (req.url === '/spec.json') {
+        res.writeHead(302, { Location: '/real.json' });
+        res.end();
+      } else {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ openapi: '3.0.0', info: { title: 'T', version: '1.0.0' }, paths: {} }));
+      }
+    };
+    const loopback = createLoopbackServer(() => handler);
+    const baseUrl = await loopback.listen();
+    try {
+      const generator = await OpenAPIToolGenerator.fromURL(`${baseUrl}/spec.json`, {
+        secureDefaults: true,
+        followRedirects: true, // explicit value beats the preset
+        refResolution: { allowInternalIPs: true },
+      });
+      expect(generator).toBeInstanceOf(OpenAPIToolGenerator);
+    } finally {
+      await loopback.close();
+    }
+  });
+});
+
+describe('Generic tool metadata (McpOpenAPITool<TMeta>)', () => {
+  it('lets frameworks extend metadata without casting through unknown', async () => {
+    type ExtendedMeta = import('../types').ToolMetadata & { adapterState?: { cached: boolean } };
+
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Meta API', version: '1.0.0' },
+      paths: { '/x': { get: { operationId: 'getX', responses: { '200': { description: 'OK' } } } } },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const base = await generator.generateTool('/x', 'get');
+
+    // a framework layers its own metadata on top, typed end to end
+    const extended: import('../types').McpOpenAPITool<ExtendedMeta> = {
+      ...base,
+      metadata: { ...base.metadata, adapterState: { cached: true } },
+    };
+
+    expect(extended.metadata.adapterState?.cached).toBe(true);
+    expect(extended.metadata.path).toBe('/x');
+  });
+});
+
+describe('secureDefaults per-key refResolution merge', () => {
+  it('keeps the external-ref lockdown when refResolution tightens other knobs', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Ref API', version: '1.0.0' },
+      paths: {
+        '/thing': {
+          get: {
+            operationId: 'getThing',
+            parameters: [{ name: 'q', in: 'query', schema: { $ref: 'https://attacker.example/exfil.json' } }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, {
+      secureDefaults: true,
+      refResolution: { blockedHosts: ['internal.corp'] }, // tightening, not loosening
+      validate: false,
+    });
+    const tools = await generator.generateTools();
+
+    // the external ref must remain unfetched/unresolved
+    expect(JSON.stringify(tools[0].inputSchema)).toContain('attacker.example');
+  });
+
+  it('lets an explicit allowedProtocols override the preset', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      { openapi: '3.0.0', info: { title: 'T', version: '1' }, paths: {} } as any,
+      { secureDefaults: true, refResolution: { allowedProtocols: ['https'] } },
+    );
+
+    // the normalized options must carry the explicit override verbatim
+    expect((generator as any).options.refResolution.allowedProtocols).toEqual(['https']);
+    expect((generator as any).options.followRedirects).toBe(false);
+  });
+
+  it('treats an explicitly undefined allowedProtocols as unset (lockdown preserved)', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      { openapi: '3.0.0', info: { title: 'T', version: '1' }, paths: {} } as any,
+      // programmatic option building: the key exists but the value is undefined
+      { secureDefaults: true, refResolution: { allowedProtocols: undefined } },
+    );
+
+    expect((generator as any).options.refResolution.allowedProtocols).toEqual([]);
+  });
+});

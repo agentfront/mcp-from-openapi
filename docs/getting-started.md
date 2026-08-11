@@ -187,6 +187,8 @@ Each mapper entry has:
 
 Use the mapper to construct the actual HTTP request:
 
+> **Prefer `buildHttpRequest`** — the built-in [request builder](./request-builder.md) applies the full OpenAPI serialization table (style/explode, deepObject, multipart, binary, `wholeBody`). The manual walkthrough below shows the mapper contract for custom integrations.
+
 ```typescript
 function buildRequest(tool: McpOpenAPITool, input: Record<string, any>) {
   let path = tool.metadata.path;
