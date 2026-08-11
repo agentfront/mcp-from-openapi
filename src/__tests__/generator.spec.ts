@@ -2994,3 +2994,44 @@ describe('Tool annotations with uppercase method argument', () => {
     expect(tool.annotations?.readOnlyHint).toBe(true);
   });
 });
+
+describe('Deterministic tool ordering', () => {
+  it('should order tools by path, then canonical method order, regardless of spec key order', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Order API', version: '1.0.0' },
+      paths: {
+        '/zebra': { get: { operationId: 'zebraGet', responses: { '200': { description: 'OK' } } } },
+        '/alpha': {
+          // post declared before get: canonical method order must win
+          post: { operationId: 'alphaPost', responses: { '200': { description: 'OK' } } },
+          get: { operationId: 'alphaGet', responses: { '200': { description: 'OK' } } },
+        },
+        '/mango': { delete: { operationId: 'mangoDelete', responses: { '204': { description: 'OK' } } } },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const names = (await generator.generateTools()).map((t) => t.name);
+
+    expect(names).toEqual(['alphaGet', 'alphaPost', 'mangoDelete', 'zebraGet']);
+  });
+
+  it('should produce identical ordering for re-serialized specs with different key order', async () => {
+    const opsA: any = {
+      '/b': { get: { operationId: 'bGet', responses: { '200': { description: 'OK' } } } },
+      '/a': { get: { operationId: 'aGet', responses: { '200': { description: 'OK' } } } },
+    };
+    const opsB: any = {
+      '/a': { get: { operationId: 'aGet', responses: { '200': { description: 'OK' } } } },
+      '/b': { get: { operationId: 'bGet', responses: { '200': { description: 'OK' } } } },
+    };
+    const base = { openapi: '3.0.0', info: { title: 'Order API', version: '1.0.0' } };
+
+    const genA = await OpenAPIToolGenerator.fromJSON({ ...base, paths: opsA } as any);
+    const genB = await OpenAPIToolGenerator.fromJSON({ ...base, paths: opsB } as any);
+
+    expect((await genA.generateTools()).map((t) => t.name)).toEqual(
+      (await genB.generateTools()).map((t) => t.name),
+    );
+  });
+});

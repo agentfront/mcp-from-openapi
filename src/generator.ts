@@ -434,7 +434,13 @@ export class OpenAPIToolGenerator {
       return tools;
     }
 
-    for (const [pathStr, pathItem] of Object.entries(document.paths)) {
+    // Deterministic ordering (MCP 2026-07-28 SHOULD): paths sorted by code
+    // unit (locale-independent), methods in the fixed canonical order below.
+    // Stable output across spec re-serializations keeps clients' prompt
+    // caches effective.
+    const sortedPaths = Object.entries(document.paths).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+
+    for (const [pathStr, pathItem] of sortedPaths) {
       if (!pathItem || '$ref' in pathItem) continue;
 
       const methods: HTTPMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
