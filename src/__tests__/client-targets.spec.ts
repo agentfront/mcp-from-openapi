@@ -471,6 +471,22 @@ describe('external refs, enum nullability, gemini metadata, numeric formats', ()
     expect(result.properties.relative.description).toContain('External $ref');
   });
 
+  it('resolves local refs inside the siblings of a removed external $ref', () => {
+    const result = inlineLocalRefs({
+      $defs: { Inner: { type: 'string' } },
+      properties: {
+        combo: {
+          $ref: 'https://example.com/base.json',
+          properties: { local: { $ref: '#/$defs/Inner' } },
+        },
+      },
+    } as any) as any;
+
+    expect(result.properties.combo.$ref).toBeUndefined();
+    expect(result.properties.combo.properties.local).toEqual({ type: 'string' });
+    expect(result.$defs).toBeUndefined();
+  });
+
   it('extends enums with null in the openai nullable rewrite and skips const', () => {
     const result = requireAllProperties({
       type: 'object',

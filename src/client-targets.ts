@@ -118,9 +118,13 @@ export function inlineLocalRefs(schema: JsonSchema): JsonSchema {
     if (typeof ref === 'string' && !ref.startsWith('#')) {
       // Non-local refs (URLs, relative files) cannot be resolved here — with
       // secureDefaults external resolution is off, so they must not survive
-      // into schemas shipped to clients that reject $ref.
+      // into schemas shipped to clients that reject $ref. The replacement is
+      // re-walked so LOCAL refs inside sibling keywords still resolve.
       const { $ref: _external, ...siblings } = record;
-      return { description: `[External $ref ${ref} removed for client compatibility]`, ...siblings } as JsonSchema;
+      return inline(
+        { description: `[External $ref ${ref} removed for client compatibility]`, ...siblings } as JsonSchema,
+        seenPointers,
+      );
     }
     if (typeof ref === 'string') {
       // 2020-12 allows keywords alongside $ref; siblings win over the target

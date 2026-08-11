@@ -463,7 +463,10 @@ export function buildHttpRequest(
         }
       }
       body = form;
-      // Do NOT set content-type: the HTTP client must add the boundary.
+      // Do NOT set content-type: the HTTP client must add the boundary. A
+      // spec-mapped Content-Type header would ship WITHOUT a boundary and
+      // break the multipart body, so it is removed too.
+      if (hasExplicitContentType) delete headers[contentTypeKey];
     } else if (JSON_CONTENT.test(ct)) {
       body = JSON.stringify(rawBody);
       headers[contentTypeKey] = ct;

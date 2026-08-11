@@ -722,6 +722,23 @@ describe('header names and content-type casing', () => {
     expect(result.headers['Content-Type']).toBe('application/json'); // body serialization wins
   });
 
+  it('removes a mapped Content-Type header for multipart bodies (client sets the boundary)', () => {
+    const tool = makeTool([
+      { inputKey: 'ct', type: 'header', key: 'Content-Type' },
+      {
+        inputKey: 'file',
+        type: 'body',
+        key: 'file',
+        serialization: { contentType: 'multipart/form-data' },
+      },
+    ]);
+    const result = buildHttpRequest(withUploadPath(tool), { ct: 'multipart/form-data', file: 'x' });
+
+    expect(result.body).toBeInstanceOf(FormData);
+    expect(Object.keys(result.headers).filter((h) => h.toLowerCase() === 'content-type')).toEqual([]);
+    expect(result.contentType).toBe('multipart/form-data'); // still reported for routing
+  });
+
   it('keeps an explicit Content-Type header for binary bodies', () => {
     const tool = makeTool([
       { inputKey: 'ct', type: 'header', key: 'Content-Type' },
