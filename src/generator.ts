@@ -30,6 +30,56 @@ import { LoadError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
 
+/** MCP hard limit for tool name length (spec revision 2025-11-25, SEP-986) */
+const MCP_MAX_TOOL_NAME_LENGTH = 128;
+
+/** Default tool name cap — the strictest common client limit (Claude/Bedrock: 64) */
+const DEFAULT_MAX_TOOL_NAME_LENGTH = 64;
+
+/**
+ * 32-bit FNV-1a hash rendered as 8 hex chars. Used for stable, content-derived
+ * name suffixes (no Node `crypto` dependency, so V8-isolate runtimes work).
+ */
+function fnv1aHex(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * Sanitize and cap a tool name per MCP rules: only `[A-Za-z0-9_.-]`, 1-128
+ * chars. Invalid characters become underscores (collapsed); names longer than
+ * `maxLength` are truncated with a hash suffix derived from the FULL original
+ * name, keeping truncated names unique and stable across regenerations.
+ * `fallbackSeed` names the operation (method + path) when sanitization leaves
+ * nothing usable.
+ */
+function normalizeToolName(raw: string, maxLength: number, fallbackSeed: string): string {
+  let name = raw
+    .replace(/[^A-Za-z0-9_.-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+  if (name.length === 0) {
+    name = `tool_${fnv1aHex(fallbackSeed)}`;
+  }
+
+  const cap = Math.min(Math.max(1, maxLength), MCP_MAX_TOOL_NAME_LENGTH);
+  if (name.length > cap) {
+    // 9 = '_' + 8-char hash. Below that there is no room for a readable base.
+    if (cap >= 13) {
+      name = `${name.slice(0, cap - 9)}_${fnv1aHex(name)}`;
+    } else {
+      name = fnv1aHex(name).slice(0, cap);
+    }
+  }
+
+  return name;
+}
+
 /**
  * Main class for generating MCP tools from OpenAPI specifications
  */
@@ -377,6 +427,7 @@ export class OpenAPIToolGenerator {
 
     const document = this.getDocument();
     const tools: McpOpenAPITool[] = [];
+    const usedNames = new Set<string>();
 
     if (!document.paths) {
       return tools;
@@ -397,7 +448,20 @@ export class OpenAPIToolGenerator {
         }
 
         try {
-          const tool = await this.generateTool(pathStr, method, options);
+          let tool = await this.generateTool(pathStr, method, options);
+          // Resolve tool-name collisions (e.g. duplicate operationIds) with a
+          // stable, content-derived suffix — the (method, path) pair is unique
+          // per operation, so the suffixed name is deterministic across runs.
+          if (usedNames.has(tool.name)) {
+            const maxLength = options.maxToolNameLength ?? DEFAULT_MAX_TOOL_NAME_LENGTH;
+            const deduped = normalizeToolName(
+              `${tool.name}_${fnv1aHex(`${method} ${pathStr}`)}`,
+              maxLength,
+              `${method} ${pathStr}`,
+            );
+            tool = { ...tool, name: deduped };
+          }
+          usedNames.add(tool.name);
           tools.push(tool);
         } catch (error: unknown) {
           /* c8 ignore next */
@@ -543,22 +607,30 @@ export class OpenAPIToolGenerator {
     operationId?: string,
     options: GenerateOptions = {},
   ): string {
+    let rawName: string;
+
     if (options.namingStrategy?.toolNameGenerator) {
-      return options.namingStrategy.toolNameGenerator(path, method, operationId);
+      rawName = options.namingStrategy.toolNameGenerator(path, method, operationId);
+    } else if (operationId) {
+      rawName = operationId;
+    } else {
+      // Generate from path and method
+      const sanitized = path
+        .replace(/\{([^}]+)\}/g, 'By_$1')
+        .replace(/[^a-zA-Z0-9_]/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_|_$/g, '');
+
+      rawName = `${method}_${sanitized}`;
     }
 
-    if (operationId) {
-      return operationId;
-    }
-
-    // Generate from path and method
-    const sanitized = path
-      .replace(/\{([^}]+)\}/g, 'By_$1')
-      .replace(/[^a-zA-Z0-9_]/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^_|_$/g, '');
-
-    return `${method}_${sanitized}`;
+    // MCP name rules are hard client constraints, so they apply to every
+    // source — operationIds and custom toolNameGenerator output included.
+    return normalizeToolName(
+      rawName,
+      options.maxToolNameLength ?? DEFAULT_MAX_TOOL_NAME_LENGTH,
+      `${method} ${path}`,
+    );
   }
 
   /**

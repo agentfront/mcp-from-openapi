@@ -862,7 +862,9 @@ paths:
         },
       });
 
-      expect(tool.name).toBe('get__users_{id}');
+      // Custom generator output is still normalized to MCP name rules:
+      // `{`/`}` are invalid characters and consecutive underscores collapse.
+      expect(tool.name).toBe('get_users_id');
     });
   });
 
@@ -2715,5 +2717,130 @@ describe('maxSchemaDepth option', () => {
       type: 'string',
       'x-parameter-location': 'query',
     });
+  });
+});
+
+describe('Tool name normalization (MCP name rules)', () => {
+  const specWithOp = (operationId: string | undefined, path = '/things'): any => ({
+    openapi: '3.0.0',
+    info: { title: 'Naming API', version: '1.0.0' },
+    paths: {
+      [path]: {
+        get: {
+          ...(operationId ? { operationId } : {}),
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+    },
+  });
+
+  it('should sanitize invalid characters to underscores', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp('get user (v2)!'));
+    const tool = await generator.generateTool('/things', 'get');
+
+    expect(tool.name).toBe('get_user_v2');
+  });
+
+  it('should leave valid names unchanged', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp('billing.invoices-list_v2'));
+    const tool = await generator.generateTool('/things', 'get');
+
+    expect(tool.name).toBe('billing.invoices-list_v2');
+  });
+
+  it('should truncate long names to 64 chars with a stable hash suffix', async () => {
+    const longId = 'veryLongOperationName'.repeat(5); // 105 chars
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp(longId));
+    const tool1 = await generator.generateTool('/things', 'get');
+    const tool2 = await generator.generateTool('/things', 'get');
+
+    expect(tool1.name).toHaveLength(64);
+    expect(tool1.name).toMatch(/^[A-Za-z0-9_.-]+$/);
+    expect(tool1.name).toMatch(/_[0-9a-f]{8}$/);
+    expect(tool1.name.startsWith('veryLongOperationName')).toBe(true);
+    expect(tool2.name).toBe(tool1.name); // deterministic
+  });
+
+  it('should clamp maxToolNameLength to the MCP hard limit of 128', async () => {
+    const longId = 'x'.repeat(150);
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp(longId));
+    const tool = await generator.generateTool('/things', 'get', { maxToolNameLength: 500 });
+
+    expect(tool.name).toHaveLength(128);
+  });
+
+  it('should honor a custom maxToolNameLength', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp('someReasonablyLongOperationId'));
+    const tool = await generator.generateTool('/things', 'get', { maxToolNameLength: 20 });
+
+    expect(tool.name).toHaveLength(20);
+    expect(tool.name).toMatch(/_[0-9a-f]{8}$/);
+  });
+
+  it('should fall back to a bare hash for tiny maxToolNameLength values', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp('someReasonablyLongOperationId'));
+    const tool = await generator.generateTool('/things', 'get', { maxToolNameLength: 8 });
+
+    expect(tool.name).toHaveLength(8);
+    expect(tool.name).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('should generate a fallback name when sanitization leaves nothing', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp('!!!'));
+    const tool = await generator.generateTool('/things', 'get');
+
+    expect(tool.name).toMatch(/^tool_[0-9a-f]{8}$/);
+  });
+
+  it('should sanitize custom toolNameGenerator output too', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithOp('getThings'));
+    const tool = await generator.generateTool('/things', 'get', {
+      namingStrategy: {
+        conflictResolver: (name) => name,
+        toolNameGenerator: () => 'my tool!',
+      },
+    });
+
+    expect(tool.name).toBe('my_tool');
+  });
+
+  it('should deduplicate colliding names with a stable content-derived suffix', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Dup API', version: '1.0.0' },
+      paths: {
+        '/a': { get: { operationId: 'dupOp', responses: { '200': { description: 'OK' } } } },
+        '/b': { post: { operationId: 'dupOp', responses: { '200': { description: 'OK' } } } },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tools = await generator.generateTools();
+    const names = tools.map((t) => t.name);
+
+    expect(names).toHaveLength(2);
+    expect(new Set(names).size).toBe(2);
+    expect(names[0]).toBe('dupOp');
+    expect(names[1]).toMatch(/^dupOp_[0-9a-f]{8}$/);
+
+    // deterministic across regenerations
+    const again = (await generator.generateTools()).map((t) => t.name);
+    expect(again).toEqual(names);
+  });
+
+  it('should keep deduplicated names within the length cap', async () => {
+    const longId = 'duplicatedVeryLongOperationName'.repeat(3); // 93 chars
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Dup API', version: '1.0.0' },
+      paths: {
+        '/a': { get: { operationId: longId, responses: { '200': { description: 'OK' } } } },
+        '/b': { post: { operationId: longId, responses: { '200': { description: 'OK' } } } },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tools = await generator.generateTools();
+
+    expect(tools.map((t) => t.name.length)).toEqual([64, 64]);
+    expect(new Set(tools.map((t) => t.name)).size).toBe(2);
   });
 });

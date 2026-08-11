@@ -682,6 +682,18 @@ export interface GenerateOptions {
   includeSecurityInInput?: boolean;
 
   /**
+   * Maximum length for generated tool names. Names longer than this are
+   * truncated and given a short hash suffix derived from the full name, so
+   * truncated names stay unique and stable across regenerations.
+   *
+   * MCP tool names may be 1-128 characters of `[A-Za-z0-9_.-]` (values above
+   * 128 are clamped to 128). The default of 64 matches the strictest common
+   * client limits (Claude / Bedrock cap tool names at 64 characters).
+   * @default 64
+   */
+  maxToolNameLength?: number;
+
+  /**
    * Enable built-in format-to-schema resolution.
    * Enriches schemas with concrete constraints (patterns, descriptions, min/max)
    * based on OpenAPI format values (uuid, date-time, email, int32, etc.).
