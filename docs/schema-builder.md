@@ -196,6 +196,16 @@ SchemaBuilder.flatten(schema);
 SchemaBuilder.flatten(schema, 5); // Custom max depth (default: 10)
 ```
 
+### truncateDepth
+
+Bound a schema tree to a maximum nesting depth. Nodes at the limit keep scalar keywords but lose child schemas (`properties`, `items`, `additionalProperties`, compositions, `not`) and gain a `[Truncated: nested schema exceeds maxSchemaDepth]` description note. Non-mutating and safe on circular schema graphs.
+
+```typescript
+SchemaBuilder.truncateDepth(schema, 5);
+```
+
+This powers the `maxSchemaDepth` generate option (default `10`).
+
 ### simplify
 
 Removes empty arrays/objects and deduplicates matching title/description:

@@ -137,6 +137,37 @@ Becomes:
 
 If a body property name conflicts with a path/query parameter, the conflict resolver kicks in (e.g., `bodyName`, `pathName`).
 
+### allOf bodies
+
+`allOf` compositions are flattened: object members merge into one property set (later members win on collisions, `required` sets union), so each combined property becomes its own input parameter. Members that carry only a `required` list (the base-`$ref` + required-tightening pattern) still contribute their required fields.
+
+### Whole-body parameters
+
+Bodies that cannot be flattened into named properties become a single `body` input parameter whose mapper entry carries `wholeBody: true` — the input value **is** the entire request body (do not wrap it in `{ body: value }`):
+
+- Non-object bodies: arrays, primitives, raw binary (`format: binary`)
+- `oneOf` / `anyOf` union bodies — at the root **or inside any `allOf` member** (the composed schema is preserved intact rather than flattening the union away)
+- Free-form objects without declared properties
+
+```typescript
+// POST with `schema: { type: 'array', items: { type: 'string' } }`:
+[{ inputKey: "body", type: "body", key: "body", wholeBody: true, serialization: { contentType: "application/json" } }]
+```
+
+### Multipart and file uploads
+
+For `multipart/form-data` (and other) bodies, binary parts (`format: binary`, or OpenAPI 3.1 `contentMediaType` with no declared `type` and no `contentEncoding`) are marked with `serialization.binary: true`, and per-property `encoding` rules from the media type are attached to the matching mapper entries:
+
+```typescript
+[
+  { inputKey: "file", type: "body", key: "file", required: true,
+    serialization: { contentType: "multipart/form-data", binary: true,
+                     encoding: { file: { contentType: "application/octet-stream" } } } },
+  { inputKey: "caption", type: "body", key: "caption",
+    serialization: { contentType: "multipart/form-data" } }
+]
+```
+
 ---
 
 ## Content Type Selection

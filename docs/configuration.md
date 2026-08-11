@@ -72,9 +72,11 @@ const tools = await generator.generateTools({
 | `preferredStatusCodes` | `number[]` | `[200, 201, 204, 202, 203, 206]` | Preferred response codes (in order) |
 | `includeDeprecated` | `boolean` | `false` | Include deprecated operations |
 | `includeAllResponses` | `boolean` | `true` | Include all status codes as oneOf union |
-| `maxSchemaDepth` | `number` | `10` | Maximum nesting depth for schemas |
-| `includeExamples` | `boolean` | `false` | Include example values in schemas |
+| `maxSchemaDepth` | `number` | `10` | Maximum schema nesting depth; deeper structures are truncated with a note |
+| `includeExamples` | `boolean` | `false` | Include parameter/media-type example values in schemas |
 | `includeSecurityInInput` | `boolean` | `false` | Add security params to inputSchema |
+| `inferAnnotations` | `boolean` | `true` | Infer MCP tool annotations from HTTP method semantics |
+| `maxToolNameLength` | `number` | `64` | Tool name length cap (clamped to MCP's 128 max); longer names get a hash suffix |
 
 ### Filtering Operations
 
@@ -114,6 +116,32 @@ const tools = await generator.generateTools({
   filterFn: (op) => op.method === 'get' && op.path.startsWith('/users'),
 });
 ```
+
+### maxSchemaDepth
+
+Input and output schemas are bounded to `maxSchemaDepth` levels of nesting (default `10`, minimum `1` — values below 1 are clamped so the root schema always keeps its properties). Nodes at the limit keep their scalar keywords (`type`, `description`, `format`, ...) but have child schemas stripped and `[Truncated: nested schema exceeds maxSchemaDepth]` appended to their description. Truncation covers all JSON Schema 2020-12 structural keywords (`properties`, `patternProperties`, `$defs`, `prefixItems`, `if`/`then`/`else`, `dependentSchemas`, compositions, ...). This keeps pathological or deeply recursive schemas from flooding an agent's context window.
+
+### includeExamples
+
+When `true`, OpenAPI **parameter-level** and **media-type-level** `example`/`examples` values are copied into the generated schemas as JSON Schema `examples` arrays. They override schema-level examples where both exist (matching OpenAPI precedence). The `examples` map wins over the singular `example`; `$ref` example entries are skipped. For flattened object bodies, object-valued media-type examples are distributed onto the matching properties (`example: { name: 'Ada' }` → `name.examples: ['Ada']`).
+
+Note: **schema-level** `example` keywords are always normalized to `examples` arrays by `toJsonSchema()`, regardless of this option — this option only controls the additional parameter/media-type sources.
+
+### inferAnnotations
+
+When `true` (default), each tool gets MCP [tool annotations](./annotations.md) derived from HTTP method semantics (RFC 9110 safety/idempotency):
+
+| Method | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|--------|---------------|-------------------|------------------|-----------------|
+| GET, HEAD, OPTIONS, TRACE | `true` | `false` | `true` | `false` |
+| PUT, DELETE | `false` | `true` | `true` | `false` |
+| POST, PATCH | `false` | `true` | `false` | `false` |
+
+Extension overrides (`x-speakeasy-mcp`, `x-mcp`, `x-frontmcp`) are merged on top and still apply when inference is disabled. See [Annotations & Extensions](./annotations.md).
+
+### maxToolNameLength
+
+Tool names are always normalized to MCP's rules (`[A-Za-z0-9_.-]`, 1-128 chars) and capped at `maxToolNameLength` (default `64`, matching the strictest common client limits — Claude and Bedrock cap tool names at 64 characters). Names over the cap are truncated and given an 8-character hash suffix derived from the full original name, so truncated names stay unique and stable across regenerations. See [Naming Strategies](./naming-strategies.md).
 
 ### includeSecurityInInput
 

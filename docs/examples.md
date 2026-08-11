@@ -49,8 +49,12 @@ function buildRequest(tool, input) {
         headers[m.key] = String(value);
         break;
       case 'body':
-        if (!body) body = {};
-        body[m.key] = value;
+        if (m.wholeBody) {
+          body = value; // non-object/union bodies: the value IS the entire body
+        } else {
+          if (!body) body = {};
+          body[m.key] = value;
+        }
         break;
     }
   }
