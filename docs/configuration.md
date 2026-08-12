@@ -89,6 +89,7 @@ const tools = await generator.generateTools({
 | `maxProperties`                     | `number`                                                     | -                                | Cap object nodes to their first N properties (drop noted); root input params never dropped |
 | `maxDescriptionLength`              | `number`                                                     | -                                | Ellipsis-truncate every schema description at N chars                                      |
 | `stripExamples`                     | `boolean`                                                    | `false`                          | Remove all `examples` arrays from generated schemas                                        |
+| `emitTypeSignatures`                | `boolean`                                                    | `false`                          | Render `metadata.typescript = { signature, declaration }` — see [Type Signatures](./type-signatures.md) |
 
 ### Filtering Operations
 

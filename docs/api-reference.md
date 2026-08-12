@@ -141,6 +141,15 @@ Apply a client dialect's schema transforms (`'claude' | 'openai' | 'gemini' | 's
 applyClientTarget(schema: JsonSchema, target: ClientTarget): JsonSchema
 ```
 
+### emitToolTypeScript / toPascalIdentifier
+
+Render a tool's call contract as TypeScript text (one-line `signature` + self-contained `declaration`). Also emitted during generation via `GenerateOptions.emitTypeSignatures` as `metadata.typescript`. See [Type Signatures](./type-signatures.md).
+
+```typescript
+emitToolTypeScript(toolName: string, description: string | undefined, inputSchema: JsonSchema, outputSchema?: JsonSchema, options?: TypeSignatureOptions): ToolTypeScriptInfo
+toPascalIdentifier(toolName: string): string
+```
+
 ### analyzeToolSet / estimateToolTokens
 
 Context-budget analysis: per-tool token estimates (heaviest first) and curation warnings. See [Curation](./curation.md).

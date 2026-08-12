@@ -34,6 +34,7 @@ import { lintDocument, PAGINATION_PARAM, type LintResult } from './lint';
 import { Validator } from './validator';
 import { GenerationError, LoadError, OverlayError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
+import { emitToolTypeScript } from './type-signature';
 import { isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
 
 /** MCP hard limit for tool name length (spec revision 2025-11-25, SEP-986) */
@@ -722,6 +723,14 @@ export class OpenAPIToolGenerator {
               attempts++;
             }
             tool = { ...tool, name: deduped };
+            // The TypeScript declaration derives its type names from the tool
+            // name — recompute it so a dedup rename can't leave them stale.
+            if (tool.metadata.typescript) {
+              tool.metadata = {
+                ...tool.metadata,
+                typescript: emitToolTypeScript(deduped, tool.description, tool.inputSchema, tool.outputSchema),
+              };
+            }
           }
           usedNames.add(tool.name);
           tools.push(tool);
@@ -888,6 +897,11 @@ export class OpenAPIToolGenerator {
       if (summary) {
         finalDescription = `${finalDescription}\n\nReturns: ${summary}`;
       }
+    }
+
+    // TypeScript call contract (computed on the FINAL schemas)
+    if (options.emitTypeSignatures) {
+      metadata.typescript = emitToolTypeScript(name, finalDescription, resolvedInputSchema, resolvedOutputSchema);
     }
 
     return {

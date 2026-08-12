@@ -8,6 +8,10 @@ export { SecurityResolver, createSecurityContext } from './security-resolver';
 export { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 export { inferAnnotationsFromMethod, extractExtensionOverrides, resolveExtensionEnabled } from './annotations';
 export type { ExtensionToolOverrides } from './annotations';
+
+// TypeScript call-signature emission
+export { emitToolTypeScript, toPascalIdentifier } from './type-signature';
+export type { ToolTypeScriptInfo, TypeSignatureOptions } from './type-signature';
 export {
   applyClientTarget,
   inlineLocalRefs,

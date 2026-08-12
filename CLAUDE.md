@@ -41,6 +41,7 @@ OpenAPIToolGenerator (src/generator.ts)
 | `src/overlay.ts`            | OpenAPI Overlay 1.0 application with a JSONPath subset (filters, recursive descent); `OverlayError`                                                                      |
 | `src/lint.ts`               | `lintDocument` agent-readiness findings (severity + fix hints); `PAGINATION_PARAM` shared regex                                                                          |
 | `src/sdk.ts`                | `toSdkTool` — registerTool-shaped output for the official MCP SDK (no SDK dependency)                                                                                    |
+| `src/type-signature.ts`     | `emitToolTypeScript` — TypeScript signature/declaration rendering of a tool's call contract (`emitTypeSignatures` option → `metadata.typescript`)                        |
 | `src/parameter-resolver.ts` | Resolves OpenAPI parameters + requestBody into flat inputSchema with conflict resolution; flattens `allOf` bodies, flags `wholeBody`/`binary`                            |
 | `src/response-builder.ts`   | Builds outputSchema from OpenAPI responses with content-type and status code preferences                                                                                 |
 | `src/format-resolver.ts`    | Format-to-schema resolution. Built-in resolvers for uuid, date-time, email, int32, etc.                                                                                  |

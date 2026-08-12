@@ -523,6 +523,14 @@ export interface ToolMetadata {
    * present only when there is something to know.
    */
   responseHints?: ResponseHints;
+
+  /**
+   * TypeScript rendering of the tool's call contract — present when
+   * `GenerateOptions.emitTypeSignatures` is set. Computed on the FINAL
+   * schemas (after formats, depth truncation, trimming, and client-target
+   * transforms). The return type is the UNWRAPPED response type.
+   */
+  typescript?: import('./type-signature').ToolTypeScriptInfo;
 }
 
 /**
@@ -978,6 +986,19 @@ export interface GenerateOptions {
    * When used without `resolveFormats`, only custom resolvers are applied.
    */
   formatResolvers?: Record<string, FormatResolver>;
+
+  /**
+   * Emit a TypeScript rendering of each tool's call contract as
+   * `metadata.typescript = { signature, declaration }`. The signature is a
+   * one-line arrow type with inline anonymous types; the declaration is a
+   * self-contained block with named `<ToolName>Input` / `<ToolName>Output`
+   * types and JSDoc from schema descriptions. Computed on the FINAL schemas
+   * (after format resolution, depth truncation, trimming, and client-target
+   * transforms). The return type is the unwrapped OpenAPI response type —
+   * consumers that wrap results must wrap the type themselves.
+   * @default false
+   */
+  emitTypeSignatures?: boolean;
 }
 
 /**

@@ -1,4 +1,5 @@
 import { OpenAPIToolGenerator } from '../generator';
+import { toPascalIdentifier } from '../type-signature';
 import { ParameterResolver } from '../parameter-resolver';
 import { ResponseBuilder } from '../response-builder';
 import { ParseError, LoadError } from '../errors';
@@ -4487,5 +4488,69 @@ describe('OverlayError identity through factory methods', () => {
     } finally {
       await loopback.close();
     }
+  });
+});
+
+describe('TypeScript signature emission (emitTypeSignatures)', () => {
+  const spec: any = {
+    openapi: '3.0.0',
+    info: { title: 'Sig API', version: '1.0.0' },
+    paths: {
+      '/users/{id}': {
+        get: {
+          operationId: 'getUser',
+          summary: 'Get a user',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': {
+              description: 'OK',
+              content: {
+                'application/json': {
+                  schema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  it('emits metadata.typescript from the final schemas when enabled', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tool = await generator.generateTool('/users/{id}', 'get', { emitTypeSignatures: true });
+
+    expect(tool.metadata.typescript).toBeDefined();
+    expect(tool.metadata.typescript?.signature).toBe('(input: { id: string }) => Promise<{ name: string }>');
+    expect(tool.metadata.typescript?.declaration).toContain('interface GetUserInput {');
+    expect(tool.metadata.typescript?.declaration).toContain('declare function getUser(input: GetUserInput): Promise<GetUserOutput>;');
+    // the tool description leads the declaration as JSDoc
+    expect(tool.metadata.typescript?.declaration).toContain('/** Get a user */');
+  });
+
+  it('does not emit metadata.typescript by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tool = await generator.generateTool('/users/{id}', 'get');
+    expect(tool.metadata.typescript).toBeUndefined();
+  });
+
+  it('recomputes the declaration when collision dedup renames a tool', async () => {
+    const dupSpec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Dup API', version: '1.0.0' },
+      paths: {
+        '/a': { get: { operationId: 'dupOp', responses: { '200': { description: 'OK' } } } },
+        '/b': { post: { operationId: 'dupOp', responses: { '200': { description: 'OK' } } } },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(dupSpec, { validate: false });
+    const tools = await generator.generateTools({ emitTypeSignatures: true });
+
+    expect(tools[1].name).toMatch(/^dupOp_[0-9a-f]{8}$/);
+    expect(tools[0].metadata.typescript?.declaration).toContain('DupOpInput');
+    const dedupedPascal = toPascalIdentifier(tools[1].name);
+    expect(dedupedPascal).not.toBe('DupOp');
+    expect(tools[1].metadata.typescript?.declaration).toContain(`${dedupedPascal}Input`);
+    expect(tools[1].metadata.typescript?.declaration).not.toContain('DupOpInput =');
   });
 });
