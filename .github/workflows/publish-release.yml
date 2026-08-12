@@ -38,7 +38,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -162,7 +162,7 @@ jobs:
       - name: Generate AI changelog
         id: ai_changelog
         if: ${{ inputs.dry_run != true && inputs.release_type == 'stable' }}
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           VERSION: v${{ steps.version.outputs.version }}
@@ -426,7 +426,7 @@ jobs:
 
       - name: Create GitHub Release
         if: ${{ inputs.dry_run != true }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: ${{ steps.release_body.outputs.release_name }}
