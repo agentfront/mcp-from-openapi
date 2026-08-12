@@ -20,6 +20,7 @@ import type {
   ToolMetadata,
   ServerObject,
   PathItemObject,
+  JsonSchema,
 } from './types';
 import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import { isReferenceObject } from './types';
@@ -656,6 +657,24 @@ export class OpenAPIToolGenerator {
     resolvedInputSchema = SchemaBuilder.truncateDepth(resolvedInputSchema, maxSchemaDepth);
     if (resolvedOutputSchema) {
       resolvedOutputSchema = SchemaBuilder.truncateDepth(resolvedOutputSchema, maxSchemaDepth);
+    }
+
+    // Trimming controls (after depth truncation, before client targets so the
+    // dialect transforms see the final trimmed shape)
+    const applyTrim = (schema: JsonSchema): JsonSchema => {
+      let trimmed = schema;
+      if (options.stripExamples) trimmed = SchemaBuilder.stripExamples(trimmed);
+      if (options.maxProperties !== undefined) trimmed = SchemaBuilder.limitProperties(trimmed, options.maxProperties);
+      if (options.maxDescriptionLength !== undefined) {
+        trimmed = SchemaBuilder.capDescriptions(trimmed, options.maxDescriptionLength);
+      }
+      return trimmed;
+    };
+    if (options.stripExamples || options.maxProperties !== undefined || options.maxDescriptionLength !== undefined) {
+      resolvedInputSchema = applyTrim(resolvedInputSchema);
+      if (resolvedOutputSchema) {
+        resolvedOutputSchema = applyTrim(resolvedOutputSchema);
+      }
     }
 
     // Client dialect transforms (final step — the emitted schemas must be

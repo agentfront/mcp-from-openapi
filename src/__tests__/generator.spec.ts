@@ -3901,3 +3901,68 @@ describe('secureDefaults per-key refResolution merge', () => {
     expect((generator as any).options.refResolution.allowedProtocols).toEqual([]);
   });
 });
+
+describe('Trimming options (maxProperties, maxDescriptionLength, stripExamples)', () => {
+  const trimSpec: any = {
+    openapi: '3.0.0',
+    info: { title: 'Trim API', version: '1.0.0' },
+    paths: {
+      '/things': {
+        post: {
+          operationId: 'createThing',
+          requestBody: {
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', description: 'A longer-than-ten-chars description', example: 'Ada' },
+                    kind: { type: 'string' },
+                    extra: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': {
+              description: 'OK',
+              content: {
+                'application/json': {
+                  schema: { type: 'object', properties: { id: { type: 'string', example: 'x1' } } },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  it('applies all three trims to input and output schemas', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(trimSpec);
+    const tool = await generator.generateTool('/things', 'post', {
+      maxProperties: 2,
+      maxDescriptionLength: 10,
+      stripExamples: true,
+    });
+    const input = tool.inputSchema as any;
+    const output = tool.outputSchema as any;
+
+    expect(Object.keys(input.properties)).toHaveLength(2);
+    // caps run LAST so every description — including the omitted-note added
+    // by limitProperties — respects the bound (10 chars + ellipsis)
+    expect(input.description).toBe('[1 additio…');
+    expect(input.properties.name.description!.length).toBeLessThanOrEqual(11);
+    expect(input.properties.name.examples).toBeUndefined();
+    expect(output.properties.id.examples).toBeUndefined();
+  });
+
+  it('leaves schemas untouched when no trim option is set', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(trimSpec);
+    const tool = await generator.generateTool('/things', 'post');
+
+    expect(Object.keys((tool.inputSchema as any).properties)).toHaveLength(3);
+    expect((tool.inputSchema as any).properties.name.examples).toEqual(['Ada']);
+  });
+});

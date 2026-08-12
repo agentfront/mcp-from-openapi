@@ -834,6 +834,26 @@ export interface GenerateOptions {
   maxSchemaDepth?: number;
 
   /**
+   * Limit every object node in generated schemas to its first N properties
+   * (declaration order). Dropped properties are pruned from `required` and
+   * counted in a description note. Unset = no limit.
+   */
+  maxProperties?: number;
+
+  /**
+   * Cap every description in generated schemas to N characters (ellipsis
+   * truncation). Unset = no cap.
+   */
+  maxDescriptionLength?: number;
+
+  /**
+   * Remove all `examples` arrays from generated schemas — a token-budget
+   * trimming step that leaves validation keywords untouched.
+   * @default false
+   */
+  stripExamples?: boolean;
+
+  /**
    * Include OpenAPI parameter-level and media-type-level `example`/`examples`
    * values in generated schemas (as JSON Schema `examples` arrays). These
    * override schema-level examples where present. Schema-level `example`

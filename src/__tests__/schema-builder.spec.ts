@@ -757,3 +757,121 @@ describe('SchemaBuilder.truncateDepth depth-bound validation', () => {
     expect(result.contentSchema.description).toContain('Truncated');
   });
 });
+
+describe('SchemaBuilder trimming transforms', () => {
+  describe('limitProperties', () => {
+    const wide = () =>
+      ({
+        type: 'object',
+        description: 'A wide object.',
+        properties: { a: { type: 'string' }, b: { type: 'string' }, c: { type: 'string' }, d: { type: 'string' } },
+        required: ['a', 'c', 'd'],
+      }) as any;
+
+    it('keeps the first N properties, prunes required, and notes the drop', () => {
+      const result = SchemaBuilder.limitProperties(wide(), 2) as any;
+
+      expect(Object.keys(result.properties)).toEqual(['a', 'b']);
+      expect(result.required).toEqual(['a']);
+      expect(result.description).toBe('A wide object. [2 additional properties omitted: exceeds maxProperties]');
+    });
+
+    it('uses singular wording and adds a description when absent', () => {
+      const schema = { type: 'object', properties: { a: {}, b: {} } } as any;
+      const result = SchemaBuilder.limitProperties(schema, 1) as any;
+
+      expect(result.description).toBe('[1 additional property omitted: exceeds maxProperties]');
+    });
+
+    it('drops required entirely when no kept property remains required', () => {
+      const schema = { type: 'object', properties: { a: {}, b: {} }, required: ['b'] } as any;
+      const result = SchemaBuilder.limitProperties(schema, 1) as any;
+
+      expect(result.required).toBeUndefined();
+    });
+
+    it('is a no-op at or under the bound and walks nested objects', () => {
+      const nested = {
+        type: 'object',
+        properties: {
+          child: { type: 'object', properties: { x: {}, y: {}, z: {} } },
+        },
+      } as any;
+      const result = SchemaBuilder.limitProperties(nested, 2) as any;
+
+      expect(Object.keys(result.properties)).toEqual(['child']); // root under bound
+      expect(Object.keys(result.properties.child.properties)).toEqual(['x', 'y']);
+    });
+
+    it('clamps non-finite and fractional bounds', () => {
+      const schema = { type: 'object', properties: { a: {}, b: {}, c: {} } } as any;
+
+      expect(Object.keys((SchemaBuilder.limitProperties(schema, NaN) as any).properties)).toHaveLength(3);
+      expect(Object.keys((SchemaBuilder.limitProperties(schema, 2.9) as any).properties)).toHaveLength(2);
+      expect(Object.keys((SchemaBuilder.limitProperties(schema, 0) as any).properties)).toHaveLength(1); // floor 1
+    });
+
+    it('skips nodes without properties', () => {
+      const schema = { type: 'string', description: 'leaf' } as any;
+
+      expect(SchemaBuilder.limitProperties(schema, 1)).toEqual(schema);
+    });
+  });
+
+  describe('capDescriptions', () => {
+    it('truncates long descriptions everywhere with an ellipsis', () => {
+      const schema = {
+        type: 'object',
+        description: 'A very long root description indeed',
+        properties: { a: { type: 'string', description: 'short' } },
+      } as any;
+      const result = SchemaBuilder.capDescriptions(schema, 10) as any;
+
+      expect(result.description).toBe('A very lon…');
+      expect(result.properties.a.description).toBe('short');
+    });
+
+    it('clamps non-finite bounds to no-op', () => {
+      const schema = { type: 'string', description: 'keep me intact' } as any;
+
+      expect((SchemaBuilder.capDescriptions(schema, Infinity) as any).description).toBe('keep me intact');
+    });
+  });
+
+  describe('walker coverage across compositions and tuples', () => {
+    it('applies transforms inside oneOf members and tuple items', () => {
+      const schema = {
+        oneOf: [{ type: 'string', examples: ['a'] }],
+        anyOf: [{ type: 'integer', examples: [1] }],
+        allOf: [{ type: 'object', examples: [{}] }],
+        items: [{ type: 'string', examples: ['t'] }, { type: 'number' }],
+      } as any;
+      const result = SchemaBuilder.stripExamples(schema) as any;
+
+      expect(result.oneOf[0].examples).toBeUndefined();
+      expect(result.anyOf[0].examples).toBeUndefined();
+      expect(result.allOf[0].examples).toBeUndefined();
+      expect(result.items[0].examples).toBeUndefined();
+      expect(result.items[1]).toEqual({ type: 'number' });
+    });
+  });
+
+  describe('stripExamples', () => {
+    it('removes examples arrays at every level', () => {
+      const schema = {
+        type: 'object',
+        examples: [{ a: 1 }],
+        properties: {
+          a: { type: 'string', examples: ['x'], default: 'kept' },
+          list: { type: 'array', items: { type: 'string', examples: ['y'] } },
+        },
+      } as any;
+      const result = SchemaBuilder.stripExamples(schema) as any;
+
+      expect(result.examples).toBeUndefined();
+      expect(result.properties.a.examples).toBeUndefined();
+      expect(result.properties.a.default).toBe('kept');
+      expect(result.properties.list.items.examples).toBeUndefined();
+    });
+  });
+});
