@@ -792,6 +792,29 @@ describe('SecurityResolver', () => {
       // qop is an unquoted token: the comma (field separator) is stripped.
       expect(header).toContain('qop=authevil=1');
     });
+
+    it('escapes backslashes before quotes so trailing backslashes cannot break the field', async () => {
+      const resolver = new SecurityResolver();
+      const mappers = [
+        {
+          inputKey: 'digestAuth',
+          type: 'header' as const,
+          key: 'Authorization',
+          required: true,
+          security: { scheme: 'digestAuth', type: 'http' as const, httpScheme: 'digest' },
+        },
+      ];
+      const header = (
+        await resolver.resolve(mappers, {
+          digest: { username: 'user\\', password: 'p', realm: 'r"\\' },
+        })
+      ).headers['Authorization'];
+
+      // trailing backslash is itself escaped: \ -> \\, so the closing quote stays a delimiter
+      expect(header).toContain('username="user\\\\"');
+      // backslash + quote each escaped independently
+      expect(header).toContain('realm="r\\"\\\\"');
+    });
   });
 
   describe('Edge Cases', () => {

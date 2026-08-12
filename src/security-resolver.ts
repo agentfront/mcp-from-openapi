@@ -402,7 +402,10 @@ export class SecurityResolver {
     // Strip CR/LF (header/response-splitting) and backslash-escape `"` so a value
     // containing a quote can't break out of its quoted field. `qop`/`nc` are
     // unquoted tokens — strip CR/LF, quotes, and commas (the field separator).
-    const quoted = (v: string): string => String(v).replace(/[\r\n]/g, '').replace(/"/g, '\\"');
+    // Backslashes are escaped FIRST — otherwise a value ending in `\` turns
+    // our escaped closing quote into a literal and breaks out of the field.
+    const quoted = (v: string): string =>
+      String(v).replace(/[\r\n]/g, '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     const token = (v: string): string => String(v).replace(/[\r\n",]/g, '');
 
     // Build digest auth header
