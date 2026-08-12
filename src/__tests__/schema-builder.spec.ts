@@ -758,6 +758,25 @@ describe('SchemaBuilder.truncateDepth depth-bound validation', () => {
   });
 });
 
+describe('SchemaBuilder trimming on circular and shared schemas', () => {
+  it('terminates on circular schema graphs, reusing the produced copy', () => {
+    const node: any = { type: 'object', description: 'a somewhat long description', properties: {} };
+    node.properties.self = node;
+
+    const result = SchemaBuilder.capDescriptions(node, 10) as any;
+
+    expect(result.description).toHaveLength(10);
+    expect(result.properties.self).toBe(result); // cycle preserved on the copy
+  });
+
+  it('never emits a truncated description longer than the bound', () => {
+    const result = SchemaBuilder.capDescriptions({ type: 'string', description: 'x'.repeat(50) } as any, 10) as any;
+
+    expect(result.description).toHaveLength(10);
+    expect(result.description!.endsWith('…')).toBe(true);
+  });
+});
+
 describe('SchemaBuilder trimming transforms', () => {
   describe('limitProperties', () => {
     const wide = () =>
@@ -827,7 +846,7 @@ describe('SchemaBuilder trimming transforms', () => {
       } as any;
       const result = SchemaBuilder.capDescriptions(schema, 10) as any;
 
-      expect(result.description).toBe('A very lon…');
+      expect(result.description).toBe('A very lo…'); // exactly 10 chars, ellipsis included
       expect(result.properties.a.description).toBe('short');
     });
 

@@ -3951,7 +3951,7 @@ describe('Trimming options (maxProperties, maxDescriptionLength, stripExamples)'
 
     // ROOT input parameters are mapper-backed: all three survive the cap
     expect(Object.keys(input.properties)).toEqual(['name', 'kind', 'extra']);
-    expect(input.properties.name.description!.length).toBeLessThanOrEqual(11);
+    expect(input.properties.name.description!.length).toBeLessThanOrEqual(10); // cap INCLUDES the ellipsis
     expect(input.properties.name.examples).toBeUndefined();
     // output schemas trim from the root as usual
     expect(output.properties.id.examples).toBeUndefined();
@@ -4236,14 +4236,14 @@ describe('Description strategies and response summaries', () => {
       },
     };
     const generator = await OpenAPIToolGenerator.fromJSON(spec);
-    const describe = async (p: string) =>
+    const describeShape = async (p: string) =>
       (await generator.generateTool(p, 'get', { appendResponseSummary: true })).description;
 
-    expect(await describe('/typeless')).toContain('Returns: object with fields: a');
-    expect(await describe('/bare-object')).toContain('Returns: object');
-    expect(await describe('/object-array')).toContain('Returns: array of objects');
+    expect(await describeShape('/typeless')).toContain('Returns: object with fields: a');
+    expect(await describeShape('/bare-object')).toContain('Returns: object');
+    expect(await describeShape('/object-array')).toContain('Returns: array of objects');
     // first union variant is type:null -> nothing sensible to say
-    expect(await describe('/null-first')).not.toContain('Returns:');
+    expect(await describeShape('/null-first')).not.toContain('Returns:');
   });
 
   it('summarizes itemless arrays plainly', async () => {
@@ -4409,5 +4409,83 @@ describe('Review-fix regressions: lint on invalid specs, eager overlays', () => 
     await expect(
       OpenAPIToolGenerator.fromJSON(invalidDoc(), { overlays: { overlay: '1.0.0' } as any }),
     ).rejects.toThrow(/actions array/);
+  });
+});
+
+describe('Response hints inside tuple-style items', () => {
+  it('detects unbounded arrays nested in tuple members', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Tuple API', version: '1.0.0' },
+      paths: {
+        '/tuple': {
+          get: {
+            operationId: 'getTuple',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: {
+                  'application/json': {
+                    schema: {
+                      type: 'object',
+                      properties: {
+                        pair: {
+                          type: 'array',
+                          maxItems: 2, // the tuple itself is bounded...
+                          items: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/tuple', 'get');
+
+    // ...but the second tuple member is an unbounded array
+    expect(tool.metadata.responseHints).toEqual({ unboundedArray: true, largeResponseRisk: true });
+  });
+});
+
+describe('OverlayError identity through factory methods', () => {
+  const badOverlay: any = { overlay: '1.0.0' }; // missing actions
+
+  it('propagates OverlayError unchanged from fromFile', async () => {
+    const os = require('os') as typeof import('os');
+    const fs = require('fs/promises') as typeof import('fs/promises');
+    const path = require('path') as typeof import('path');
+    const file = path.join(os.tmpdir(), `overlay-err-${process.pid}.json`);
+    await fs.writeFile(file, JSON.stringify({ openapi: '3.0.0', info: { title: 'T', version: '1' }, paths: {} }));
+    try {
+      const { OverlayError } = require('../errors');
+      await expect(OpenAPIToolGenerator.fromFile(file, { overlays: badOverlay })).rejects.toBeInstanceOf(OverlayError);
+    } finally {
+      await fs.unlink(file);
+    }
+  });
+
+  it('propagates OverlayError unchanged from fromURL', async () => {
+    let handler: LoopbackHandler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ openapi: '3.0.0', info: { title: 'T', version: '1' }, paths: {} }));
+    };
+    const loopback = createLoopbackServer(() => handler);
+    const baseUrl = await loopback.listen();
+    try {
+      const { OverlayError } = require('../errors');
+      await expect(
+        OpenAPIToolGenerator.fromURL(`${baseUrl}/spec.json`, {
+          overlays: badOverlay,
+          refResolution: { allowInternalIPs: true },
+        }),
+      ).rejects.toBeInstanceOf(OverlayError);
+    } finally {
+      await loopback.close();
+    }
   });
 });

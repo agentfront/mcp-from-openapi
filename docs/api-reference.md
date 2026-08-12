@@ -521,6 +521,7 @@ interface LoadOptions {
   followRedirects?: boolean; // default: true (false under secureDefaults)
   refResolution?: RefResolutionOptions;
   secureDefaults?: boolean; // default: false (redirects off + external refs off)
+  overlays?: OverlayDocument | OverlayDocument[]; // applied eagerly, before dereference/validation
 }
 ```
 

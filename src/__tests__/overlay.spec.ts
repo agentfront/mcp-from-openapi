@@ -305,6 +305,35 @@ describe('applyOverlay', () => {
     expect(result.other).toEqual([{ safe: 3 }]);
   });
 
+  it('never matches or merges prototype-reaching keys', () => {
+    const doc: any = { safe: { value: 1 } };
+
+    // targeting __proto__ matches nothing
+    const targeted = applyOverlay(doc, overlayWith([{ target: "$['__proto__']", update: { polluted: true } }])) as any;
+    expect(({} as any).polluted).toBeUndefined();
+    expect(targeted.safe.value).toBe(1);
+
+    // update payloads carrying __proto__/constructor are skipped
+    const merged = applyOverlay(
+      doc,
+      overlayWith([
+        { target: '$.safe', update: JSON.parse('{"__proto__": {"polluted": true}, "constructor": {"bad": 1}, "ok": 2}') },
+      ]),
+    ) as any;
+    expect(({} as any).polluted).toBeUndefined();
+    expect(merged.safe.ok).toBe(2);
+    expect(Object.prototype.hasOwnProperty.call(merged.safe, '__proto__')).toBe(false);
+  });
+
+  it('does not match inherited object properties as children', () => {
+    const result = applyOverlay(
+      { safe: { value: 1 } } as any,
+      overlayWith([{ target: '$.safe.toString', update: { hijacked: true } }]),
+    ) as any;
+
+    expect(result.safe.toString).toBe(Object.prototype.toString); // untouched, unmatched
+  });
+
   describe('errors', () => {
     it.each([
       ['missing actions', { overlay: '1.0.0' } as any, /actions array/],
@@ -350,6 +379,30 @@ describe('overlays LoadOption', () => {
     // second generation: overlay is NOT re-applied (idempotent load)
     const again = await generator.generateTools();
     expect(again[0].description).toBe('Agent-tuned description.');
+  });
+
+  it('applies overlays exactly once even with append semantics', async () => {
+    const doc: any = {
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1' },
+      tags: [{ name: 'base' }],
+      paths: { '/a': { get: { operationId: 'getA', responses: { '200': { description: 'OK' } } } } },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(doc, {
+      overlays: overlayWith([{ target: '$.tags', update: { name: 'appended' } }]),
+    });
+
+    await generator.generateTools();
+    await generator.generateTools(); // a re-applied overlay would append AGAIN
+
+    expect((generator.getDocument() as any).tags).toEqual([{ name: 'base' }, { name: 'appended' }]);
+  });
+
+  it('preserves OverlayError identity through fromYAML', async () => {
+    const { OpenAPIToolGenerator: Gen } = await import('../generator');
+    await expect(
+      Gen.fromYAML('openapi: 3.0.0', { overlays: { overlay: '1.0.0' } as any }),
+    ).rejects.toBeInstanceOf(OverlayError);
   });
 
   it('applies multiple overlays in order', async () => {

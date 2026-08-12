@@ -401,6 +401,41 @@ describe('review-fix regressions', () => {
   });
 });
 
+describe('shared dereferenced nodes', () => {
+  it('measures a shared deep component at full depth from every reference site', () => {
+    // dereferenceInternal reuses ONE object per component — simulate that
+    const deep = (depth: number): any =>
+      depth === 0 ? { type: 'string' } : { type: 'object', properties: { next: deep(depth - 1) } };
+    const shared = deep(10);
+    const doc: any = {
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1' },
+      paths: {
+        '/first': {
+          post: {
+            operationId: 'firstPost',
+            summary: 'A perfectly reasonable summary.',
+            requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { a: shared }, example: {} } } } },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+        '/second': {
+          post: {
+            operationId: 'secondPost',
+            summary: 'A perfectly reasonable summary.',
+            requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { b: shared }, example: {} } } } },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const findings = lintDocument(doc).findings.filter((f) => f.code === 'deep-schema');
+
+    // BOTH operations report the deep schema, not just the first visitor
+    expect(findings.map((f) => f.path).sort()).toEqual(['POST /first', 'POST /second']);
+  });
+});
+
 describe('lintDocument edge shapes', () => {
   it('handles degenerate media entries, tuple items, type arrays, and same-path ordering', () => {
     const doc: any = {

@@ -175,6 +175,9 @@ function isContainer(value: unknown): value is Record<string, unknown> | unknown
   return value !== null && typeof value === 'object';
 }
 
+/** Keys that reach Object.prototype — never matched, never merged. */
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 /** All descendant matches of a node (self excluded), depth-first. */
 function descendants(match: Match): Match[] {
   const result: Match[] = [];
@@ -225,7 +228,12 @@ function applySegment(matches: Match[], segment: Segment): Match[] {
     const node = match.value;
     switch (segment.kind) {
       case 'child': {
-        if (isContainer(node) && !Array.isArray(node) && segment.name in node) {
+        if (
+          isContainer(node) &&
+          !Array.isArray(node) &&
+          !UNSAFE_KEYS.has(segment.name) &&
+          Object.prototype.hasOwnProperty.call(node, segment.name)
+        ) {
           next.push({ parent: node, key: segment.name, value: node[segment.name] });
         }
         break;
@@ -278,6 +286,7 @@ function applySegment(matches: Match[], segment: Segment): Match[] {
 /** Structured merge per the Overlay spec: objects deep-merge, everything else replaces. */
 function deepMerge(target: Record<string, unknown>, update: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(update)) {
+    if (UNSAFE_KEYS.has(key)) continue;
     const existing = target[key];
     if (
       isContainer(value) &&

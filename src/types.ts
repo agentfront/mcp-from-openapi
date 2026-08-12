@@ -885,9 +885,11 @@ export interface GenerateOptions {
   appendResponseSummary?: boolean;
 
   /**
-   * Limit every object node in generated schemas to its first N properties
+   * Limit object nodes in generated schemas to their first N properties
    * (declaration order). Dropped properties are pruned from `required` and
-   * counted in a description note. Unset = no limit.
+   * counted in a description note. The ROOT of `inputSchema` is exempt: its
+   * properties are mapper-backed parameters, so the cap applies inside each
+   * parameter subtree (and throughout output schemas). Unset = no limit.
    */
   maxProperties?: number;
 

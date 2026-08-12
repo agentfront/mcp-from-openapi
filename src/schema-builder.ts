@@ -443,18 +443,27 @@ export class SchemaBuilder {
   // Copy-on-walk over every structural keyword (same key groups as
   // truncateDepth): `visit` transforms each node top-down and must return a
   // new node when it changes anything.
-  private static walkCopy(node: JsonSchema, visit: (node: JsonSchema) => JsonSchema): JsonSchema {
+  private static walkCopy(
+    node: JsonSchema,
+    visit: (node: JsonSchema) => JsonSchema,
+    seen = new Map<JsonSchema, JsonSchema>(),
+  ): JsonSchema {
     /* c8 ignore next -- guard for boolean/degenerate schemas in recursive traversal */
     if (!node || typeof node !== 'object') return node;
+    // Circular/shared nodes reuse the copy already produced — the public
+    // trimming statics accept raw dereferenced documents, which can be cyclic.
+    const existing = seen.get(node);
+    if (existing) return existing;
 
     const copy = visit({ ...node }) as Record<string, unknown>;
+    seen.set(node, copy as JsonSchema);
 
     for (const key of this.TRUNCATE_MAP_KEYS) {
       const value = copy[key];
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
         const mapped: Record<string, JsonSchema> = {};
         for (const [name, sub] of Object.entries(value as Record<string, JsonSchema>)) {
-          mapped[name] = this.walkCopy(sub, visit);
+          mapped[name] = this.walkCopy(sub, visit, seen);
         }
         copy[key] = mapped;
       }
@@ -462,15 +471,15 @@ export class SchemaBuilder {
     for (const key of this.TRUNCATE_SCHEMA_KEYS) {
       const value = copy[key];
       if (Array.isArray(value)) {
-        copy[key] = value.map((item) => this.walkCopy(item as JsonSchema, visit));
+        copy[key] = value.map((item) => this.walkCopy(item as JsonSchema, visit, seen));
       } else if (value !== null && typeof value === 'object') {
-        copy[key] = this.walkCopy(value as JsonSchema, visit);
+        copy[key] = this.walkCopy(value as JsonSchema, visit, seen);
       }
     }
     for (const key of this.TRUNCATE_LIST_KEYS) {
       const value = copy[key];
       if (Array.isArray(value)) {
-        copy[key] = value.map((member) => this.walkCopy(member as JsonSchema, visit));
+        copy[key] = value.map((member) => this.walkCopy(member as JsonSchema, visit, seen));
       }
     }
 
@@ -517,7 +526,8 @@ export class SchemaBuilder {
     const bound = Number.isFinite(maxLength) ? Math.max(1, Math.floor(maxLength)) : Number.MAX_SAFE_INTEGER;
     return this.walkCopy(schema, (node) => {
       if (typeof node.description === 'string' && node.description.length > bound) {
-        return { ...node, description: `${node.description.slice(0, bound)}…` };
+        // reserve one character for the ellipsis so the RESULT is <= bound
+        return { ...node, description: `${node.description.slice(0, bound - 1)}…` };
       }
       return node;
     });

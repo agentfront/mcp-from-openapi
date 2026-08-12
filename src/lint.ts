@@ -39,12 +39,21 @@ interface SchemaShape {
   hasArray: boolean;
 }
 
-/** Measure a schema's nesting depth and widest object — cycle-safe. */
-function measureSchema(node: unknown, seen = new Set<unknown>()): SchemaShape {
-  if (node === null || typeof node !== 'object' || seen.has(node)) {
+/**
+ * Measure a schema's nesting depth and widest object — cycle-safe AND
+ * shared-node-correct: dereferenced documents reuse ONE object per component,
+ * so repeat visits return the memoized shape instead of zeros (only a true
+ * cycle — an in-progress ancestor — measures as empty).
+ */
+function measureSchema(node: unknown, seen = new Map<unknown, SchemaShape | null>()): SchemaShape {
+  if (node === null || typeof node !== 'object') {
     return { depth: 0, widestObject: 0, hasArray: false };
   }
-  seen.add(node);
+  if (seen.has(node)) {
+    // null marks an in-progress ancestor (a real cycle); a value is a memo hit
+    return seen.get(node) ?? { depth: 0, widestObject: 0, hasArray: false };
+  }
+  seen.set(node, null);
   const record = node as Record<string, unknown>;
   let childDepth = 0;
   let widestObject = 0;
@@ -72,7 +81,9 @@ function measureSchema(node: unknown, seen = new Set<unknown>()): SchemaShape {
     if (Array.isArray(value)) value.forEach(visit);
   }
 
-  return { depth: childDepth + 1, widestObject, hasArray };
+  const shape = { depth: childDepth + 1, widestObject, hasArray };
+  seen.set(node, shape);
+  return shape;
 }
 
 /** Does a schema tree carry an `example`/`examples` keyword anywhere? Cycle-safe. */

@@ -39,9 +39,10 @@ const generator = await OpenAPIToolGenerator.fromURL(specUrl, {
             "Search orders. Use `status` to narrow; returns newest first.",
         },
       },
-      // hide internal operations from generation
-      { target: "$.paths['/internal/*']", remove: true },
-      // tag every mutation for filtering
+      // hide an internal path from generation (exact path key — the JSONPath
+      // subset has no glob inside quotes; use excludePaths for glob filtering)
+      { target: "$.paths['/internal/metrics']", remove: true },
+      // tag every operation that has an operationId
       { target: "$.paths.*[?(@.operationId)]", update: { "x-audited": true } },
     ],
   },

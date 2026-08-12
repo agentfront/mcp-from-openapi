@@ -32,7 +32,7 @@ import { applyClientTarget } from './client-targets';
 import { applyOverlay } from './overlay';
 import { lintDocument, PAGINATION_PARAM, type LintResult } from './lint';
 import { Validator } from './validator';
-import { GenerationError, LoadError, ParseError } from './errors';
+import { GenerationError, LoadError, OverlayError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
 
@@ -85,7 +85,9 @@ function hasUnboundedArray(node: unknown, seen = new Set<unknown>()): boolean {
   const properties = record['properties'];
   if (properties && typeof properties === 'object') children.push(...Object.values(properties));
   for (const key of ['items', 'additionalProperties', 'contentSchema']) {
-    if (record[key] && typeof record[key] === 'object') children.push(record[key]);
+    const value = record[key];
+    if (Array.isArray(value)) children.push(...value); // tuple-style items
+    else if (value && typeof value === 'object') children.push(value);
   }
   for (const key of ['allOf', 'anyOf', 'oneOf', 'prefixItems']) {
     if (Array.isArray(record[key])) children.push(...(record[key] as unknown[]));
@@ -345,7 +347,7 @@ export class OpenAPIToolGenerator {
 
       return new OpenAPIToolGenerator(document, options);
     } catch (error: unknown) {
-      if (error instanceof LoadError) {
+      if (error instanceof LoadError || error instanceof OverlayError) {
         throw error;
       }
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -384,6 +386,9 @@ export class OpenAPIToolGenerator {
 
       return new OpenAPIToolGenerator(document, options);
     } catch (error: unknown) {
+      if (error instanceof OverlayError) {
+        throw error;
+      }
       /* c8 ignore next */
       const errorMessage = error instanceof Error ? error.message : String(error);
       throw new LoadError(`Failed to load OpenAPI spec from file: ${errorMessage}`, {
@@ -401,6 +406,9 @@ export class OpenAPIToolGenerator {
       const document = yaml.parse(yamlString);
       return new OpenAPIToolGenerator(document, options);
     } catch (error: unknown) {
+      if (error instanceof OverlayError) {
+        throw error;
+      }
       /* c8 ignore next */
       const errorMessage = error instanceof Error ? error.message : String(error);
       throw new ParseError(`Failed to parse YAML: ${errorMessage}`, {
