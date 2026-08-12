@@ -440,6 +440,113 @@ export class SchemaBuilder {
     return copy;
   }
 
+  // Copy-on-walk over every structural keyword (same key groups as
+  // truncateDepth): `visit` transforms each node top-down and must return a
+  // new node when it changes anything.
+  private static walkCopy(
+    node: JsonSchema,
+    visit: (node: JsonSchema) => JsonSchema,
+    seen = new Map<JsonSchema, JsonSchema>(),
+  ): JsonSchema {
+    /* c8 ignore next -- guard for boolean/degenerate schemas in recursive traversal */
+    if (!node || typeof node !== 'object') return node;
+    // Circular/shared nodes reuse the copy already produced — the public
+    // trimming statics accept raw dereferenced documents, which can be cyclic.
+    const existing = seen.get(node);
+    if (existing) return existing;
+
+    const copy = visit({ ...node }) as Record<string, unknown>;
+    seen.set(node, copy as JsonSchema);
+
+    for (const key of this.TRUNCATE_MAP_KEYS) {
+      const value = copy[key];
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        const mapped: Record<string, JsonSchema> = {};
+        for (const [name, sub] of Object.entries(value as Record<string, JsonSchema>)) {
+          mapped[name] = this.walkCopy(sub, visit, seen);
+        }
+        copy[key] = mapped;
+      }
+    }
+    for (const key of this.TRUNCATE_SCHEMA_KEYS) {
+      const value = copy[key];
+      if (Array.isArray(value)) {
+        copy[key] = value.map((item) => this.walkCopy(item as JsonSchema, visit, seen));
+      } else if (value !== null && typeof value === 'object') {
+        copy[key] = this.walkCopy(value as JsonSchema, visit, seen);
+      }
+    }
+    for (const key of this.TRUNCATE_LIST_KEYS) {
+      const value = copy[key];
+      if (Array.isArray(value)) {
+        copy[key] = value.map((member) => this.walkCopy(member as JsonSchema, visit, seen));
+      }
+    }
+
+    return copy as JsonSchema;
+  }
+
+  /**
+   * Limit every object node to its first `max` properties (declaration
+   * order). Dropped properties are pruned from `required` and counted in a
+   * note appended to the node's description.
+   */
+  static limitProperties(schema: JsonSchema, max: number): JsonSchema {
+    const bound = Number.isFinite(max) ? Math.max(1, Math.floor(max)) : Number.MAX_SAFE_INTEGER;
+    return this.walkCopy(schema, (node) => {
+      const properties = node.properties;
+      if (!properties || typeof properties !== 'object') return node;
+      const entries = Object.entries(properties);
+      if (entries.length <= bound) return node;
+
+      const kept = entries.slice(0, bound);
+      const keptNames = new Set(kept.map(([name]) => name));
+      const dropped = entries.length - bound;
+      const note = `[${dropped} additional propert${dropped === 1 ? 'y' : 'ies'} omitted: exceeds maxProperties]`;
+
+      const next: JsonSchema = { ...node, properties: Object.fromEntries(kept) };
+      if (Array.isArray(node.required)) {
+        const required = node.required.filter((name) => keptNames.has(String(name)));
+        if (required.length > 0) {
+          next.required = required;
+        } else {
+          delete next.required;
+        }
+      }
+      next.description = node.description ? `${node.description} ${note}` : note;
+      return next;
+    });
+  }
+
+  /**
+   * Cap every description in the schema tree to `maxLength` characters,
+   * truncating with an ellipsis.
+   */
+  static capDescriptions(schema: JsonSchema, maxLength: number): JsonSchema {
+    const bound = Number.isFinite(maxLength) ? Math.max(1, Math.floor(maxLength)) : Number.MAX_SAFE_INTEGER;
+    return this.walkCopy(schema, (node) => {
+      if (typeof node.description === 'string' && node.description.length > bound) {
+        // reserve one character for the ellipsis so the RESULT is <= bound
+        return { ...node, description: `${node.description.slice(0, bound - 1)}…` };
+      }
+      return node;
+    });
+  }
+
+  /**
+   * Remove every `examples` array from the schema tree (a token-budget
+   * trimming step — validation keywords are untouched).
+   */
+  static stripExamples(schema: JsonSchema): JsonSchema {
+    return this.walkCopy(schema, (node) => {
+      if ('examples' in node) {
+        const { examples: _examples, ...rest } = node;
+        return rest as JsonSchema;
+      }
+      return node;
+    });
+  }
+
   /**
    * Simplify schema by removing unnecessary fields
    */
