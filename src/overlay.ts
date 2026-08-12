@@ -286,7 +286,9 @@ function applySegment(matches: Match[], segment: Segment): Match[] {
 /** Structured merge per the Overlay spec: objects deep-merge, everything else replaces. */
 function deepMerge(target: Record<string, unknown>, update: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(update)) {
-    if (UNSAFE_KEYS.has(key)) continue;
+    // Literal comparisons (not the shared Set) so static analysis recognizes
+    // the prototype-pollution sanitizer (CodeQL js/prototype-polluting-function)
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
     const existing = target[key];
     if (
       isContainer(value) &&

@@ -227,6 +227,19 @@ function matchesAnyGlob(path: string, globs: string[]): boolean {
 }
 
 /**
+ * Trim leading/trailing underscores without regex — `/_+$/`-style trailing
+ * repetition is polynomial on adversarial inputs (CodeQL js/polynomial-redos),
+ * and tool names derive from uncontrolled spec data.
+ */
+function trimUnderscores(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && value[start] === '_') start++;
+  while (end > start && value[end - 1] === '_') end--;
+  return value.slice(start, end);
+}
+
+/**
  * 32-bit FNV-1a hash rendered as 8 hex chars. Used for stable, content-derived
  * name suffixes (no Node `crypto` dependency, so V8-isolate runtimes work).
  */
@@ -251,10 +264,7 @@ function normalizeToolName(raw: string, maxLength: number, fallbackSeed: string)
   // Hash the RAW name, not the sanitized one: two raws differing only in
   // invalid characters must not collapse to the same truncation suffix.
   let hashSeed = raw;
-  let name = raw
-    .replace(/[^A-Za-z0-9_.-]/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
+  let name = trimUnderscores(raw.replace(/[^A-Za-z0-9_.-]/g, '_').replace(/_+/g, '_'));
 
   if (name.length === 0) {
     hashSeed = fallbackSeed;
@@ -995,11 +1005,12 @@ export class OpenAPIToolGenerator {
       rawName = operationId;
     } else {
       // Generate from path and method
-      const sanitized = path
-        .replace(/\{([^}]+)\}/g, 'By_$1')
-        .replace(/[^a-zA-Z0-9_]/g, '_')
-        .replace(/_+/g, '_')
-        .replace(/^_|_$/g, '');
+      const sanitized = trimUnderscores(
+        path
+          .replace(/\{([^{}]+)\}/g, 'By_$1')
+          .replace(/[^a-zA-Z0-9_]/g, '_')
+          .replace(/_+/g, '_'),
+      );
 
       rawName = `${method}_${sanitized}`;
     }

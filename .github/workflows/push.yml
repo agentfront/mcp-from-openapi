@@ -28,7 +28,11 @@ jobs:
       matrix:
         node-version: [20.x, 22.x, 24.x]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
+        with:
+          # Build and test steps execute package code; don't leave the
+          # GITHUB_TOKEN readable in .git/config for them.
+          persist-credentials: false
 
       - name: Setup Node + Yarn (Node ${{ matrix.node-version }})
         uses: ./.github/actions/setup-node-yarn
