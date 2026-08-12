@@ -20,6 +20,7 @@ import type {
   ToolMetadata,
   ServerObject,
   PathItemObject,
+  JsonSchema,
 } from './types';
 import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import { isReferenceObject } from './types';
@@ -28,8 +29,10 @@ import { ResponseBuilder } from './response-builder';
 import { SchemaBuilder } from './schema-builder';
 import { extractExtensionOverrides, inferAnnotationsFromMethod, resolveExtensionEnabled } from './annotations';
 import { applyClientTarget } from './client-targets';
+import { applyOverlay } from './overlay';
+import { lintDocument, PAGINATION_PARAM, type LintResult } from './lint';
 import { Validator } from './validator';
-import { GenerationError, LoadError, ParseError } from './errors';
+import { GenerationError, LoadError, OverlayError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
 
@@ -65,6 +68,134 @@ function applySecureDefaults(options: LoadOptions): LoadOptions {
       allowedProtocols: options.refResolution?.allowedProtocols ?? [],
     },
   };
+}
+
+/** Does the schema tree contain an array without maxItems? Cycle-safe. */
+function hasUnboundedArray(node: unknown, seen = new Set<unknown>()): boolean {
+  /* c8 ignore next -- seen-guard is defensive: ResponseBuilder output cannot be circular */
+  if (node === null || typeof node !== 'object' || seen.has(node)) return false;
+  seen.add(node);
+  const record = node as Record<string, unknown>;
+
+  const type = record['type'];
+  const isArray = type === 'array' || (Array.isArray(type) && type.includes('array'));
+  if (isArray && record['maxItems'] === undefined) return true;
+
+  const children: unknown[] = [];
+  const properties = record['properties'];
+  if (properties && typeof properties === 'object') children.push(...Object.values(properties));
+  for (const key of ['items', 'additionalProperties', 'contentSchema']) {
+    const value = record[key];
+    if (Array.isArray(value)) children.push(...value); // tuple-style items
+    else if (value && typeof value === 'object') children.push(value);
+  }
+  for (const key of ['allOf', 'anyOf', 'oneOf', 'prefixItems']) {
+    if (Array.isArray(record[key])) children.push(...(record[key] as unknown[]));
+  }
+  return children.some((child) => hasUnboundedArray(child, seen));
+}
+
+/** Compute response-shaping hints; undefined when there is nothing to say. */
+function detectResponseHints(
+  outputSchema: JsonSchema | undefined,
+  mapper: McpOpenAPITool['mapper'],
+): ToolMetadata['responseHints'] {
+  const paginationParams = [
+    ...new Set(mapper.filter((m) => m.type === 'query' && !m.security && PAGINATION_PARAM.test(m.key)).map((m) => m.key)),
+  ];
+  const unboundedArray = outputSchema !== undefined && hasUnboundedArray(outputSchema);
+
+  if (!unboundedArray && paginationParams.length === 0) return undefined;
+
+  return {
+    ...(unboundedArray && { unboundedArray: true }),
+    ...(paginationParams.length > 0 && { paginationParams }),
+    ...(unboundedArray && paginationParams.length === 0 && { largeResponseRisk: true }),
+  };
+}
+
+/** Assemble the tool description per the configured strategy. */
+function composeDescription(
+  operation: OperationObject,
+  method: string,
+  pathStr: string,
+  strategy: 'summaryOnly' | 'descriptionOnly' | 'combined' | 'full',
+): string {
+  const fallback = `${method.toUpperCase()} ${pathStr}`;
+  const summary = operation.summary?.trim();
+  const description = operation.description?.trim();
+
+  switch (strategy) {
+    case 'descriptionOnly':
+      return description || summary || fallback;
+    case 'combined':
+      if (summary && description && summary !== description) {
+        return `${summary}\n\n${description}`;
+      }
+      return summary || description || fallback;
+    case 'full': {
+      const parts: string[] = [];
+      if (summary) parts.push(summary);
+      if (description && description !== summary) parts.push(description);
+      if (operation.operationId) parts.push(`Operation: ${operation.operationId}`);
+      parts.push(fallback);
+      return parts.join('\n\n');
+    }
+    default:
+      return summary || description || fallback;
+  }
+}
+
+/** Names of an object schema's properties, capped for prose use. */
+function propertyNames(schema: Record<string, unknown>, cap = 8): string {
+  const properties = schema['properties'];
+  /* c8 ignore next -- callers verify properties exist before delegating here */
+  if (!properties || typeof properties !== 'object') return '';
+  const names = Object.keys(properties);
+  const listed = names.slice(0, cap).join(', ');
+  return names.length > cap ? `${listed}, …` : listed;
+}
+
+/**
+ * One-line summary of an output schema for description appending: top-level
+ * shape plus field names, never the full schema.
+ */
+function summarizeOutputSchema(schema: JsonSchema): string | undefined {
+  const record = schema as Record<string, unknown>;
+
+  const variants = record['oneOf'];
+  if (Array.isArray(variants) && variants.length > 0) {
+    const first = variants[0];
+    /* c8 ignore next 2 -- ResponseBuilder variants are always objects; guard for hand-built schemas */
+    const firstSummary =
+      first && typeof first === 'object' ? summarizeOutputSchema(first as JsonSchema) : undefined;
+    return firstSummary ? `${firstSummary} (${variants.length} response variants)` : undefined;
+  }
+
+  const type = record['type'];
+  if (type === 'object' || (type === undefined && record['properties'])) {
+    const names = propertyNames(record);
+    return names ? `object with fields: ${names}` : 'object';
+  }
+  if (type === 'array') {
+    const items = record['items'];
+    if (items && typeof items === 'object' && !Array.isArray(items)) {
+      const itemRecord = items as Record<string, unknown>;
+      if (itemRecord['type'] === 'object' || itemRecord['properties']) {
+        const names = propertyNames(itemRecord);
+        return names ? `array of objects with fields: ${names}` : 'array of objects';
+      }
+      if (typeof itemRecord['type'] === 'string') {
+        return `array of ${itemRecord['type']}`;
+      }
+    }
+    return 'array';
+  }
+  if (typeof type === 'string' && type !== 'null') {
+    return type;
+  }
+  // type 'null' (a no-content response) or no recognizable shape: say nothing
+  return undefined;
 }
 
 /**
@@ -149,7 +280,7 @@ function normalizeToolName(raw: string, maxLength: number, fallbackSeed: string)
 export class OpenAPIToolGenerator {
   private document: OpenAPIDocument;
   private dereferencedDocument?: OpenAPIDocument;
-  private options: Required<LoadOptions>;
+  private options: Required<Omit<LoadOptions, 'overlays'>> & Pick<LoadOptions, 'overlays'>;
 
   /**
    * Private constructor - use static factory methods to create instances
@@ -166,7 +297,19 @@ export class OpenAPIToolGenerator {
       followRedirects: options.followRedirects ?? true,
       refResolution: options.refResolution ?? {},
       secureDefaults: options.secureDefaults ?? false,
+      overlays: options.overlays,
     };
+
+    // Overlays apply EAGERLY (they are synchronous): validate(), lint(),
+    // getDocument(), and generation must all agree on one curated document —
+    // a lazily-applied overlay would make a getter's result depend on which
+    // other method ran first.
+    if (this.options.overlays) {
+      const overlays = Array.isArray(this.options.overlays) ? this.options.overlays : [this.options.overlays];
+      for (const overlay of overlays) {
+        this.document = applyOverlay(this.document, overlay);
+      }
+    }
   }
 
   /**
@@ -204,7 +347,7 @@ export class OpenAPIToolGenerator {
 
       return new OpenAPIToolGenerator(document, options);
     } catch (error: unknown) {
-      if (error instanceof LoadError) {
+      if (error instanceof LoadError || error instanceof OverlayError) {
         throw error;
       }
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -243,6 +386,9 @@ export class OpenAPIToolGenerator {
 
       return new OpenAPIToolGenerator(document, options);
     } catch (error: unknown) {
+      if (error instanceof OverlayError) {
+        throw error;
+      }
       /* c8 ignore next */
       const errorMessage = error instanceof Error ? error.message : String(error);
       throw new LoadError(`Failed to load OpenAPI spec from file: ${errorMessage}`, {
@@ -260,6 +406,9 @@ export class OpenAPIToolGenerator {
       const document = yaml.parse(yamlString);
       return new OpenAPIToolGenerator(document, options);
     } catch (error: unknown) {
+      if (error instanceof OverlayError) {
+        throw error;
+      }
       /* c8 ignore next */
       const errorMessage = error instanceof Error ? error.message : String(error);
       throw new ParseError(`Failed to parse YAML: ${errorMessage}`, {
@@ -290,6 +439,19 @@ export class OpenAPIToolGenerator {
   async validate(): Promise<ValidationResult> {
     const validator = new Validator();
     return validator.validate(this.document);
+  }
+
+  /**
+   * Lint the loaded document for agent-readiness (missing operationIds,
+   * vague descriptions, unpaginated lists, oversized schemas, ...). Runs
+   * after overlays and dereferencing so findings reflect what tools would
+   * actually be generated from.
+   */
+  async lint(): Promise<LintResult> {
+    // Diagnostics must run on the imperfect specs they exist to diagnose:
+    // overlays + dereferencing apply, but validation never gates linting.
+    await this.initialize(false);
+    return lintDocument(this.getDocument());
   }
 
   // NOTE: internal/private-address blocking + IPv4-mapped-IPv6 decoding now live
@@ -453,7 +615,7 @@ export class OpenAPIToolGenerator {
   /**
    * Initialize the generator (dereference if needed, then validate)
    */
-  private async initialize(): Promise<void> {
+  private async initialize(runValidation: boolean = this.options.validate): Promise<void> {
     if (this.options.dereference && !this.dereferencedDocument) {
       const cloned = JSON.parse(JSON.stringify(this.document)) as OpenAPIDocument;
       // Internal-only refs → dereference without `$RefParser` (no Node builtins,
@@ -475,7 +637,7 @@ export class OpenAPIToolGenerator {
       }
     }
 
-    if (this.options.validate) {
+    if (runValidation) {
       const validator = new Validator();
       const documentToValidate = this.dereferencedDocument ?? this.document;
       const result = await validator.validate(documentToValidate);
@@ -621,9 +783,10 @@ export class OpenAPIToolGenerator {
     // place, including as the value passed to a custom toolNameGenerator)
     const name = this.generateToolName(pathStr, method as HTTPMethod, overrides.name ?? operation.operationId, options);
 
-    // Generate description
+    // Generate description (extension override > strategy)
     const description =
-      overrides.description ?? (operation.summary || operation.description || `${method.toUpperCase()} ${pathStr}`);
+      overrides.description ??
+      composeDescription(operation, method, pathStr, options.descriptionStrategy ?? 'summaryOnly');
 
     // Display title (MCP Tool.title): extension override, else operation summary
     const title = overrides.title ?? operation.summary;
@@ -658,6 +821,41 @@ export class OpenAPIToolGenerator {
       resolvedOutputSchema = SchemaBuilder.truncateDepth(resolvedOutputSchema, maxSchemaDepth);
     }
 
+    // Trimming controls (after depth truncation, before client targets so the
+    // dialect transforms see the final trimmed shape). Description caps run
+    // BEFORE limitProperties so the "[N properties omitted]" notes survive.
+    const applyTrim = (schema: JsonSchema, isInputRoot: boolean): JsonSchema => {
+      let trimmed = schema;
+      if (options.stripExamples) trimmed = SchemaBuilder.stripExamples(trimmed);
+      if (options.maxDescriptionLength !== undefined) {
+        trimmed = SchemaBuilder.capDescriptions(trimmed, options.maxDescriptionLength);
+      }
+      if (options.maxProperties !== undefined) {
+        if (isInputRoot) {
+          // ROOT input properties are mapper-backed parameters — dropping one
+          // makes required calls impossible. The cap applies per parameter
+          // subtree; the parameter list itself is never trimmed.
+          const properties = trimmed.properties;
+          if (properties && typeof properties === 'object') {
+            const limited: Record<string, JsonSchema> = {};
+            for (const [key, value] of Object.entries(properties)) {
+              limited[key] = SchemaBuilder.limitProperties(value as JsonSchema, options.maxProperties);
+            }
+            trimmed = { ...trimmed, properties: limited };
+          }
+        } else {
+          trimmed = SchemaBuilder.limitProperties(trimmed, options.maxProperties);
+        }
+      }
+      return trimmed;
+    };
+    if (options.stripExamples || options.maxProperties !== undefined || options.maxDescriptionLength !== undefined) {
+      resolvedInputSchema = applyTrim(resolvedInputSchema, true);
+      if (resolvedOutputSchema) {
+        resolvedOutputSchema = applyTrim(resolvedOutputSchema, false);
+      }
+    }
+
     // Client dialect transforms (final step — the emitted schemas must be
     // exactly what the targeted client accepts)
     if (options.target) {
@@ -667,10 +865,25 @@ export class OpenAPIToolGenerator {
       }
     }
 
+    // Response-shaping hints (computed on the FINAL output schema)
+    const responseHints = detectResponseHints(resolvedOutputSchema, mapper);
+    if (responseHints) {
+      metadata.responseHints = responseHints;
+    }
+
+    // Optional compact response summary appended to the description
+    let finalDescription = description;
+    if (options.appendResponseSummary && resolvedOutputSchema) {
+      const summary = summarizeOutputSchema(resolvedOutputSchema);
+      if (summary) {
+        finalDescription = `${finalDescription}\n\nReturns: ${summary}`;
+      }
+    }
+
     return {
       name,
       ...(title !== undefined && { title }),
-      description,
+      description: finalDescription,
       ...(annotations && { annotations }),
       inputSchema: resolvedInputSchema,
       outputSchema: resolvedOutputSchema,

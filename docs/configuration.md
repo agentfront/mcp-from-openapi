@@ -23,16 +23,17 @@ const generator = await OpenAPIToolGenerator.fromURL(url, {
 });
 ```
 
-| Option            | Type                     | Default | Description                                                                                                                                                                                         |
-| ----------------- | ------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dereference`     | `boolean`                | `true`  | Resolve all `$ref` pointers in the spec                                                                                                                                                             |
-| `baseUrl`         | `string`                 | `''`    | Override server URLs from the spec                                                                                                                                                                  |
-| `headers`         | `Record<string, string>` | `{}`    | Custom HTTP headers for URL loading                                                                                                                                                                 |
-| `timeout`         | `number`                 | `30000` | HTTP request timeout in milliseconds                                                                                                                                                                |
-| `validate`        | `boolean`                | `true`  | Validate the OpenAPI document on load                                                                                                                                                               |
-| `followRedirects` | `boolean`                | `true`  | Follow HTTP redirects when loading from URL                                                                                                                                                         |
-| `refResolution`   | `RefResolutionOptions`   | `{}`    | Security settings for `$ref` resolution                                                                                                                                                             |
-| `secureDefaults`  | `boolean`                | `false` | One-flag strict posture for untrusted specs: redirects off, external `$ref` resolution disabled. Explicit values win **per key** — tightening one `refResolution` knob keeps the rest of the preset |
+| Option            | Type                                   | Default | Description                                                                                                                                                                                         |
+| ----------------- | -------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dereference`     | `boolean`                              | `true`  | Resolve all `$ref` pointers in the spec                                                                                                                                                             |
+| `baseUrl`         | `string`                               | `''`    | Override server URLs from the spec                                                                                                                                                                  |
+| `headers`         | `Record<string, string>`               | `{}`    | Custom HTTP headers for URL loading                                                                                                                                                                 |
+| `timeout`         | `number`                               | `30000` | HTTP request timeout in milliseconds                                                                                                                                                                |
+| `validate`        | `boolean`                              | `true`  | Validate the OpenAPI document on load                                                                                                                                                               |
+| `followRedirects` | `boolean`                              | `true`  | Follow HTTP redirects when loading from URL                                                                                                                                                         |
+| `refResolution`   | `RefResolutionOptions`                 | `{}`    | Security settings for `$ref` resolution                                                                                                                                                             |
+| `secureDefaults`  | `boolean`                              | `false` | One-flag strict posture for untrusted specs: redirects off, external `$ref` resolution disabled. Explicit values win **per key** — tightening one `refResolution` knob keeps the rest of the preset |
+| `overlays`        | `OverlayDocument \| OverlayDocument[]` | -       | OpenAPI Overlay 1.0 docs applied before dereferencing/validation — see [Curation](./curation.md)                                                                                                    |
 
 ### RefResolutionOptions
 
@@ -64,25 +65,30 @@ const tools = await generator.generateTools({
 });
 ```
 
-| Option                              | Type                                           | Default                          | Description                                                                      |
-| ----------------------------------- | ---------------------------------------------- | -------------------------------- | -------------------------------------------------------------------------------- |
-| `includeOperations`                 | `string[]`                                     | -                                | Only include these operation IDs                                                 |
-| `excludeOperations`                 | `string[]`                                     | -                                | Exclude these operation IDs                                                      |
-| `filterFn`                          | `(op: OperationWithContext) => boolean`        | -                                | Custom filter function                                                           |
-| `namingStrategy`                    | `NamingStrategy`                               | -                                | Custom naming for conflicts and tool names                                       |
-| `preferredStatusCodes`              | `number[]`                                     | `[200, 201, 204, 202, 203, 206]` | Preferred response codes (in order)                                              |
-| `includeDeprecated`                 | `boolean`                                      | `false`                          | Include deprecated operations                                                    |
-| `includeAllResponses`               | `boolean`                                      | `true`                           | Include all status codes as oneOf union                                          |
-| `maxSchemaDepth`                    | `number`                                       | `10`                             | Maximum schema nesting depth; deeper structures are truncated with a note        |
-| `includeExamples`                   | `boolean`                                      | `false`                          | Include parameter/media-type example values in schemas                           |
-| `includeSecurityInInput`            | `boolean \| string[]`                          | `false`                          | Add security params to inputSchema; an array selects specific schemes            |
-| `inferAnnotations`                  | `boolean`                                      | `true`                           | Infer MCP tool annotations from HTTP method semantics                            |
-| `maxToolNameLength`                 | `number`                                       | `64`                             | Tool name length cap (clamped to MCP's 128 max); longer names get a hash suffix  |
-| `includeTags` / `excludeTags`       | `string[]`                                     | -                                | Filter operations by OpenAPI tags                                                |
-| `includeMethods` / `excludeMethods` | `HTTPMethod[]`                                 | -                                | Filter operations by HTTP method                                                 |
-| `includePaths` / `excludePaths`     | `string[]`                                     | -                                | Filter by path globs (`*` per segment, `**` across, `?` one char)                |
-| `readOnlyOnly`                      | `boolean`                                      | `false`                          | Safety switch: only operations whose effective annotations are read-only         |
-| `target`                            | `'claude' \| 'openai' \| 'gemini' \| 'strict'` | -                                | Per-client schema dialect transforms — see [Client Targets](./client-targets.md) |
+| Option                              | Type                                                         | Default                          | Description                                                                                |
+| ----------------------------------- | ------------------------------------------------------------ | -------------------------------- | ------------------------------------------------------------------------------------------ |
+| `includeOperations`                 | `string[]`                                                   | -                                | Only include these operation IDs                                                           |
+| `excludeOperations`                 | `string[]`                                                   | -                                | Exclude these operation IDs                                                                |
+| `filterFn`                          | `(op: OperationWithContext) => boolean`                      | -                                | Custom filter function                                                                     |
+| `namingStrategy`                    | `NamingStrategy`                                             | -                                | Custom naming for conflicts and tool names                                                 |
+| `preferredStatusCodes`              | `number[]`                                                   | `[200, 201, 204, 202, 203, 206]` | Preferred response codes (in order)                                                        |
+| `includeDeprecated`                 | `boolean`                                                    | `false`                          | Include deprecated operations                                                              |
+| `includeAllResponses`               | `boolean`                                                    | `true`                           | Include all status codes as oneOf union                                                    |
+| `maxSchemaDepth`                    | `number`                                                     | `10`                             | Maximum schema nesting depth; deeper structures are truncated with a note                  |
+| `includeExamples`                   | `boolean`                                                    | `false`                          | Include parameter/media-type example values in schemas                                     |
+| `includeSecurityInInput`            | `boolean \| string[]`                                        | `false`                          | Add security params to inputSchema; an array selects specific schemes                      |
+| `inferAnnotations`                  | `boolean`                                                    | `true`                           | Infer MCP tool annotations from HTTP method semantics                                      |
+| `maxToolNameLength`                 | `number`                                                     | `64`                             | Tool name length cap (clamped to MCP's 128 max); longer names get a hash suffix            |
+| `includeTags` / `excludeTags`       | `string[]`                                                   | -                                | Filter operations by OpenAPI tags                                                          |
+| `includeMethods` / `excludeMethods` | `HTTPMethod[]`                                               | -                                | Filter operations by HTTP method                                                           |
+| `includePaths` / `excludePaths`     | `string[]`                                                   | -                                | Filter by path globs (`*` per segment, `**` across, `?` one char)                          |
+| `readOnlyOnly`                      | `boolean`                                                    | `false`                          | Safety switch: only operations whose effective annotations are read-only                   |
+| `target`                            | `'claude' \| 'openai' \| 'gemini' \| 'strict'`               | -                                | Per-client schema dialect transforms — see [Client Targets](./client-targets.md)           |
+| `descriptionStrategy`               | `'summaryOnly' \| 'descriptionOnly' \| 'combined' \| 'full'` | `'summaryOnly'`                  | How descriptions are assembled from summary/description/operationId                        |
+| `appendResponseSummary`             | `boolean`                                                    | `false`                          | Append a compact `Returns: ...` line from the output schema                                |
+| `maxProperties`                     | `number`                                                     | -                                | Cap object nodes to their first N properties (drop noted); root input params never dropped |
+| `maxDescriptionLength`              | `number`                                                     | -                                | Ellipsis-truncate every schema description at N chars                                      |
+| `stripExamples`                     | `boolean`                                                    | `false`                          | Remove all `examples` arrays from generated schemas                                        |
 
 ### Filtering Operations
 

@@ -52,6 +52,8 @@ Now you know exactly how to build the HTTP request.
 
 - **Built-in Request Builder** -- `buildHttpRequest()` applies the full OpenAPI serialization table (form/deepObject/pipeDelimited queries, label/matrix paths, multipart, binary, `wholeBody`) so you never hand-write request assembly
 - **Client Compatibility Targets** -- `target: 'claude' | 'openai' | 'gemini' | 'strict'` emits schemas each client actually accepts (inlined refs, closed objects, collapsed unions, demoted formats)
+- **Context-Budget Reports** -- `analyzeToolSet()` estimates the token bill per tool and warns at the thresholds where agent accuracy degrades
+- **Overlays & Lint** -- apply [OpenAPI Overlay](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/curation.md) curation files at load time; `lint()` flags the spec gaps that hurt tool-calling accuracy
 - **Curation-Grade Filtering** -- Filter by tag, method, path glob (`/admin/**`), operationId, a `readOnlyOnly` safety switch, and `x-mcp` extension flags with root < path < operation precedence
 - **Smart Parameter Handling** -- Automatic conflict detection and resolution across path, query, header, cookie, and body; `allOf` bodies flatten, union and binary bodies map cleanly (`wholeBody`, `binary` markers)
 - **Complete Schemas** -- Input schema combines all parameters; output schema from responses (with oneOf unions); clean JSON Schema 2020-12 output (`nullable` unions, normalized `examples`)
@@ -146,6 +148,7 @@ for (const tool of await generator.generateTools({ target: "claude" })) {
 | [Parameter Conflicts](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/parameter-conflicts.md) | How conflict detection and resolution works                       |
 | [Request Builder](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/request-builder.md)         | `buildHttpRequest` — full OpenAPI parameter serialization         |
 | [Client Targets](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/client-targets.md)           | Per-client schema dialects (Claude, OpenAI, Gemini)               |
+| [Curation](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/curation.md)                       | Token budgets, overlays, lint, trimming, response hints           |
 | [Response Schemas](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/response-schemas.md)       | Output schemas, status codes, oneOf unions                        |
 | [Annotations & Extensions](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/annotations.md)    | Tool title, annotation inference, `x-mcp` extension family        |
 | [Security](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/security.md)                       | SecurityResolver, all auth types, custom resolvers                |
