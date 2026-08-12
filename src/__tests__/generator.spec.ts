@@ -4226,3 +4226,109 @@ describe('Description strategies and response summaries', () => {
     expect(tool.description).toContain('Returns: array');
   });
 });
+
+describe('Response-shaping metadata hints', () => {
+  const hintSpec = (params: any[], schema: any): any => ({
+    openapi: '3.0.0',
+    info: { title: 'Hints API', version: '1.0.0' },
+    paths: {
+      '/items': {
+        get: {
+          operationId: 'listItems',
+          parameters: params,
+          responses: {
+            '200': { description: 'OK', content: { 'application/json': { schema } } },
+          },
+        },
+      },
+    },
+  });
+
+  const hintsFor = async (params: any[], schema: any) => {
+    const generator = await OpenAPIToolGenerator.fromJSON(hintSpec(params, schema));
+    return (await generator.generateTool('/items', 'get')).metadata.responseHints;
+  };
+
+  it('flags unbounded arrays with no pagination as large-response risks', async () => {
+    const hints = await hintsFor([], { type: 'array', items: { type: 'string' } });
+
+    expect(hints).toEqual({ unboundedArray: true, largeResponseRisk: true });
+  });
+
+  it('lists pagination params and clears the risk flag', async () => {
+    const hints = await hintsFor(
+      [
+        { name: 'limit', in: 'query', schema: { type: 'integer' } },
+        { name: 'cursor', in: 'query', schema: { type: 'string' } },
+        { name: 'q', in: 'query', schema: { type: 'string' } },
+      ],
+      { type: 'array', items: { type: 'string' } },
+    );
+
+    expect(hints).toEqual({ unboundedArray: true, paginationParams: ['limit', 'cursor'] });
+  });
+
+  it('respects maxItems bounds and nested arrays', async () => {
+    const bounded = await hintsFor([], { type: 'array', items: { type: 'string' }, maxItems: 100 });
+    expect(bounded).toBeUndefined();
+
+    const nested = await hintsFor([], {
+      type: 'object',
+      properties: { results: { type: 'array', items: { type: 'string' } } },
+    });
+    expect(nested).toEqual({ unboundedArray: true, largeResponseRisk: true });
+  });
+
+  it('reports pagination params even for bounded responses', async () => {
+    const hints = await hintsFor(
+      [{ name: 'page', in: 'query', schema: { type: 'integer' } }],
+      { type: 'object', properties: { total: { type: 'integer' } } },
+    );
+
+    expect(hints).toEqual({ paginationParams: ['page'] });
+  });
+
+  it('detects nullable type-array lists and ignores non-array type unions', async () => {
+    expect(await hintsFor([], { type: ['array', 'null'], items: { type: 'string' } })).toEqual({
+      unboundedArray: true,
+      largeResponseRisk: true,
+    });
+    expect(await hintsFor([], { type: ['string', 'null'] })).toBeUndefined();
+  });
+
+  it('omits hints entirely when there is nothing to say', async () => {
+    const hints = await hintsFor([], { type: 'object', properties: { id: { type: 'string' } } });
+
+    expect(hints).toBeUndefined();
+  });
+
+  it('ignores pagination-named path params and security query params', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Hints API', version: '1.0.0' },
+      security: [{ LimitKey: [] }],
+      components: {
+        securitySchemes: { LimitKey: { type: 'apiKey', name: 'limit', in: 'query' } },
+      },
+      paths: {
+        '/deep/{limit}': {
+          get: {
+            operationId: 'getDeep',
+            parameters: [{ name: 'limit', in: 'path', required: true, schema: { type: 'string' } }],
+            responses: {
+              '200': {
+                description: 'OK',
+                content: { 'application/json': { schema: { type: 'array', items: { type: 'string' } } } },
+              },
+            },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/deep/{limit}', 'get');
+
+    // the path param and the security query param named 'limit' don't count as pagination
+    expect(tool.metadata.responseHints).toEqual({ unboundedArray: true, largeResponseRisk: true });
+  });
+});

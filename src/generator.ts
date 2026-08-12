@@ -30,7 +30,7 @@ import { SchemaBuilder } from './schema-builder';
 import { extractExtensionOverrides, inferAnnotationsFromMethod, resolveExtensionEnabled } from './annotations';
 import { applyClientTarget } from './client-targets';
 import { applyOverlay } from './overlay';
-import { lintDocument, type LintResult } from './lint';
+import { lintDocument, PAGINATION_PARAM, type LintResult } from './lint';
 import { Validator } from './validator';
 import { GenerationError, LoadError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
@@ -67,6 +67,48 @@ function applySecureDefaults(options: LoadOptions): LoadOptions {
       ...options.refResolution,
       allowedProtocols: options.refResolution?.allowedProtocols ?? [],
     },
+  };
+}
+
+/** Does the schema tree contain an array without maxItems? Cycle-safe. */
+function hasUnboundedArray(node: unknown, seen = new Set<unknown>()): boolean {
+  /* c8 ignore next -- seen-guard is defensive: ResponseBuilder output cannot be circular */
+  if (node === null || typeof node !== 'object' || seen.has(node)) return false;
+  seen.add(node);
+  const record = node as Record<string, unknown>;
+
+  const type = record['type'];
+  const isArray = type === 'array' || (Array.isArray(type) && type.includes('array'));
+  if (isArray && record['maxItems'] === undefined) return true;
+
+  const children: unknown[] = [];
+  const properties = record['properties'];
+  if (properties && typeof properties === 'object') children.push(...Object.values(properties));
+  for (const key of ['items', 'additionalProperties', 'contentSchema']) {
+    if (record[key] && typeof record[key] === 'object') children.push(record[key]);
+  }
+  for (const key of ['allOf', 'anyOf', 'oneOf', 'prefixItems']) {
+    if (Array.isArray(record[key])) children.push(...(record[key] as unknown[]));
+  }
+  return children.some((child) => hasUnboundedArray(child, seen));
+}
+
+/** Compute response-shaping hints; undefined when there is nothing to say. */
+function detectResponseHints(
+  outputSchema: JsonSchema | undefined,
+  mapper: McpOpenAPITool['mapper'],
+): ToolMetadata['responseHints'] {
+  const paginationParams = [
+    ...new Set(mapper.filter((m) => m.type === 'query' && !m.security && PAGINATION_PARAM.test(m.key)).map((m) => m.key)),
+  ];
+  const unboundedArray = outputSchema !== undefined && hasUnboundedArray(outputSchema);
+
+  if (!unboundedArray && paginationParams.length === 0) return undefined;
+
+  return {
+    ...(unboundedArray && { unboundedArray: true }),
+    ...(paginationParams.length > 0 && { paginationParams }),
+    ...(unboundedArray && paginationParams.length === 0 && { largeResponseRisk: true }),
   };
 }
 
@@ -794,6 +836,12 @@ export class OpenAPIToolGenerator {
       if (resolvedOutputSchema) {
         resolvedOutputSchema = applyClientTarget(resolvedOutputSchema, options.target);
       }
+    }
+
+    // Response-shaping hints (computed on the FINAL output schema)
+    const responseHints = detectResponseHints(resolvedOutputSchema, mapper);
+    if (responseHints) {
+      metadata.responseHints = responseHints;
     }
 
     // Optional compact response summary appended to the description

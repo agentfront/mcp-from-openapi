@@ -64,6 +64,7 @@ export type {
   ToolAnnotations,
   ParameterMapper,
   ToolMetadata,
+  ResponseHints,
   FrontMcpExtensionData,
   SerializationInfo,
   SecurityRequirement,

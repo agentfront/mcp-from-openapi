@@ -517,6 +517,28 @@ export interface ToolMetadata {
    * Contains annotations, cache config, codecall config, tags, etc.
    */
   frontmcp?: FrontMcpExtensionData;
+
+  /**
+   * Response-shaping signals for consumers that paginate, truncate, or cache:
+   * present only when there is something to know.
+   */
+  responseHints?: ResponseHints;
+}
+
+/**
+ * Detected response-shaping signals. Clients cap tool results hard (Claude
+ * Code: 25K tokens) — these hints tell a consumer WHICH tools need paging or
+ * truncation before the first oversized response happens.
+ */
+export interface ResponseHints {
+  /** The success response contains an array without `maxItems` */
+  unboundedArray?: boolean;
+
+  /** Query parameters that look like pagination controls (limit, cursor, ...) */
+  paginationParams?: string[];
+
+  /** Unbounded array AND no pagination controls: truncate or shape server-side */
+  largeResponseRisk?: boolean;
 }
 
 /**

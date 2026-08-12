@@ -24,7 +24,8 @@ export interface LintResult {
 
 const METHODS: HTTPMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
 
-const PAGINATION_PARAM = /^(page|limit|offset|cursor|per_page|pagesize|page_size|after|before)$/i;
+/** Query-parameter names that read as pagination controls (shared with response hints) */
+export const PAGINATION_PARAM = /^(page|limit|offset|cursor|per_page|pagesize|page_size|after|before)$/i;
 
 /** Nesting depth beyond which schemas measurably hurt agent accuracy */
 const DEEP_SCHEMA_THRESHOLD = 8;
