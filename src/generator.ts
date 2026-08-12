@@ -728,7 +728,9 @@ export class OpenAPIToolGenerator {
             if (tool.metadata.typescript) {
               tool.metadata = {
                 ...tool.metadata,
-                typescript: emitToolTypeScript(deduped, tool.description, tool.inputSchema, tool.outputSchema),
+                typescript: emitToolTypeScript(deduped, tool.description, tool.inputSchema, tool.outputSchema, {
+                  maxDepth: Math.max(1, options.maxSchemaDepth ?? 10),
+                }),
               };
             }
           }
@@ -907,7 +909,11 @@ export class OpenAPIToolGenerator {
 
     // TypeScript call contract (computed on the FINAL schemas)
     if (options.emitTypeSignatures) {
-      metadata.typescript = emitToolTypeScript(name, finalDescription, resolvedInputSchema, resolvedOutputSchema);
+      metadata.typescript = emitToolTypeScript(name, finalDescription, resolvedInputSchema, resolvedOutputSchema, {
+        // Print at least as deep as the schemas were truncated, so the
+        // emitted types never collapse levels the schema still carries.
+        maxDepth: Math.max(1, options.maxSchemaDepth ?? 10),
+      });
     }
 
     return {

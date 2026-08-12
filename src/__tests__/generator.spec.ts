@@ -4554,3 +4554,29 @@ describe('TypeScript signature emission (emitTypeSignatures)', () => {
     expect(tools[1].metadata.typescript?.declaration).not.toContain('DupOpInput =');
   });
 });
+
+describe('Type-signature depth follows maxSchemaDepth', () => {
+  it('prints levels beyond the old printer default when the schema carries them', async () => {
+    // Build a 9-level-deep response schema: l1.l2....l9: string
+    let leaf: any = { type: 'string' };
+    for (let i = 9; i >= 1; i--) {
+      leaf = { type: 'object', properties: { [`l${i}`]: leaf } };
+    }
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Deep API', version: '1.0.0' },
+      paths: {
+        '/deep': {
+          get: {
+            operationId: 'getDeep',
+            responses: { '200': { description: 'OK', content: { 'application/json': { schema: leaf } } } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tool = await generator.generateTool('/deep', 'get', { emitTypeSignatures: true });
+    // depth 10 default: all 9 object levels print; the leaf string survives
+    expect(tool.metadata.typescript?.signature).toContain('l9?: string');
+  });
+});

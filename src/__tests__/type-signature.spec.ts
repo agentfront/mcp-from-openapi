@@ -305,6 +305,76 @@ describe('emitToolTypeScript assembly', () => {
     expect(declaration).toContain('type TOutput = string | number;');
   });
 
+  it('declares union and intersection roots as type aliases, never interfaces', () => {
+    const union = emitToolTypeScript('t', undefined, { type: 'object', properties: {} } as JsonSchema, {
+      oneOf: [
+        { type: 'object', properties: { bark: { type: 'boolean' } } },
+        { type: 'object', properties: { meow: { type: 'boolean' } } },
+      ],
+      'x-status-code': 200,
+    } as JsonSchema);
+    expect(union.declaration).toContain('type TOutput = {\n  bark?: boolean;\n} | {\n  meow?: boolean;\n};');
+    expect(union.declaration).not.toContain('interface TOutput');
+
+    const intersection = emitToolTypeScript('t', undefined, { type: 'object', properties: {} } as JsonSchema, {
+      allOf: [
+        { type: 'object', properties: { a: { type: 'string' } } },
+        { type: 'object', properties: { b: { type: 'number' } } },
+      ],
+    } as JsonSchema);
+    expect(intersection.declaration).toContain('type TOutput = {\n  a?: string;\n} & {\n  b?: number;\n};');
+  });
+
+  it('escapes comment-breaking content types and statuses in variant comments', () => {
+    const { declaration } = emitToolTypeScript('t', undefined, { type: 'object', properties: {} } as JsonSchema, {
+      oneOf: [
+        { type: 'string', 'x-status-code': 200, 'x-content-type': '*/*' },
+        { type: 'number', 'x-status-code': 500 },
+      ],
+    } as JsonSchema);
+    expect(declaration).toContain('/** status 200 (*\\/*) */ string');
+    expect(declaration).not.toContain('(*/*)');
+  });
+
+  it('suffixes reserved words used as function names', () => {
+    const { declaration } = emitToolTypeScript(
+      'delete',
+      undefined,
+      { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } as JsonSchema,
+      undefined,
+    );
+    expect(declaration).toContain('declare function delete_(input: DeleteInput): Promise<DeleteOutput>;');
+  });
+
+  it('degrades non-finite numeric literals to number and skips their defaults', () => {
+    expect(outputType({ enum: [Infinity, 1] })).toBe('number | 1');
+    expect(outputType({ const: Number.NaN })).toBe('number');
+    const { declaration } = emitToolTypeScript('t', undefined, {
+      type: 'object',
+      properties: { x: { type: 'number', default: Infinity } },
+    } as JsonSchema, undefined);
+    expect(declaration).not.toContain('@default');
+  });
+
+  it('survives crafted self-referential type arrays', () => {
+    const type: any[] = ['object'];
+    type.push(type);
+    expect(outputType({ type, properties: { a: { type: 'string' } } })).toBe('{ a?: string }');
+  });
+
+  it('keeps input for property-less roots that still carry data', () => {
+    expect(sig({ type: 'object', additionalProperties: { type: 'string' } })).toBe(
+      '(input: Record<string, string>) => Promise<unknown>',
+    );
+    expect(sig({ type: 'string' })).toBe('(input: string) => Promise<unknown>');
+    expect(sig(true)).toBe('(input?: unknown) => Promise<unknown>');
+    const { declaration } = emitToolTypeScript('t', undefined, {
+      type: 'object',
+      additionalProperties: { type: 'string' },
+    } as JsonSchema, undefined);
+    expect(declaration).toContain('declare function t(input: TInput): Promise<TOutput>;');
+  });
+
   it('is deterministic across calls', () => {
     const input = { type: 'object', properties: { a: { type: 'string' } } } as JsonSchema;
     const output = { oneOf: [{ type: 'string' }, { type: 'number' }] } as JsonSchema;

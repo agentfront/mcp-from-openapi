@@ -49,7 +49,7 @@ const { signature, declaration } = emitToolTypeScript(
   'Fetch a user.',        // optional description → leading JSDoc
   tool.inputSchema,
   tool.outputSchema,
-  { maxDepth: 8 },        // optional; default 8
+  { maxDepth: 8 },        // optional; default 8 (generation passes maxSchemaDepth here)
 );
 
 toPascalIdentifier('3d.scan'); // "T3dScan"
@@ -72,7 +72,7 @@ toPascalIdentifier('3d.scan'); // "T3dScan"
 | typed `additionalProperties` / `patternProperties` | `Record<string, T>` (intersected when properties also exist) |
 | boolean schemas | `true` → `unknown`, `false` → `never` |
 | `$ref` leftovers | `unknown` (declarations are always self-contained) |
-| cycles / nesting beyond `maxDepth` (printer default 8; generated schemas are already depth-truncated at 10) | `unknown` |
+| cycles / nesting beyond `maxDepth` | `unknown` (during generation the printer depth follows `maxSchemaDepth`, so it never collapses levels the schema still carries; standalone default 8) |
 
 All `x-` annotation keywords (`x-parameter-location`, `x-status-code`, `x-mcp-header`, …) are ignored for typing.
 

@@ -91,11 +91,23 @@ function literalOf(value: unknown): string {
     return 'null';
   }
   const t = typeof value;
-  if (t === 'string' || t === 'number' || t === 'boolean') {
+  if (t === 'number') {
+    // JSON.stringify(Infinity/NaN) is 'null' — degrade to `number` instead
+    return Number.isFinite(value) ? JSON.stringify(value) : 'number';
+  }
+  if (t === 'string' || t === 'boolean') {
     return JSON.stringify(value);
   }
   return 'unknown';
 }
+
+/** Words that cannot name a `declare function` in a strict-mode module. */
+const RESERVED_WORDS = new Set([
+  'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'enum',
+  'export', 'extends', 'false', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'new', 'null',
+  'return', 'super', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'var', 'void', 'while', 'with',
+  'implements', 'interface', 'let', 'package', 'private', 'protected', 'public', 'static', 'yield', 'await',
+]);
 
 function escapeJsdoc(text: string): string {
   return text.replace(/\*\//g, '*\\/');
@@ -116,7 +128,7 @@ function jsdocLines(prop: unknown): string[] {
   if (typeof format === 'string' && format !== '') {
     lines.push(`@format ${escapeJsdoc(format)}`);
   }
-  if ('default' in prop) {
+  if ('default' in prop && !(typeof prop['default'] === 'number' && !Number.isFinite(prop['default']))) {
     const rendered = JSON.stringify(prop['default']);
     if (rendered !== undefined) {
       lines.push(`@default ${escapeJsdoc(rendered)}`);
@@ -215,7 +227,9 @@ function typeExprInner(r: SchemaRecord, ctx: PrintContext, depth: number, indent
 
   const type = r['type'];
   if (Array.isArray(type)) {
-    const parts = type.map((t) => typeExpr({ ...r, type: t }, ctx, depth, indent));
+    // String members only — the spread creates a fresh object per member, so a
+    // crafted self-referential array element would bypass the identity guard
+    const parts = type.filter((t): t is string => typeof t === 'string').map((t) => typeExpr({ ...r, type: t }, ctx, depth, indent));
     return parts.length === 0 ? 'unknown' : dedupe(parts).join(' | ');
   }
   switch (type) {
@@ -305,15 +319,60 @@ function objectExpr(r: SchemaRecord, ctx: PrintContext, depth: number, indent: s
   return `${body}${suffix}`;
 }
 
+/**
+ * True when the schema renders as a lone `{ ... }` object body with no
+ * union/intersection suffix — the only shape valid as an `interface` body.
+ * Mirrors the printer's branch order.
+ */
+function isPlainObjectBody(schema: unknown): boolean {
+  if (!isSchemaRecord(schema) || schema['$ref'] !== undefined) {
+    return false;
+  }
+  if (('const' in schema && literalOf(schema['const']) !== 'unknown') || Array.isArray(schema['enum'])) {
+    return false;
+  }
+  if (Array.isArray(schema['allOf']) || Array.isArray(schema['oneOf']) || Array.isArray(schema['anyOf'])) {
+    return false;
+  }
+  if (Array.isArray(schema['type']) || !hasObjectShape(schema)) {
+    return false;
+  }
+  const properties = isSchemaRecord(schema['properties']) ? (schema['properties'] as SchemaRecord) : {};
+  if (Object.keys(properties).length === 0) {
+    return false; // renders as Record<...>
+  }
+  const ap = schema['additionalProperties'];
+  if (ap === true || isSchemaRecord(ap) || isSchemaRecord(schema['patternProperties'])) {
+    return false; // renders with a `& Record<...>` suffix
+  }
+  return true;
+}
+
+/** Emit a named root type: `interface` for plain object bodies, alias otherwise. */
+function namedRoot(name: string, schema: unknown, ctx: PrintContext): string {
+  const expr = typeExpr(schema, ctx, 0, '');
+  return isPlainObjectBody(schema) ? `interface ${name} ${expr}` : `type ${name} = ${expr};`;
+}
+
 /** Render the parameter list for the signature / declare-function forms. */
-function paramList(inputSchema: JsonSchema, typeText: string): string {
-  const r = isSchemaRecord(inputSchema) ? inputSchema : undefined;
-  const properties = r && isSchemaRecord(r['properties']) ? (r['properties'] as SchemaRecord) : {};
-  const keys = Object.keys(properties);
-  if (keys.length === 0) {
+function paramList(inputSchema: unknown, typeText: string): string {
+  if (inputSchema === true) {
+    return `(input?: ${typeText})`;
+  }
+  if (!isSchemaRecord(inputSchema)) {
     return '()';
   }
-  const required = new Set(Array.isArray(r?.['required']) ? (r?.['required'] as unknown[]) : []);
+  const properties = isSchemaRecord(inputSchema['properties']) ? (inputSchema['properties'] as SchemaRecord) : {};
+  const keys = Object.keys(properties);
+  if (keys.length === 0) {
+    const ap = inputSchema['additionalProperties'];
+    const hasExtra = ap === true || isSchemaRecord(ap) || isSchemaRecord(inputSchema['patternProperties']);
+    const objectish = inputSchema['type'] === 'object' || inputSchema['type'] === undefined;
+    // A closed, empty object root truly takes no input; anything else
+    // (typed additionalProperties, non-object roots) still carries data.
+    return objectish && !hasExtra ? '()' : `(input: ${typeText})`;
+  }
+  const required = new Set(Array.isArray(inputSchema['required']) ? (inputSchema['required'] as unknown[]) : []);
   const allOptional = keys.every((k) => !required.has(k));
   return allOptional ? `(input?: ${typeText})` : `(input: ${typeText})`;
 }
@@ -326,8 +385,9 @@ function outputVariantsDeclaration(name: string, variants: unknown[], ctx: Print
       const status = member['x-status-code'];
       if (typeof status === 'number' || typeof status === 'string') {
         const contentType = member['x-content-type'];
-        const ct = typeof contentType === 'string' ? ` (${contentType})` : '';
-        comment = `/** status ${status}${ct} */ `;
+        // Content types like `*/*` would terminate the comment unescaped
+        const ct = typeof contentType === 'string' ? ` (${escapeJsdoc(contentType)})` : '';
+        comment = `/** status ${escapeJsdoc(String(status))}${ct} */ `;
       }
     }
     return `  | ${comment}${typeExpr(member, ctx, 1, '  ')}`;
@@ -366,12 +426,7 @@ export function emitToolTypeScript(
     blocks.push(renderJsdoc(escapeJsdoc(description).split('\n'), '').trimEnd());
   }
 
-  const inputPretty = typeExpr(inputSchema, pretty, 0, '');
-  blocks.push(
-    inputPretty.startsWith('{') && inputPretty.endsWith('}')
-      ? `interface ${inputName} ${inputPretty}`
-      : `type ${inputName} = ${inputPretty};`,
-  );
+  blocks.push(namedRoot(inputName, inputSchema, pretty));
 
   const outputUnion =
     isSchemaRecord(outputSchema) && Array.isArray(outputSchema['oneOf'])
@@ -382,15 +437,14 @@ export function emitToolTypeScript(
   } else if (outputUnion && outputUnion.some((m) => isSchemaRecord(m) && m['x-status-code'] !== undefined)) {
     blocks.push(outputVariantsDeclaration(outputName, outputUnion, pretty));
   } else {
-    const outputPretty = typeExpr(outputSchema, pretty, 0, '');
-    blocks.push(
-      outputPretty.startsWith('{') && outputPretty.endsWith('}')
-        ? `interface ${outputName} ${outputPretty}`
-        : `type ${outputName} = ${outputPretty};`,
-    );
+    blocks.push(namedRoot(outputName, outputSchema, pretty));
   }
 
-  blocks.push(`declare function ${lowerFirst(base)}${paramList(inputSchema, inputName)}: Promise<${outputName}>;`);
+  let fnName = lowerFirst(base);
+  if (RESERVED_WORDS.has(fnName)) {
+    fnName = `${fnName}_`;
+  }
+  blocks.push(`declare function ${fnName}${paramList(inputSchema, inputName)}: Promise<${outputName}>;`);
 
   return { signature, declaration: blocks.join('\n\n') };
 }
