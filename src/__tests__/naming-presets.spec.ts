@@ -31,8 +31,13 @@ describe('dottedNaming', () => {
 
   it('sanitizes tags and operationIds into identifiers', () => {
     expect(nameFor('/x', 'get', 'get-user.by id', { tags: ['User Management'] })).toBe('User_Management.get_user_by_id');
-    expect(nameFor('/x', 'get', undefined, { tags: ['3rd-party'] })).toBe('_3rd_party.get_x');
     expect(nameFor('/x', 'get', 'weird!!')).toBe('x.weird');
+  });
+
+  it('letter-guards digit-leading namespaces so normalization cannot strip the guard', () => {
+    expect(nameFor('/x', 'get', undefined, { tags: ['3rd-party'] })).toBe('n3rd_party.get_x');
+    expect(nameFor('/x', 'get', 'op', { tags: ['42'] })).toBe('n42.op');
+    expect(nameFor('/2fa/enable', 'post', undefined)).toBe('n2fa.post__2fa_enable');
   });
 
   it('falls back to the first path segment, then to api', () => {
@@ -51,7 +56,11 @@ describe('dottedNaming', () => {
   it('suffixes reserved namespaces with an underscore', () => {
     expect(nameFor('/x', 'get', 'log', { tags: ['console'] })).toBe('console_.log');
     expect(nameFor('/x', 'get', 'op', { tags: ['mine'] }, { reservedNamespaces: ['mine'] })).toBe('mine_.op');
-    expect(CODECALL_RESERVED_NAMESPACES).toContain('callTool');
+    expect(nameFor('/x', 'get', 'op', { tags: ['global'] })).toBe('global_.op');
+    // mirror CodeCall's real reserved list
+    for (const ns of ['callTool', 'WeakMap', 'WeakSet', 'global', 'window', 'self', 'null', 'true', 'false']) {
+      expect(CODECALL_RESERVED_NAMESPACES).toContain(ns);
+    }
   });
 
   it('derives the method half from method and path when there is no operationId', () => {
@@ -105,6 +114,53 @@ describe('dottedNaming end-to-end through generateTools', () => {
     expect(deduped).toBeDefined();
     const dot = deduped!.indexOf('.');
     expect(HALF.test(deduped!.slice(dot + 1))).toBe(true);
+  });
+
+  it('keeps digit-leading namespaces bindable through generateTools normalization', async () => {
+    const digitSpec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Digit API', version: '1.0.0' },
+      paths: {
+        '/things': { get: { operationId: 'opA', tags: ['3rd-party'], responses: { '200': { description: 'OK' } } } },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(digitSpec, { validate: false });
+    const tools = await generator.generateTools({ namingStrategy: dottedNaming() });
+    expect(tools[0].name).toBe('n3rd_party.opA');
+    expectBindable(tools[0].name);
+  });
+
+  it('preserves this binding for class-based conflict resolvers', async () => {
+    class MyStrategy {
+      prefix = 'X';
+      helper(name: string, index: number): string {
+        return `${this.prefix}${index}_${name}`;
+      }
+      conflictResolver = function (this: MyStrategy, paramName: string, _location: unknown, index: number): string {
+        return this.helper(paramName, index);
+      };
+    }
+    const conflictSpec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Conflict API', version: '1.0.0' },
+      paths: {
+        '/things/{name}': {
+          get: {
+            operationId: 'getThing',
+            parameters: [
+              { name: 'name', in: 'path', required: true, schema: { type: 'string' } },
+              { name: 'name', in: 'query', schema: { type: 'string' } },
+            ],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(conflictSpec, { validate: false });
+    const tool = await generator.generateTool('/things/{name}', 'get', { namingStrategy: new MyStrategy() as any });
+    const keys = Object.keys((tool.inputSchema as any).properties);
+    expect(keys).toContain('X0_name');
+    expect(keys).toContain('X1_name');
   });
 
   it('resolves parameter conflicts via the default resolver when the strategy has none', async () => {

@@ -37,7 +37,11 @@ export class ParameterResolver {
   constructor(namingStrategy?: NamingStrategy, options?: ParameterResolverOptions) {
     this.namingStrategy = {
       ...namingStrategy,
-      conflictResolver: namingStrategy?.conflictResolver ?? this.defaultConflictResolver,
+      // Bind a supplied resolver to its own strategy object so class-based
+      // strategies keep their `this` (we invoke it off a spread clone).
+      conflictResolver: namingStrategy?.conflictResolver
+        ? namingStrategy.conflictResolver.bind(namingStrategy)
+        : this.defaultConflictResolver,
     };
     this.includeExamples = options?.includeExamples ?? false;
   }

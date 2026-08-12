@@ -31,8 +31,16 @@ export const CODECALL_RESERVED_NAMESPACES: readonly string[] = [
   'Symbol',
   'Map',
   'Set',
+  'WeakMap',
+  'WeakSet',
   'globalThis',
+  'global',
+  'window',
+  'self',
   'undefined',
+  'null',
+  'true',
+  'false',
   'NaN',
   'Infinity',
   'callTool',
@@ -119,9 +127,10 @@ function pathMethodHalf(method: HTTPMethod, path: string, ns: string): string {
  * emitted name contains exactly one dot.
  *
  * Collision dedup in `generateTools()` appends `_<hash>` to the method half,
- * which keeps the name namespace-parseable. Under very small
- * `maxToolNameLength` caps, hash truncation can remove the dot — such names
- * remain valid MCP names but lose namespace binding.
+ * which keeps the name namespace-parseable. Hash truncation can remove the
+ * dot when the namespace half alone approaches `maxToolNameLength` (≥ 55
+ * chars at the default cap of 64) — such names remain valid MCP names but
+ * lose namespace binding.
  */
 export function dottedNaming(options: DottedNamingOptions = {}): NamingStrategy {
   const namespaceFrom = options.namespaceFrom ?? 'tag';
@@ -138,6 +147,12 @@ export function dottedNaming(options: DottedNamingOptions = {}): NamingStrategy 
       }
       if (ns === '') {
         ns = 'api';
+      }
+      // A leading `_` here is always the digit guard, and it would sit at
+      // position 0 of the full tool name where normalizeToolName trims it —
+      // use a letter guard instead so the namespace stays identifier-valid.
+      if (ns.startsWith('_')) {
+        ns = `n${ns.slice(1)}`;
       }
       if (reserved.has(ns)) {
         ns = `${ns}_`;

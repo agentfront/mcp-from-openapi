@@ -146,7 +146,8 @@ const tools = await generator.generateTools({ namingStrategy: dottedNaming() });
 - **Namespace half**: the operation's first tag, falling back to the first path segment, then `api`. Configure with `namespaceFrom: 'tag' | 'firstPathSegment'` (default `'tag'`).
 - **Method half**: the sanitized operationId, falling back to the HTTP method plus the remaining path segments (`{param}` becomes `by_<param>`).
 - **Reserved namespaces** (CodeCall sandbox globals such as `console`, `JSON`, `callTool` — the full list is exported as `CODECALL_RESERVED_NAMESPACES`) get an `_` suffix; add your own via `reservedNamespaces: [...]`.
-- **Collisions**: `generateTools()` dedup appends `_<hash>` to the method half, which stays namespace-parseable. Under very small `maxToolNameLength` caps, hash truncation can remove the dot — the name stays MCP-valid but loses namespace binding.
+- **Collisions**: `generateTools()` dedup appends `_<hash>` to the method half, which stays namespace-parseable. Hash truncation can remove the dot when the namespace half alone approaches the name cap (≥ 55 chars at the default 64) — the name stays MCP-valid but loses namespace binding.
+- **Digit-leading namespaces** get an `n` prefix (`3rd-party` → `n3rd_party`) — a `_` guard would be trimmed off the front of the tool name during normalization.
 
 ---
 
