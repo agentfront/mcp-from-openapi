@@ -48,7 +48,7 @@ const generator = await OpenAPIToolGenerator.fromURL(specUrl, {
 });
 ```
 
-Overlays apply **before dereferencing and validation** (an overlay can even fix an invalid spec), in order, exactly once. `applyOverlay(document, overlay)` is exported for standalone use.
+Overlays apply **eagerly at construction** — before dereferencing and validation — so `validate()`, `getDocument()`, `lint()`, and generation all see the same curated document (an overlay can even fix an invalid spec). Actions run in order, each matched node exactly once. `applyOverlay(document, overlay)` is exported for standalone use.
 
 **Update semantics** (per the Overlay spec): object targets deep-merge, array targets append, primitive targets are replaced. `remove: true` deletes matched nodes. Unmatched targets are skipped silently.
 
@@ -68,7 +68,7 @@ result.findings[0];
 
 Finding codes: `duplicate-operation-id` (error) · `missing-operation-id`, `missing-description`, `missing-success-response`, `unpaginated-list`, `deep-schema` (warnings) · `vague-description`, `missing-parameter-description`, `missing-request-example`, `wide-schema`, `long-operation-id` (info). Each carries a fix hint — in the spec or via generate options/overlays. Spec studies show a handful of line fixes routinely takes tool-call success from mediocre to near-perfect.
 
-`generator.lint()` runs after overlays and dereferencing, so findings reflect the document tools are actually generated from.
+`generator.lint()` runs after overlays and dereferencing but is **never gated by validation** — diagnostics work on exactly the imperfect specs they exist to diagnose (generation still validates).
 
 ## Trimming and descriptions
 
@@ -76,7 +76,7 @@ Alongside `maxSchemaDepth` (Tier 1), three more trimming knobs and two descripti
 
 ```typescript
 await generator.generateTools({
-  maxProperties: 20, // cap object width, notes what was dropped
+  maxProperties: 20, // cap object width (root input params are mapper-backed and never dropped)
   maxDescriptionLength: 300, // ellipsis-truncate every description
   stripExamples: true, // drop examples arrays wholesale
   descriptionStrategy: "combined", // summaryOnly | descriptionOnly | combined | full
