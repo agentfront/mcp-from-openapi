@@ -1007,7 +1007,7 @@ export class OpenAPIToolGenerator {
       // Generate from path and method
       const sanitized = trimUnderscores(
         path
-          .replace(/\{([^}]+)\}/g, 'By_$1')
+          .replace(/\{([^{}]+)\}/g, 'By_$1')
           .replace(/[^a-zA-Z0-9_]/g, '_')
           .replace(/_+/g, '_'),
       );
