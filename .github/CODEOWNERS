@@ -1,0 +1,8 @@
+# Default owners for everything in the repo
+* @frontegg-david
+
+# Security-sensitive surfaces require owner review
+/src/ssrf.ts @frontegg-david
+/src/overlay.ts @frontegg-david
+/src/request-builder.ts @frontegg-david
+/.github/workflows/ @frontegg-david
