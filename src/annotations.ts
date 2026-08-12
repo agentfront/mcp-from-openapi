@@ -1,4 +1,4 @@
-import type { FrontMcpExtensionData, HTTPMethod, OperationObject, ToolAnnotations } from './types';
+import type { FrontMcpExtensionData, HTTPMethod, OperationObject, ToolAnnotations, ToolIcon } from './types';
 
 /**
  * Tool-level overrides read from the `x-mcp` extension family on an operation.
@@ -30,6 +30,17 @@ export interface ExtensionToolOverrides {
    * Annotation overrides, merged field-by-field over inferred values.
    */
   annotations?: ToolAnnotations;
+
+  /**
+   * MCP `_meta` entries supplied by the extension (merged key-by-key across
+   * layers, emitted on the tool's `_meta` even when `emitMeta` is off).
+   */
+  meta?: Record<string, unknown>;
+
+  /**
+   * Tool icons supplied by the extension (later layers replace wholesale).
+   */
+  icons?: ToolIcon[];
 }
 
 /**
@@ -81,7 +92,40 @@ function mergeOverrides(base: ExtensionToolOverrides, layer: ExtensionToolOverri
     ...((base.annotations || layer.annotations) && {
       annotations: { ...base.annotations, ...layer.annotations },
     }),
+    ...((base.meta || layer.meta) && { meta: { ...base.meta, ...layer.meta } }),
+    ...(layer.icons !== undefined && { icons: layer.icons }),
   };
+}
+
+/** Accept only a plain (non-array) object as a `_meta` contribution. */
+function sanitizeMeta(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+/** Keep only well-formed icon entries: objects with a string `src`, copying
+ * just the MCP icon fields (`src`, `mimeType`, `sizes`). */
+function sanitizeIcons(value: unknown): ToolIcon[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const icons: ToolIcon[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const raw = entry as Record<string, unknown>;
+    if (typeof raw['src'] !== 'string' || raw['src'] === '') continue;
+    const icon: ToolIcon = { src: raw['src'] };
+    if (typeof raw['mimeType'] === 'string') {
+      icon.mimeType = raw['mimeType'];
+    }
+    if (Array.isArray(raw['sizes']) && raw['sizes'].every((s) => typeof s === 'string')) {
+      icon.sizes = raw['sizes'] as string[];
+    }
+    icons.push(icon);
+  }
+  return icons.length > 0 ? icons : undefined;
 }
 
 /** Read the `x-mcp` extension off any spec node (document, path item, operation). */
@@ -165,19 +209,27 @@ export function extractExtensionOverrides(operation: OperationObject): Extension
       title: typeof ext['title'] === 'string' ? ext['title'] : undefined,
       description: typeof ext['description'] === 'string' ? ext['description'] : undefined,
       annotations: pickAnnotations(ext['annotations'] as Record<string, unknown> | undefined),
+      meta: sanitizeMeta(ext['meta']),
+      icons: sanitizeIcons(ext['icons']),
     });
   }
 
-  // 3. x-frontmcp (highest precedence): only `annotations` maps onto tool
-  // overrides; the rest of the extension (cache, codecall, tags, ...) flows
-  // through `metadata.frontmcp` untouched.
+  // 3. x-frontmcp (highest precedence): `annotations`, `meta`, and `icons`
+  // map onto tool overrides; the rest of the extension (cache, codecall,
+  // tags, ...) flows through `metadata.frontmcp` untouched.
   const frontmcp = op['x-frontmcp'] as FrontMcpExtensionData | undefined;
-  if (frontmcp && typeof frontmcp === 'object' && frontmcp.annotations) {
-    const annotations = pickAnnotations(frontmcp.annotations as Record<string, unknown>);
-    result = mergeOverrides(result, {
-      annotations,
-      title: typeof frontmcp.annotations.title === 'string' ? frontmcp.annotations.title : undefined,
-    });
+  if (frontmcp && typeof frontmcp === 'object') {
+    const layer: ExtensionToolOverrides = {
+      meta: sanitizeMeta(frontmcp.meta),
+      icons: sanitizeIcons(frontmcp.icons),
+    };
+    if (frontmcp.annotations) {
+      layer.annotations = pickAnnotations(frontmcp.annotations as Record<string, unknown>);
+      if (typeof frontmcp.annotations.title === 'string') {
+        layer.title = frontmcp.annotations.title;
+      }
+    }
+    result = mergeOverrides(result, layer);
   }
 
   return result;

@@ -42,7 +42,7 @@ Disable inference with `{ inferAnnotations: false }`; extension overrides (below
 
 ## Extension Overrides
 
-Spec authors can override the tool name, title, description, and annotations — and exclude operations entirely — through the `x-mcp` extension family at the **operation level**. Three dialects are read, in ascending precedence (later wins field-by-field):
+Spec authors can override the tool name, title, description, annotations, `_meta` entries, and icons — and exclude operations entirely — through the `x-mcp` extension family at the **operation level**. Three dialects are read, in ascending precedence (later wins field-by-field; `meta` merges key-by-key, `icons` replaces wholesale, and `x-speakeasy-mcp` supports neither):
 
 ### 1. `x-speakeasy-mcp` (interop)
 

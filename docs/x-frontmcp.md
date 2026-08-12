@@ -109,6 +109,28 @@ x-frontmcp:
       input: {}
 ```
 
+### meta
+
+MCP `_meta` entries emitted on the tool (merged over `x-mcp.meta` and any generated `emitMeta` entry — see [Modern MCP Fields](./modern-mcp-fields.md)):
+
+```yaml
+x-frontmcp:
+  meta:
+    com.example/billing-tier: pro
+```
+
+### icons
+
+Tool icons (MCP 2025-11-25 shape; replaces any `x-mcp.icons` wholesale):
+
+```yaml
+x-frontmcp:
+  icons:
+    - src: https://example.com/invoice.png
+      mimeType: image/png
+      sizes: ["48x48"]
+```
+
 ---
 
 ## Accessing in Code

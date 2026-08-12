@@ -90,6 +90,8 @@ const tools = await generator.generateTools({
 | `maxDescriptionLength`              | `number`                                                     | -                                | Ellipsis-truncate every schema description at N chars                                      |
 | `stripExamples`                     | `boolean`                                                    | `false`                          | Remove all `examples` arrays from generated schemas                                        |
 | `emitTypeSignatures`                | `boolean`                                                    | `false`                          | Render `metadata.typescript = { signature, declaration }` — see [Type Signatures](./type-signatures.md) |
+| `emitMeta`                          | `boolean`                                                    | `false`                          | Emit the `dev.agentfront.openapi/operation` entry on tool `_meta` — see [Modern MCP Fields](./modern-mcp-fields.md) |
+| `inheritDocumentIcons`              | `boolean`                                                    | `false`                          | Fall back to `info['x-logo']` as a tool icon when no extension icons exist |
 
 ### Filtering Operations
 

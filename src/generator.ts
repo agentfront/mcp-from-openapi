@@ -21,6 +21,7 @@ import type {
   ServerObject,
   PathItemObject,
   JsonSchema,
+  ToolIcon,
 } from './types';
 import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import { isReferenceObject } from './types';
@@ -232,6 +233,27 @@ function matchesAnyGlob(path: string, globs: string[]): boolean {
  * repetition is polynomial on adversarial inputs (CodeQL js/polynomial-redos),
  * and tool names derive from uncontrolled spec data.
  */
+/**
+ * Map the document's `info['x-logo']` (Redoc convention: a URL string or an
+ * object with `url`) to a single tool icon.
+ */
+function iconsFromInfoLogo(info: unknown): ToolIcon[] | undefined {
+  if (!info || typeof info !== 'object') {
+    return undefined;
+  }
+  const logo = (info as Record<string, unknown>)['x-logo'];
+  if (typeof logo === 'string' && logo !== '') {
+    return [{ src: logo }];
+  }
+  if (logo && typeof logo === 'object' && !Array.isArray(logo)) {
+    const url = (logo as Record<string, unknown>)['url'];
+    if (typeof url === 'string' && url !== '') {
+      return [{ src: url }];
+    }
+  }
+  return undefined;
+}
+
 function trimUnderscores(value: string): string {
   let start = 0;
   let end = value.length;
@@ -916,11 +938,37 @@ export class OpenAPIToolGenerator {
       });
     }
 
+    // MCP `_meta`: generated operation entry (opt-in) + extension pass-through (always)
+    let toolMeta: Record<string, unknown> | undefined;
+    if (options.emitMeta) {
+      const info = document.info as Record<string, unknown> | undefined;
+      toolMeta = {
+        'dev.agentfront.openapi/operation': {
+          path: pathStr,
+          method,
+          ...(operation.operationId !== undefined && { operationId: operation.operationId }),
+          ...(operation.tags && { tags: operation.tags }),
+          ...(operation.deprecated !== undefined && { deprecated: operation.deprecated }),
+          ...(typeof info?.['title'] === 'string' && { specTitle: info['title'] }),
+          ...(typeof info?.['version'] === 'string' && { specVersion: info['version'] }),
+        },
+      };
+    }
+    if (overrides.meta) {
+      toolMeta = { ...toolMeta, ...overrides.meta };
+    }
+
+    // Icons: extension-supplied wins; document logo only on explicit opt-in
+    const icons =
+      overrides.icons ?? (options.inheritDocumentIcons ? iconsFromInfoLogo(document.info) : undefined);
+
     return {
       name,
       ...(title !== undefined && { title }),
       description: finalDescription,
       ...(annotations && { annotations }),
+      ...(toolMeta && { _meta: toolMeta }),
+      ...(icons && { icons }),
       inputSchema: resolvedInputSchema,
       outputSchema: resolvedOutputSchema,
       mapper,

@@ -192,3 +192,74 @@ describe('extractExtensionOverrides', () => {
     });
   });
 });
+
+describe('meta and icons extension extraction', () => {
+  it('reads meta and icons from the x-mcp object form', () => {
+    const overrides = extractExtensionOverrides({
+      'x-mcp': {
+        meta: { 'com.example/a': 1 },
+        icons: [{ src: 'https://e.com/i.png', mimeType: 'image/png', sizes: ['48x48'] }],
+      },
+    } as any);
+    expect(overrides.meta).toEqual({ 'com.example/a': 1 });
+    expect(overrides.icons).toEqual([{ src: 'https://e.com/i.png', mimeType: 'image/png', sizes: ['48x48'] }]);
+  });
+
+  it('reads meta and icons from x-frontmcp even without annotations', () => {
+    const overrides = extractExtensionOverrides({
+      'x-frontmcp': { meta: { 'com.example/b': 2 }, icons: [{ src: 'https://e.com/f.png' }] },
+    } as any);
+    expect(overrides.meta).toEqual({ 'com.example/b': 2 });
+    expect(overrides.icons).toEqual([{ src: 'https://e.com/f.png' }]);
+    expect(overrides.annotations).toBeUndefined();
+    expect(overrides.title).toBeUndefined();
+  });
+
+  it('merges meta key-by-key and replaces icons wholesale across layers', () => {
+    const overrides = extractExtensionOverrides({
+      'x-mcp': { meta: { keep: 1, shared: 'mcp' }, icons: [{ src: 'https://e.com/mcp.png' }] },
+      'x-frontmcp': { meta: { shared: 'frontmcp' }, icons: [{ src: 'https://e.com/front.png' }] },
+    } as any);
+    expect(overrides.meta).toEqual({ keep: 1, shared: 'frontmcp' });
+    expect(overrides.icons).toEqual([{ src: 'https://e.com/front.png' }]);
+  });
+
+  it('ignores malformed meta and icon entries', () => {
+    const overrides = extractExtensionOverrides({
+      'x-mcp': {
+        meta: ['not', 'an', 'object'],
+        icons: [
+          'not-an-object',
+          { mimeType: 'image/png' },
+          { src: '' },
+          { src: 'https://e.com/ok.png', mimeType: 42, sizes: ['48x48', 7] },
+          ['array'],
+        ],
+      },
+    } as any);
+    expect(overrides.meta).toBeUndefined();
+    expect(overrides.icons).toEqual([{ src: 'https://e.com/ok.png' }]);
+  });
+
+  it('returns undefined icons when nothing well-formed remains', () => {
+    const overrides = extractExtensionOverrides({ 'x-mcp': { icons: [{ bad: true }] } } as any);
+    expect(overrides.icons).toBeUndefined();
+  });
+
+  it('does not read meta or icons from x-speakeasy-mcp', () => {
+    const overrides = extractExtensionOverrides({
+      'x-speakeasy-mcp': { meta: { 'com.example/x': 1 }, icons: [{ src: 'https://e.com/s.png' }] },
+    } as any);
+    expect(overrides.meta).toBeUndefined();
+    expect(overrides.icons).toBeUndefined();
+  });
+
+  it('still promotes x-frontmcp annotations.title alongside meta', () => {
+    const overrides = extractExtensionOverrides({
+      'x-frontmcp': { annotations: { title: 'Nice', readOnlyHint: true }, meta: { m: 1 } },
+    } as any);
+    expect(overrides.title).toBe('Nice');
+    expect(overrides.annotations).toEqual({ title: 'Nice', readOnlyHint: true });
+    expect(overrides.meta).toEqual({ m: 1 });
+  });
+});

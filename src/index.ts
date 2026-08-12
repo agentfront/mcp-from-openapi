@@ -16,6 +16,10 @@ export type { ToolTypeScriptInfo, TypeSignatureOptions } from './type-signature'
 // Naming presets
 export { dottedNaming, CODECALL_RESERVED_NAMESPACES } from './naming-presets';
 export type { DottedNamingOptions } from './naming-presets';
+
+// Security elicitation descriptors
+export { deriveSecurityElicitations } from './elicitation';
+export type { SecurityElicitation, ElicitationField } from './elicitation';
 export {
   applyClientTarget,
   inlineLocalRefs,
@@ -70,6 +74,7 @@ export type {
   // Main MCP types
   McpOpenAPITool,
   ToolAnnotations,
+  ToolIcon,
   ParameterMapper,
   ToolMetadata,
   ResponseHints,

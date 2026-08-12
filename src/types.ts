@@ -270,6 +270,26 @@ export interface ToolAnnotations {
 }
 
 /**
+ * Tool icon (MCP spec 2025-11-25).
+ */
+export interface ToolIcon {
+  /**
+   * Icon URI (`https:` or `data:`).
+   */
+  src: string;
+
+  /**
+   * MIME type, e.g. `image/png`.
+   */
+  mimeType?: string;
+
+  /**
+   * Sizes the icon is available in, e.g. `['48x48', 'any']`.
+   */
+  sizes?: string[];
+}
+
+/**
  * Main MCP Tool definition generated from OpenAPI.
  *
  * `TMeta` lets embedding frameworks extend the metadata contract without
@@ -299,6 +319,22 @@ export interface McpOpenAPITool<TMeta extends ToolMetadata = ToolMetadata> {
    * precedence).
    */
   annotations?: ToolAnnotations;
+
+  /**
+   * MCP `_meta` (spec 2025-06-18): namespaced, client-visible metadata.
+   * Contains the `dev.agentfront.openapi/operation` entry when
+   * `GenerateOptions.emitMeta` is set, plus any `meta` object supplied via
+   * the `x-mcp` / `x-frontmcp` extensions (emitted even when the flag is
+   * off).
+   */
+  _meta?: Record<string, unknown>;
+
+  /**
+   * Tool icons (MCP spec 2025-11-25). From `x-frontmcp.icons` /
+   * `x-mcp.icons`, or the document's `info['x-logo']` when
+   * `GenerateOptions.inheritDocumentIcons` is set.
+   */
+  icons?: ToolIcon[];
 
   /**
    * Combined input schema including all parameters
@@ -594,6 +630,16 @@ export interface FrontMcpExtensionData {
     input: Record<string, unknown>;
     output?: unknown;
   }>;
+
+  /**
+   * MCP `_meta` entries to emit on the tool.
+   */
+  meta?: Record<string, unknown>;
+
+  /**
+   * Tool icons to emit on the tool.
+   */
+  icons?: ToolIcon[];
 }
 
 /**
@@ -999,6 +1045,25 @@ export interface GenerateOptions {
    * @default false
    */
   emitTypeSignatures?: boolean;
+
+  /**
+   * Emit `_meta['dev.agentfront.openapi/operation']` on every tool with the
+   * source operation's coordinates: `{ path, method, operationId?, tags?,
+   * deprecated?, specTitle?, specVersion? }` (reverse-DNS key per MCP `_meta`
+   * conventions). Extension-supplied `meta` (`x-mcp` / `x-frontmcp`) merges
+   * on top and is emitted even when this flag is off.
+   * @default false
+   */
+  emitMeta?: boolean;
+
+  /**
+   * When an operation has no extension-supplied icons, fall back to the
+   * document's `info['x-logo']` (Redoc convention) as a single icon applied
+   * to every tool. Off by default so one logo doesn't silently inflate all
+   * tool definitions.
+   * @default false
+   */
+  inheritDocumentIcons?: boolean;
 }
 
 /**

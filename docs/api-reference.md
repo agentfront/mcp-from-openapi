@@ -141,6 +141,14 @@ Apply a client dialect's schema transforms (`'claude' | 'openai' | 'gemini' | 's
 applyClientTarget(schema: JsonSchema, target: ClientTarget): JsonSchema
 ```
 
+### deriveSecurityElicitations
+
+Derive MCP-elicitation-compatible `{ message, requestedSchema }` credential requests from a tool's security data. See [Modern MCP Fields](./modern-mcp-fields.md).
+
+```typescript
+deriveSecurityElicitations(tool: McpOpenAPITool): SecurityElicitation[]
+```
+
 ### dottedNaming
 
 Naming preset producing two-segment `ns.method` tool names bindable by code-execution namespaces (FrontMCP CodeCall). See [Naming Strategies](./naming-strategies.md).

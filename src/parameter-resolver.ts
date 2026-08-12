@@ -296,6 +296,10 @@ export class ParameterResolver {
 
     // Add parameter metadata
     (schema as any)['x-parameter-location'] = param.location;
+    if (param.location === 'header') {
+      // Original wire header name (conflict renames only change the inputKey)
+      (schema as any)['x-mcp-header'] = param.name;
+    }
     if (param.style) {
       (schema as any)['x-parameter-style'] = param.style;
     }
@@ -424,6 +428,9 @@ export class ParameterResolver {
       // (all schemes stay in the mapper either way)
       const schemeInInput = includeInInput === true || (Array.isArray(includeInInput) && includeInInput.includes(scheme));
       if (schemeInInput) {
+        if (paramLocation === 'header') {
+          (schema as any)['x-mcp-header'] = headerKey;
+        }
         properties[inputKey] = schema;
         required.push(inputKey);
       }
