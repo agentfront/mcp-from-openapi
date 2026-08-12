@@ -148,8 +148,13 @@ jobs:
               --stat --patch \
               -- '*.ts' '*.js' '*.json' ':!package-lock.json' ':!*.test.ts' ':!*.spec.ts' \
               | head -c 50000)
+            # Commit subjects are the PRIMARY signal for the notes generator —
+            # the repo uses one-line conventional commits, so this list is the
+            # authoritative inventory of what shipped.
+            git log "$PREV_TAG"..HEAD --no-merges --format='- %s' > /tmp/commits.txt
           else
             DIFF="Initial release - no previous version to compare"
+            echo "- Initial release" > /tmp/commits.txt
           fi
           # Use file to avoid shell escaping issues
           echo "$DIFF" > /tmp/diff.txt
@@ -162,42 +167,74 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           VERSION: v${{ steps.version.outputs.version }}
           VERSION_MINOR: ${{ steps.context.outputs.release_line }}
+          PREV_TAG: ${{ steps.prev_version.outputs.prev_tag }}
         with:
           script: |
             const fs = require('fs');
             const diff = fs.readFileSync('/tmp/diff.txt', 'utf8');
+            const commits = fs.readFileSync('/tmp/commits.txt', 'utf8');
             const releaseDate = new Date().toISOString().split('T')[0];
             const version = process.env.VERSION;
             const versionNum = version.replace('v', '');
+            const prevTag = process.env.PREV_TAG || '(none)';
 
-            const prompt = `You are a technical writer for mcp-from-openapi, a library for converting OpenAPI specifications into MCP tool definitions.
+            const prompt = `You are writing the public release notes for mcp-from-openapi, a TypeScript library that converts OpenAPI specifications into MCP (Model Context Protocol) tool definitions. Your readers are developers deciding whether to upgrade — the notes must earn their attention in the first paragraph and never waste it.
 
             Version: ${version}
-            Release Date: ${releaseDate}
+            Release date: ${releaseDate}
+            Previous version: ${prevTag}
 
-            Git diff:
+            Commit subjects since ${prevTag} — the PRIMARY source of truth for WHAT shipped:
+            ${commits}
+
+            Supporting git diff excerpt — use it to find exact exported API names, option names, and realistic code for snippets:
             \`\`\`
             ${diff.substring(0, 40000)}
             \`\`\`
 
-            Generate two outputs:
+            Generate two outputs as JSON: {"changelog": "...", "cardMdx": "..."}
 
-            1. CHANGELOG entry (Keep a Changelog format):
-            ## [${versionNum}] - ${releaseDate}
-            ### Added/Changed/Fixed/Security (only include relevant sections)
-            - Concise description of changes
+            === OUTPUT 1: "changelog" — full release notes in GitHub-flavored markdown, in EXACTLY this structure ===
 
-            2. A SINGLE Mintlify <Card> component (NOT the full file, just the Card):
+            # ${version} — <3-6 word headline naming the flagship capability>
+
+            <One-paragraph opener sizing the release honestly. Mention concrete scale (files touched, tests added) ONLY if visible in the diff stat.>
+
+            ## ✨ Highlights
+            <The 2-4 flagship changes. For EACH: one bold lead sentence explaining WHY a developer cares (the pain it removes, not the implementation), then a short runnable TypeScript snippet using the REAL exported API names found in the diff. A highlight without a believable snippet should not be a highlight.>
+
+            <2-4 more sections with emoji headers, grouping the remaining changes — pick groups that fit the release (e.g. 🩹 Correctness, 🔒 Security, 🧩 Embedding & DX). One bullet per change written as "what changed — why you care". Security-relevant changes are ALWAYS listed explicitly under 🔒, never buried.>
+
+            ## ⚠️ Behavior changes
+            <A markdown table with columns "Change | Why" covering everything an upgrader must know: changed defaults, newly-enforced options, normalized output, reordered results. OMIT this section entirely if nothing changed for existing users.>
+
+            <details>
+            <summary><b>Full change list</b></summary>
+            <Every commit subject from the list above, lightly grouped under Features / Fixes / Security / Quality. Nothing may be silently dropped.>
+            </details>
+
+            ## Installation
+            \`\`\`bash
+            npm install mcp-from-openapi@${versionNum}
+            \`\`\`
+
+            Writing rules — these outrank everything else:
+            - Claim ONLY what the commit subjects and diff show. Never invent features, API names, numbers, or benchmarks.
+            - Lead every item with the user-facing benefit; the implementation detail comes second or not at all.
+            - Complete sentences. Ban filler ("various improvements", "minor fixes", "enhanced support").
+            - Link documentation with absolute URLs (https://github.com/agentfront/mcp-from-openapi/blob/main/docs/<file>.md) ONLY for doc files that actually appear in the diff.
+            - Behavior changes are sacred: if a default changed or output changed shape, it MUST appear in the ⚠️ table.
+
+            === OUTPUT 2: "cardMdx" — a SINGLE Mintlify <Card> component, nothing else ===
+
             <Card
-              title="mcp-from-openapi ${version}: Brief title"
+              title="mcp-from-openapi ${version}: <flagship capability headline>"
               href="https://github.com/agentfront/mcp-from-openapi/releases/tag/${version}"
               cta="View full changelog"
             >
-              **Feature** – Description.
-              - Details if needed
+              **<Flagship feature>** – <one-sentence developer benefit>.
+              - <2-3 supporting bullets, most important first>
             </Card>
-
-            IMPORTANT: For cardMdx, output ONLY the <Card>...</Card> component, nothing else.
 
             Output ONLY valid JSON: {"changelog": "...", "cardMdx": "<Card...>...</Card>"}`;
 
@@ -210,7 +247,8 @@ jobs:
               body: JSON.stringify({
                 model: 'gpt-4o',
                 messages: [{ role: 'user', content: prompt }],
-                response_format: { type: 'json_object' }
+                response_format: { type: 'json_object' },
+                max_tokens: 8000
               })
             });
 
@@ -290,30 +328,33 @@ jobs:
           BRANCH="${{ steps.context.outputs.branch }}"
           IS_PRERELEASE="${{ steps.version.outputs.is_prerelease }}"
 
-          # Start building the release body
-          {
-            echo "## Release v${VERSION}"
-            echo ""
-            echo "**Release type:** ${RELEASE_TYPE}"
-            echo "**Release line:** ${RELEASE_LINE}.x"
-            echo "**Branch:** ${BRANCH}"
-          } > /tmp/release-body.md
-
-          # Add AI-generated changelog if available
+          # The AI-generated notes LEAD the page (they carry their own title and
+          # Installation section); release-pipeline metadata is a small footer.
+          # Without AI notes (prerelease, missing key), fall back to the plain
+          # header + installation body.
           if [ -f /tmp/card-mdx.txt ] && [ -s /tmp/card-mdx.txt ] && [ -n "$CHANGELOG" ]; then
-            echo "" >> /tmp/release-body.md
-            echo "$CHANGELOG" >> /tmp/release-body.md
+            {
+              echo "$CHANGELOG"
+              echo ""
+              echo "---"
+              echo ""
+              echo "<sub>Release line: ${RELEASE_LINE}.x · Branch: ${BRANCH} · Type: ${RELEASE_TYPE}</sub>"
+            } > /tmp/release-body.md
+          else
+            {
+              echo "## Release v${VERSION}"
+              echo ""
+              echo "**Release type:** ${RELEASE_TYPE}"
+              echo "**Release line:** ${RELEASE_LINE}.x"
+              echo "**Branch:** ${BRANCH}"
+              echo ""
+              echo "### Installation"
+              echo ""
+              echo '```bash'
+              echo "npm install mcp-from-openapi@${VERSION}"
+              echo '```'
+            } > /tmp/release-body.md
           fi
-
-          # Add installation section
-          {
-            echo ""
-            echo "### Installation"
-            echo ""
-            echo '```bash'
-            echo "npm install mcp-from-openapi@${VERSION}"
-            echo '```'
-          } >> /tmp/release-body.md
 
           # Add pre-release note if applicable
           if [ "$IS_PRERELEASE" = "true" ]; then
