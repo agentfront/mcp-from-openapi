@@ -25,7 +25,7 @@ body:
     id: repro
     attributes:
       label: Minimal reproduction
-      description: A minimal OpenAPI spec snippet plus the code that triggers the problem.
+      description: Provide a minimal, redacted OpenAPI spec and code. Remove API keys, tokens, cookies, credentials, and personal data before posting.
       render: typescript
     validations:
       required: true
@@ -39,6 +39,6 @@ body:
     id: actual
     attributes:
       label: Actual behavior
-      description: Include the full error message / wrong output.
+      description: Include a redacted error message or wrong output — remove secrets, URLs with credentials, and personal data.
     validations:
       required: true
