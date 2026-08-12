@@ -173,6 +173,7 @@ jobs:
             const fs = require('fs');
             const diff = fs.readFileSync('/tmp/diff.txt', 'utf8');
             const commits = fs.readFileSync('/tmp/commits.txt', 'utf8');
+            const docsFiles = fs.readdirSync('docs').filter((f) => f.endsWith('.md')).sort().join('\n');
             const releaseDate = new Date().toISOString().split('T')[0];
             const version = process.env.VERSION;
             const versionNum = version.replace('v', '');
@@ -191,6 +192,9 @@ jobs:
             \`\`\`
             ${diff.substring(0, 40000)}
             \`\`\`
+
+            Documentation files that exist in docs/ — the ONLY valid link targets; copy a filename from this list verbatim or do not link at all:
+            ${docsFiles}
 
             Generate four outputs as JSON: {"title": "...", "changelog": "...", "changelogEntry": "...", "cardMdx": "..."}
 
@@ -228,7 +232,7 @@ jobs:
             - Claim ONLY what the commit subjects and diff show. Never invent features, API names, numbers, or benchmarks.
             - Lead with the user-facing benefit; implementation detail comes second or not at all.
             - Short, complete sentences. Ban filler ("various improvements", "minor fixes", "enhanced support").
-            - Link documentation with absolute URLs (https://github.com/agentfront/mcp-from-openapi/blob/main/docs/<file>.md) ONLY for doc files that actually appear in the diff — at most one links line.
+            - Link documentation with absolute URLs (https://github.com/agentfront/mcp-from-openapi/blob/main/docs/<file>.md) ONLY using filenames copied verbatim from the docs/ list above — NEVER guess or construct a filename; at most one links line.
             - Behavior changes are sacred: if a default changed or output changed shape, it MUST appear in the ⚠️ table.
 
             === OUTPUT 3: "changelogEntry" — a Keep a Changelog section for CHANGELOG.md ===
