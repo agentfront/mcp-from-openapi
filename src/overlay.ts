@@ -196,6 +196,27 @@ function descendants(match: Match): Match[] {
   return result;
 }
 
+/**
+ * Deduplicate matches by (parent, key) identity — consecutive recursive
+ * segments (`$..a..b`) reach the same node through multiple scopes, and an
+ * update must apply exactly once (a remove exactly one splice) per node.
+ */
+function dedupeMatches(matches: Match[]): Match[] {
+  const seen = new Map<unknown, Set<unknown>>();
+  const result: Match[] = [];
+  for (const match of matches) {
+    let keys = seen.get(match.parent);
+    if (!keys) {
+      keys = new Set();
+      seen.set(match.parent, keys);
+    }
+    if (keys.has(match.key)) continue;
+    keys.add(match.key);
+    result.push(match);
+  }
+  return result;
+}
+
 function applySegment(matches: Match[], segment: Segment): Match[] {
   const scope: Match[] = segment.recursive ? matches.flatMap((m) => [m, ...descendants(m)]) : matches;
   const next: Match[] = [];
@@ -302,23 +323,30 @@ export function applyOverlay<T extends object>(document: T, overlay: OverlayDocu
     const segments = parsePath(action.target);
     let matches: Match[] = [{ parent: null, key: null, value: result }];
     for (const segment of segments) {
-      matches = applySegment(matches, segment);
+      matches = dedupeMatches(applySegment(matches, segment));
     }
 
     if (action.remove === true) {
-      // Delete array elements from the highest index down so earlier splices
-      // don't shift later ones; object keys are order-independent.
-      const ordered = [...matches].sort((a, b) =>
-        typeof b.key === 'number' && typeof a.key === 'number' ? b.key - a.key : 0,
-      );
-      for (const match of ordered) {
+      // Group removals by parent: object keys delete directly; each array
+      // parent's indices are spliced from the highest index down so earlier
+      // splices never shift later ones. (A single global sort is NOT a total
+      // order across mixed numeric/string keys and can splice wrong elements.)
+      const arrayRemovals = new Map<unknown[], number[]>();
+      for (const match of matches) {
         if (match.parent === null) {
           throw new OverlayError('Overlay cannot remove the document root', { target: action.target });
         }
         if (Array.isArray(match.parent)) {
-          match.parent.splice(match.key as number, 1);
+          const indices = arrayRemovals.get(match.parent) ?? [];
+          indices.push(match.key as number);
+          arrayRemovals.set(match.parent, indices);
         } else {
           delete match.parent[match.key as string];
+        }
+      }
+      for (const [parent, indices] of arrayRemovals) {
+        for (const index of indices.sort((a, b) => b - a)) {
+          parent.splice(index, 1);
         }
       }
       continue;

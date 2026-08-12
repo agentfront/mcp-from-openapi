@@ -278,6 +278,33 @@ describe('applyOverlay', () => {
     expect(result.paths['/users/{id}']).toEqual({});
   });
 
+  it('applies updates exactly once through overlapping recursive scopes', () => {
+    const doc: any = { a: { a: { b: [1] } } };
+    const result = applyOverlay(doc, overlayWith([{ target: '$..a..b', update: 99 }])) as any;
+
+    expect(result.a.a.b).toEqual([1, 99]); // appended ONCE, not per matching scope
+  });
+
+  it('removes exactly the targeted element through overlapping recursive scopes', () => {
+    const doc: any = { a: { a: { b: [{ x: 1 }, { x: 2 }] } } };
+    const result = applyOverlay(doc, overlayWith([{ target: '$..a..b[0]', remove: true }])) as any;
+
+    expect(result.a.a.b).toEqual([{ x: 2 }]); // only index 0, not both
+  });
+
+  it('splices multi-element removals per parent array, highest index first', () => {
+    const doc: any = {
+      keep: { kill: true },
+      arr: [{ kill: true }, { safe: 1 }, { kill: true }, { safe: 2 }, { kill: true }],
+      other: [{ safe: 3 }, { kill: true }],
+    };
+    const result = applyOverlay(doc, overlayWith([{ target: '$..[?(@.kill)]', remove: true }])) as any;
+
+    expect(result.keep).toBeUndefined();
+    expect(result.arr).toEqual([{ safe: 1 }, { safe: 2 }]);
+    expect(result.other).toEqual([{ safe: 3 }]);
+  });
+
   describe('errors', () => {
     it.each([
       ['missing actions', { overlay: '1.0.0' } as any, /actions array/],

@@ -3939,7 +3939,7 @@ describe('Trimming options (maxProperties, maxDescriptionLength, stripExamples)'
     },
   };
 
-  it('applies all three trims to input and output schemas', async () => {
+  it('applies all three trims — but never drops mapper-backed root parameters', async () => {
     const generator = await OpenAPIToolGenerator.fromJSON(trimSpec);
     const tool = await generator.generateTool('/things', 'post', {
       maxProperties: 2,
@@ -3949,13 +3949,54 @@ describe('Trimming options (maxProperties, maxDescriptionLength, stripExamples)'
     const input = tool.inputSchema as any;
     const output = tool.outputSchema as any;
 
-    expect(Object.keys(input.properties)).toHaveLength(2);
-    // caps run LAST so every description — including the omitted-note added
-    // by limitProperties — respects the bound (10 chars + ellipsis)
-    expect(input.description).toBe('[1 additio…');
+    // ROOT input parameters are mapper-backed: all three survive the cap
+    expect(Object.keys(input.properties)).toEqual(['name', 'kind', 'extra']);
     expect(input.properties.name.description!.length).toBeLessThanOrEqual(11);
     expect(input.properties.name.examples).toBeUndefined();
+    // output schemas trim from the root as usual
     expect(output.properties.id.examples).toBeUndefined();
+  });
+
+  it('trims nested objects under root parameters and keeps omission notes intact', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Nested Trim API', version: '1.0.0' },
+      paths: {
+        '/things': {
+          post: {
+            operationId: 'createThing',
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      payload: {
+                        type: 'object',
+                        properties: { a: {}, b: {}, c: {}, d: {} },
+                        required: ['a', 'd'],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/things', 'post', {
+      maxProperties: 2,
+      maxDescriptionLength: 200,
+    });
+    const payload = (tool.inputSchema as any).properties.payload;
+
+    expect(Object.keys(payload.properties)).toEqual(['a', 'b']);
+    expect(payload.required).toEqual(['a']);
+    // caps run BEFORE limitProperties, so the omission note survives intact
+    expect(payload.description).toBe('[2 additional properties omitted: exceeds maxProperties]');
   });
 
   it('leaves schemas untouched when no trim option is set', async () => {
@@ -4330,5 +4371,43 @@ describe('Response-shaping metadata hints', () => {
 
     // the path param and the security query param named 'limit' don't count as pagination
     expect(tool.metadata.responseHints).toEqual({ unboundedArray: true, largeResponseRisk: true });
+  });
+});
+
+describe('Review-fix regressions: lint on invalid specs, eager overlays', () => {
+  const invalidDoc = (): any => ({
+    openapi: '3.0.0',
+    info: { title: 'No version' }, // missing info.version -> invalid
+    paths: {
+      '/a': { get: { responses: { '200': { description: 'OK' } } } }, // no operationId either
+    },
+  });
+
+  it('lint() reports findings on an invalid spec instead of throwing', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(invalidDoc()); // validate defaults to true
+    const result = await generator.lint();
+
+    expect(result.findings.map((f) => f.code)).toContain('missing-operation-id');
+    // ...while generation still enforces validation
+    await expect(generator.generateTools()).rejects.toThrow(/Invalid OpenAPI document/);
+  });
+
+  it('validate() and getDocument() see the overlay-curated document immediately', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(invalidDoc(), {
+      overlays: {
+        overlay: '1.0.0',
+        actions: [{ target: '$.info', update: { version: '9.9.9' } }],
+      },
+    });
+
+    // no other method has run — the getter and validator agree with generation
+    expect((generator.getDocument() as any).info.version).toBe('9.9.9');
+    expect((await generator.validate()).valid).toBe(true);
+  });
+
+  it('malformed overlays fail at construction, not at first use', async () => {
+    await expect(
+      OpenAPIToolGenerator.fromJSON(invalidDoc(), { overlays: { overlay: '1.0.0' } as any }),
+    ).rejects.toThrow(/actions array/);
   });
 });

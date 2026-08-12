@@ -141,6 +141,31 @@ Apply a client dialect's schema transforms (`'claude' | 'openai' | 'gemini' | 's
 applyClientTarget(schema: JsonSchema, target: ClientTarget): JsonSchema
 ```
 
+### analyzeToolSet / estimateToolTokens
+
+Context-budget analysis: per-tool token estimates (heaviest first) and curation warnings. See [Curation](./curation.md).
+
+```typescript
+estimateToolTokens(tool: McpOpenAPITool): number
+analyzeToolSet(tools: McpOpenAPITool[], options?: AnalyzeToolSetOptions): ToolSetReport
+```
+
+### applyOverlay
+
+Apply an OpenAPI Overlay 1.0 document (deep-merge/append/replace updates, removals, JSONPath subset with filters and recursive descent). Also available at load time via `LoadOptions.overlays`. Throws `OverlayError` on malformed overlays or unsupported syntax. See [Curation](./curation.md).
+
+```typescript
+applyOverlay<T extends object>(document: T, overlay: OverlayDocument): T
+```
+
+### lintDocument
+
+Agent-readiness lint with severity-ranked findings and fix hints; `generator.lint()` runs it on the overlay-patched, dereferenced document. See [Curation](./curation.md).
+
+```typescript
+lintDocument(document: OpenAPIDocument): LintResult
+```
+
 ### toSdkTool
 
 Shape a tool for the official MCP SDK's `registerTool(name, config, handler)` — pass the SDK v2 `fromJsonSchema` to wrap schemas; without it, raw JSON Schemas are returned.
@@ -523,6 +548,11 @@ interface GenerateOptions {
   includeExamples?: boolean; // default: false (parameter/media-type examples)
   includeSecurityInInput?: boolean | string[]; // default: false; array = per-scheme selection
   target?: ClientTarget; // per-client schema dialect transforms
+  descriptionStrategy?: "summaryOnly" | "descriptionOnly" | "combined" | "full";
+  appendResponseSummary?: boolean; // default: false ("Returns: ..." line)
+  maxProperties?: number; // cap object width (drop noted)
+  maxDescriptionLength?: number; // ellipsis-truncate descriptions
+  stripExamples?: boolean; // default: false
   inferAnnotations?: boolean; // default: true (HTTP-method annotation inference)
   maxToolNameLength?: number; // default: 64 (clamped to MCP's 128 max)
   resolveFormats?: boolean; // default: false

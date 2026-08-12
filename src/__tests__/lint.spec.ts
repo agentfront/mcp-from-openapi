@@ -255,6 +255,152 @@ describe('lintDocument', () => {
   });
 });
 
+describe('review-fix regressions', () => {
+  it('survives circular request-body schemas and detects real examples cycle-safely', () => {
+    const node: any = { type: 'object', properties: {} };
+    node.properties.child = node; // circular dereferenced schema
+    const doc: any = {
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1' },
+      paths: {
+        '/circ': {
+          post: {
+            operationId: 'circPost',
+            summary: 'A perfectly reasonable summary.',
+            requestBody: { content: { 'application/json': { schema: node } } },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+
+    expect(() => lintDocument(doc)).not.toThrow();
+    expect(lintDocument(doc).findings.map((f) => f.code)).toContain('missing-request-example');
+  });
+
+  it('does not mistake a property NAMED example for an example', () => {
+    const doc: any = {
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1' },
+      paths: {
+        '/named': {
+          post: {
+            operationId: 'namedPost',
+            summary: 'A perfectly reasonable summary.',
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: { type: 'object', properties: { example: { type: 'string' } } },
+                },
+              },
+            },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+
+    expect(lintDocument(doc).findings.map((f) => f.code)).toContain('missing-request-example');
+  });
+
+  it('finds examples under items, tuple items, and compositions', () => {
+    const bodyDoc = (schema: any): any => ({
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1' },
+      paths: {
+        '/x': {
+          post: {
+            operationId: 'postX',
+            summary: 'A perfectly reasonable summary.',
+            requestBody: { content: { 'application/json': { schema } } },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    });
+    const hasFinding = (schema: any) =>
+      lintDocument(bodyDoc(schema)).findings.some((f) => f.code === 'missing-request-example');
+
+    expect(hasFinding({ type: 'array', items: { type: 'string', example: 'a' } })).toBe(false);
+    expect(hasFinding({ type: 'array', items: [{ type: 'string', example: 'a' }] })).toBe(false);
+    expect(hasFinding({ allOf: [{ type: 'object', properties: { a: { type: 'string', example: 'x' } } }] })).toBe(false);
+    expect(hasFinding({ type: 'array', items: [{ type: 'string' }] })).toBe(true);
+  });
+
+  it('finds nested schema-level examples', () => {
+    const doc: any = {
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1' },
+      paths: {
+        '/nested': {
+          post: {
+            operationId: 'nestedPost',
+            summary: 'A perfectly reasonable summary.',
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: { type: 'object', properties: { name: { type: 'string', example: 'Ada' } } },
+                },
+              },
+            },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+
+    expect(lintDocument(doc).findings.map((f) => f.code)).not.toContain('missing-request-example');
+  });
+
+  it('accepts 2XX range codes as success responses', () => {
+    const doc: any = {
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1' },
+      paths: {
+        '/range': {
+          get: {
+            operationId: 'rangeGet',
+            summary: 'A perfectly reasonable summary.',
+            responses: {
+              '2XX': { description: 'OK', content: { 'application/json': { schema: { type: 'object' } } } },
+            },
+          },
+        },
+      },
+    };
+
+    expect(lintDocument(doc).findings.map((f) => f.code)).not.toContain('missing-success-response');
+  });
+
+  it('sees path-item-level parameters for pagination and description checks', () => {
+    const doc: any = {
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1' },
+      paths: {
+        '/items': {
+          parameters: [
+            { name: 'limit', in: 'query', schema: { type: 'integer' } }, // no description
+          ],
+          get: {
+            operationId: 'listItems',
+            summary: 'A perfectly reasonable summary.',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: { 'application/json': { schema: { type: 'array', items: { type: 'string' } } } },
+              },
+            },
+          },
+        },
+      },
+    };
+    const codes = lintDocument(doc).findings.map((f) => f.code);
+
+    expect(codes).not.toContain('unpaginated-list'); // path-level 'limit' counts
+    expect(codes).toContain('missing-parameter-description'); // and gets checked
+  });
+});
+
 describe('lintDocument edge shapes', () => {
   it('handles degenerate media entries, tuple items, type arrays, and same-path ordering', () => {
     const doc: any = {

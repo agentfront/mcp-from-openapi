@@ -75,6 +75,30 @@ function measureSchema(node: unknown, seen = new Set<unknown>()): SchemaShape {
   return { depth: childDepth + 1, widestObject, hasArray };
 }
 
+/** Does a schema tree carry an `example`/`examples` keyword anywhere? Cycle-safe. */
+function schemaHasExample(node: unknown, seen = new Set<unknown>()): boolean {
+  if (node === null || typeof node !== 'object' || seen.has(node)) return false;
+  seen.add(node);
+  const record = node as Record<string, unknown>;
+  if (record['example'] !== undefined || record['examples'] !== undefined) return true;
+
+  const properties = record['properties'];
+  if (properties && typeof properties === 'object') {
+    // walk property VALUES only — a property merely NAMED 'example' is not one
+    if (Object.values(properties).some((child) => schemaHasExample(child, seen))) return true;
+  }
+  for (const key of ['items', 'additionalProperties', 'not', 'contentSchema']) {
+    const value = record[key];
+    if (value && typeof value === 'object' && !Array.isArray(value) && schemaHasExample(value, seen)) return true;
+    if (Array.isArray(value) && value.some((item) => schemaHasExample(item, seen))) return true;
+  }
+  for (const key of ['allOf', 'anyOf', 'oneOf', 'prefixItems']) {
+    const value = record[key];
+    if (Array.isArray(value) && value.some((member) => schemaHasExample(member, seen))) return true;
+  }
+  return false;
+}
+
 /** Does any media type in the map carry an example (media- or schema-level)? */
 function hasAnyExample(content: Record<string, unknown> | undefined): boolean {
   /* c8 ignore next -- defensive: the only caller guards with `bodyContent &&` */
@@ -83,8 +107,7 @@ function hasAnyExample(content: Record<string, unknown> | undefined): boolean {
     if (!media || typeof media !== 'object') return false;
     const record = media as Record<string, unknown>;
     if (record['example'] !== undefined || record['examples'] !== undefined) return true;
-    const schema = record['schema'];
-    return JSON.stringify(schema ?? {}).includes('"example');
+    return schemaHasExample(record['schema']);
   });
 }
 
@@ -102,6 +125,12 @@ export function lintDocument(document: OpenAPIDocument): LintResult {
   const paths = document.paths ?? {};
   for (const [pathStr, pathItem] of Object.entries(paths).sort(([a], [b]) => (a < b ? -1 : 1))) {
     if (!pathItem || '$ref' in pathItem) continue;
+
+    // Path-item-level parameters apply to every operation (the generator
+    // merges them the same way) — lint must see them too.
+    const pathLevelParameters = ((pathItem as Record<string, unknown>)['parameters'] as unknown[] | undefined ?? []).filter(
+      (param): param is ParameterObject => !isReferenceObject(param),
+    );
 
     for (const method of METHODS) {
       const operation = pathItem[method] as OperationObject | undefined;
@@ -152,10 +181,11 @@ export function lintDocument(document: OpenAPIDocument): LintResult {
         });
       }
 
-      // parameter descriptions
-      const parameters = (operation.parameters ?? []).filter(
-        (param): param is ParameterObject => !isReferenceObject(param),
-      );
+      // parameter descriptions (path-level + operation-level, like generation)
+      const parameters = [
+        ...pathLevelParameters,
+        ...(operation.parameters ?? []).filter((param): param is ParameterObject => !isReferenceObject(param)),
+      ];
       const undescribed = parameters.filter((param) => !param.description).map((param) => param.name);
       if (undescribed.length > 0) {
         findings.push({
@@ -169,7 +199,7 @@ export function lintDocument(document: OpenAPIDocument): LintResult {
 
       // success response presence + list-endpoint pagination
       const responses = (operation.responses ?? {}) as Record<string, unknown>;
-      const successCodes = Object.keys(responses).filter((code) => /^2\d\d$/.test(code));
+      const successCodes = Object.keys(responses).filter((code) => /^2(\d\d|XX)$/i.test(code));
       if (successCodes.length === 0 && !responses['default']) {
         findings.push({
           severity: 'warning',

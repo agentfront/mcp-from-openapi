@@ -279,7 +279,6 @@ export class OpenAPIToolGenerator {
   private document: OpenAPIDocument;
   private dereferencedDocument?: OpenAPIDocument;
   private options: Required<Omit<LoadOptions, 'overlays'>> & Pick<LoadOptions, 'overlays'>;
-  private overlaysApplied = false;
 
   /**
    * Private constructor - use static factory methods to create instances
@@ -298,6 +297,17 @@ export class OpenAPIToolGenerator {
       secureDefaults: options.secureDefaults ?? false,
       overlays: options.overlays,
     };
+
+    // Overlays apply EAGERLY (they are synchronous): validate(), lint(),
+    // getDocument(), and generation must all agree on one curated document —
+    // a lazily-applied overlay would make a getter's result depend on which
+    // other method ran first.
+    if (this.options.overlays) {
+      const overlays = Array.isArray(this.options.overlays) ? this.options.overlays : [this.options.overlays];
+      for (const overlay of overlays) {
+        this.document = applyOverlay(this.document, overlay);
+      }
+    }
   }
 
   /**
@@ -430,7 +440,9 @@ export class OpenAPIToolGenerator {
    * actually be generated from.
    */
   async lint(): Promise<LintResult> {
-    await this.initialize();
+    // Diagnostics must run on the imperfect specs they exist to diagnose:
+    // overlays + dereferencing apply, but validation never gates linting.
+    await this.initialize(false);
     return lintDocument(this.getDocument());
   }
 
@@ -595,17 +607,7 @@ export class OpenAPIToolGenerator {
   /**
    * Initialize the generator (dereference if needed, then validate)
    */
-  private async initialize(): Promise<void> {
-    // Overlays first — they patch the RAW document, so dereferencing and
-    // validation see the curated spec. Applied exactly once.
-    if (!this.overlaysApplied && this.options.overlays) {
-      const overlays = Array.isArray(this.options.overlays) ? this.options.overlays : [this.options.overlays];
-      for (const overlay of overlays) {
-        this.document = applyOverlay(this.document, overlay);
-      }
-      this.overlaysApplied = true;
-    }
-
+  private async initialize(runValidation: boolean = this.options.validate): Promise<void> {
     if (this.options.dereference && !this.dereferencedDocument) {
       const cloned = JSON.parse(JSON.stringify(this.document)) as OpenAPIDocument;
       // Internal-only refs → dereference without `$RefParser` (no Node builtins,
@@ -627,7 +629,7 @@ export class OpenAPIToolGenerator {
       }
     }
 
-    if (this.options.validate) {
+    if (runValidation) {
       const validator = new Validator();
       const documentToValidate = this.dereferencedDocument ?? this.document;
       const result = await validator.validate(documentToValidate);
@@ -812,20 +814,37 @@ export class OpenAPIToolGenerator {
     }
 
     // Trimming controls (after depth truncation, before client targets so the
-    // dialect transforms see the final trimmed shape)
-    const applyTrim = (schema: JsonSchema): JsonSchema => {
+    // dialect transforms see the final trimmed shape). Description caps run
+    // BEFORE limitProperties so the "[N properties omitted]" notes survive.
+    const applyTrim = (schema: JsonSchema, isInputRoot: boolean): JsonSchema => {
       let trimmed = schema;
       if (options.stripExamples) trimmed = SchemaBuilder.stripExamples(trimmed);
-      if (options.maxProperties !== undefined) trimmed = SchemaBuilder.limitProperties(trimmed, options.maxProperties);
       if (options.maxDescriptionLength !== undefined) {
         trimmed = SchemaBuilder.capDescriptions(trimmed, options.maxDescriptionLength);
+      }
+      if (options.maxProperties !== undefined) {
+        if (isInputRoot) {
+          // ROOT input properties are mapper-backed parameters — dropping one
+          // makes required calls impossible. The cap applies per parameter
+          // subtree; the parameter list itself is never trimmed.
+          const properties = trimmed.properties;
+          if (properties && typeof properties === 'object') {
+            const limited: Record<string, JsonSchema> = {};
+            for (const [key, value] of Object.entries(properties)) {
+              limited[key] = SchemaBuilder.limitProperties(value as JsonSchema, options.maxProperties);
+            }
+            trimmed = { ...trimmed, properties: limited };
+          }
+        } else {
+          trimmed = SchemaBuilder.limitProperties(trimmed, options.maxProperties);
+        }
       }
       return trimmed;
     };
     if (options.stripExamples || options.maxProperties !== undefined || options.maxDescriptionLength !== undefined) {
-      resolvedInputSchema = applyTrim(resolvedInputSchema);
+      resolvedInputSchema = applyTrim(resolvedInputSchema, true);
       if (resolvedOutputSchema) {
-        resolvedOutputSchema = applyTrim(resolvedOutputSchema);
+        resolvedOutputSchema = applyTrim(resolvedOutputSchema, false);
       }
     }
 

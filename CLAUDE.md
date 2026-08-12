@@ -37,6 +37,9 @@ OpenAPIToolGenerator (src/generator.ts)
 | `src/annotations.ts`        | HTTP-method annotation inference + `x-mcp` extension family overrides (`x-speakeasy-mcp` < `x-mcp` < `x-frontmcp`); `resolveExtensionEnabled` (root < path < operation)  |
 | `src/request-builder.ts`    | `buildHttpRequest` — pure request assembly with full OpenAPI style/explode serialization, multipart/binary bodies, injection guards                                      |
 | `src/client-targets.ts`     | Per-client schema dialect transforms (`claude`/`openai`/`gemini`/`strict`), composable and exported standalone                                                           |
+| `src/token-report.ts`       | `estimateToolTokens` / `analyzeToolSet` — context-budget estimates and curation warnings                                                                                 |
+| `src/overlay.ts`            | OpenAPI Overlay 1.0 application with a JSONPath subset (filters, recursive descent); `OverlayError`                                                                      |
+| `src/lint.ts`               | `lintDocument` agent-readiness findings (severity + fix hints); `PAGINATION_PARAM` shared regex                                                                          |
 | `src/sdk.ts`                | `toSdkTool` — registerTool-shaped output for the official MCP SDK (no SDK dependency)                                                                                    |
 | `src/parameter-resolver.ts` | Resolves OpenAPI parameters + requestBody into flat inputSchema with conflict resolution; flattens `allOf` bodies, flags `wholeBody`/`binary`                            |
 | `src/response-builder.ts`   | Builds outputSchema from OpenAPI responses with content-type and status code preferences                                                                                 |
@@ -131,6 +134,9 @@ GenerateOptions (generateTools/generateTool)
 - `buildHttpRequest` is the canonical request assembly (pure, no fetch); `RequestBuildError` for all failures
 - `target` client-dialect transforms run LAST in generateTool (after formats and depth truncation)
 - `secureDefaults: true` = redirects off + external refs off (explicit options still win)
+- `LoadOptions.overlays` apply BEFORE dereference/validation, exactly once; `generator.lint()` runs on the patched document
+- Trimming order in generateTool: formats → depth truncation → stripExamples/maxProperties/maxDescriptionLength → client target
+- `metadata.responseHints` (unboundedArray/paginationParams/largeResponseRisk) computed on the FINAL output schema
 - Format resolution is a post-processing step applied to final inputSchema/outputSchema; `maxSchemaDepth` truncation (default 10) runs after it, BEFORE client target transforms
 
 ## Documentation
