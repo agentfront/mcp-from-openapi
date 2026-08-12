@@ -1,3 +1,19 @@
+## [2.6.1] - 2026-08-12
+
+### Added
+- Overlay application at load time with support for JSONPath.
+- Agent-readiness linting for improving spec-quality and tool accuracy.
+- Pagination parameter detection and unbounded-array metadata hints.
+- Token estimation and tool-set budget reporting.
+- Trimming options: `maxProperties`, `maxDescriptionLength`, and `stripExamples`.
+
+### Fixed
+- Path template regex adjusted to prevent polynomial backtracking.
+- CodeQL alerts on polynomial trims and digest backslash escaping resolved.
+
+### Security
+- Security enhancements addressing CodeQL findings.
+
 ## [2.6.0] - 2026-08-11
 
 ## [2.5.0] - 2026-06-21
