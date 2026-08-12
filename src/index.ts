@@ -12,6 +12,10 @@ export type { ExtensionToolOverrides } from './annotations';
 // TypeScript call-signature emission
 export { emitToolTypeScript, toPascalIdentifier } from './type-signature';
 export type { ToolTypeScriptInfo, TypeSignatureOptions } from './type-signature';
+
+// Naming presets
+export { dottedNaming, CODECALL_RESERVED_NAMESPACES } from './naming-presets';
+export type { DottedNamingOptions } from './naming-presets';
 export {
   applyClientTarget,
   inlineLocalRefs,

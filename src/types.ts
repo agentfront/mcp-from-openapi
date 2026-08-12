@@ -1012,22 +1012,25 @@ export type FormatResolver = (schema: JsonSchema) => JsonSchema;
  */
 export interface NamingStrategy {
   /**
-   * Resolver function for parameter name conflicts
+   * Resolver function for parameter name conflicts.
    * @param paramName - Original parameter name
    * @param location - Parameter location
    * @param index - Index of conflicting parameter (0-based)
    * @returns New parameter name
+   * @default a location-prefix resolver (`headerX_Trace`-style)
    */
-  conflictResolver: (paramName: string, location: ParameterLocation, index: number) => string;
+  conflictResolver?: (paramName: string, location: ParameterLocation, index: number) => string;
 
   /**
    * Function to generate tool names
    * @param path - OpenAPI path
    * @param method - HTTP method
-   * @param operationId - Operation ID if available
+   * @param operationId - Operation ID if available (an `x-mcp` family name
+   *   override arrives through this argument in place of the operationId)
+   * @param operation - The full operation object (for tag-aware strategies)
    * @returns Tool name
    */
-  toolNameGenerator?: (path: string, method: HTTPMethod, operationId?: string) => string;
+  toolNameGenerator?: (path: string, method: HTTPMethod, operationId?: string, operation?: OperationObject) => string;
 }
 
 /**

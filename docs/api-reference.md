@@ -141,6 +141,14 @@ Apply a client dialect's schema transforms (`'claude' | 'openai' | 'gemini' | 's
 applyClientTarget(schema: JsonSchema, target: ClientTarget): JsonSchema
 ```
 
+### dottedNaming
+
+Naming preset producing two-segment `ns.method` tool names bindable by code-execution namespaces (FrontMCP CodeCall). See [Naming Strategies](./naming-strategies.md).
+
+```typescript
+dottedNaming(options?: DottedNamingOptions): NamingStrategy
+```
+
 ### emitToolTypeScript / toPascalIdentifier
 
 Render a tool's call contract as TypeScript text (one-line `signature` + self-contained `declaration`). Also emitted during generation via `GenerateOptions.emitTypeSignatures` as `metadata.typescript`. See [Type Signatures](./type-signatures.md).

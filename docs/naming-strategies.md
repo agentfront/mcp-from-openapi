@@ -110,13 +110,12 @@ By default, tools are named using the operation's `operationId` (or an extension
 
 For example: `GET /users/{id}` becomes `get_users_By_id`.
 
-Override with `toolNameGenerator` (output is still normalized as above):
+Override with `toolNameGenerator` (output is still normalized as above). `conflictResolver` is optional — when omitted, the default location-prefix resolver applies. The generator also receives the full operation object as a fourth argument for tag-aware strategies:
 
 ```typescript
 const tools = await generator.generateTools({
   namingStrategy: {
-    conflictResolver: (name, loc) => `${loc}${name.charAt(0).toUpperCase()}${name.slice(1)}`,
-    toolNameGenerator: (path, method, operationId) => {
+    toolNameGenerator: (path, method, operationId, operation) => {
       if (operationId) return operationId;
       // camelCase: getUsersById
       const parts = path.split('/').filter(Boolean);
@@ -129,6 +128,25 @@ const tools = await generator.generateTools({
   },
 });
 ```
+
+Note: an `x-mcp` family `name` override arrives through the `operationId` argument, in place of the operationId.
+
+## dottedNaming Preset
+
+Code-execution surfaces (FrontMCP CodeCall) bind tools named `ns.method` — exactly two identifier-safe segments — as ergonomic namespaces: `await billing.listInvoices({...})`. The `dottedNaming` preset produces that shape:
+
+```typescript
+import { dottedNaming } from "mcp-from-openapi";
+
+const tools = await generator.generateTools({ namingStrategy: dottedNaming() });
+// GET /invoices (tags: [billing], operationId: listInvoices) -> "billing.listInvoices"
+// GET /users/{id} (no tags, no operationId)                  -> "users.get_by_id"
+```
+
+- **Namespace half**: the operation's first tag, falling back to the first path segment, then `api`. Configure with `namespaceFrom: 'tag' | 'firstPathSegment'` (default `'tag'`).
+- **Method half**: the sanitized operationId, falling back to the HTTP method plus the remaining path segments (`{param}` becomes `by_<param>`).
+- **Reserved namespaces** (CodeCall sandbox globals such as `console`, `JSON`, `callTool` — the full list is exported as `CODECALL_RESERVED_NAMESPACES`) get an `_` suffix; add your own via `reservedNamespaces: [...]`.
+- **Collisions**: `generateTools()` dedup appends `_<hash>` to the method half, which stays namespace-parseable. Under very small `maxToolNameLength` caps, hash truncation can remove the dot — the name stays MCP-valid but loses namespace binding.
 
 ---
 

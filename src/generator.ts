@@ -800,7 +800,13 @@ export class OpenAPIToolGenerator {
 
     // Generate tool name (an extension name override takes the operationId's
     // place, including as the value passed to a custom toolNameGenerator)
-    const name = this.generateToolName(pathStr, method as HTTPMethod, overrides.name ?? operation.operationId, options);
+    const name = this.generateToolName(
+      pathStr,
+      method as HTTPMethod,
+      overrides.name ?? operation.operationId,
+      options,
+      operation,
+    );
 
     // Generate description (extension override > strategy)
     const description =
@@ -1010,11 +1016,12 @@ export class OpenAPIToolGenerator {
     method: HTTPMethod,
     operationId?: string,
     options: GenerateOptions = {},
+    operation?: OperationObject,
   ): string {
     let rawName: string;
 
     if (options.namingStrategy?.toolNameGenerator) {
-      rawName = options.namingStrategy.toolNameGenerator(path, method, operationId);
+      rawName = options.namingStrategy.toolNameGenerator(path, method, operationId, operation);
     } else if (operationId) {
       rawName = operationId;
     } else {

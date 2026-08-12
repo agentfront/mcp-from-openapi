@@ -31,12 +31,13 @@ export interface ParameterResolverOptions {
  * Resolves parameters and handles naming conflicts
  */
 export class ParameterResolver {
-  private namingStrategy: NamingStrategy;
+  private namingStrategy: NamingStrategy & { conflictResolver: NonNullable<NamingStrategy['conflictResolver']> };
   private includeExamples: boolean;
 
   constructor(namingStrategy?: NamingStrategy, options?: ParameterResolverOptions) {
-    this.namingStrategy = namingStrategy ?? {
-      conflictResolver: this.defaultConflictResolver,
+    this.namingStrategy = {
+      ...namingStrategy,
+      conflictResolver: namingStrategy?.conflictResolver ?? this.defaultConflictResolver,
     };
     this.includeExamples = options?.includeExamples ?? false;
   }
