@@ -171,7 +171,7 @@ export class Validator {
     }
 
     // Check for path parameters in path string
-    const pathParams = path.match(/\{([^}]+)\}/g)?.map((p) => p.slice(1, -1)) ?? [];
+    const pathParams = path.match(/\{([^{}]+)\}/g)?.map((p) => p.slice(1, -1)) ?? [];
     const definedPathParams = new Set(
       operation.parameters
         ?.filter((p: any) => p.in === 'path')
