@@ -6,13 +6,14 @@ __metadata:
   cacheKey: 10c0
 
 "@apidevtools/json-schema-ref-parser@npm:^15.3.5":
-  version: 15.3.5
-  resolution: "@apidevtools/json-schema-ref-parser@npm:15.3.5"
+  version: 15.5.1
+  resolution: "@apidevtools/json-schema-ref-parser@npm:15.5.1"
   dependencies:
-    js-yaml: "npm:^4.1.1"
+    js-yaml: "npm:^5.2.2"
+    undici: "npm:^6.28.0"
   peerDependencies:
     "@types/json-schema": ^7.0.15
-  checksum: 10c0/320006dd3b57f0a7b84e3ce3c3b55d0e59b0f7fcc39418e5f9b84d8b651f2cab35046f7dc86350c1e3803a10b288d316e197e093ab0394154b095e8c67ddb008
+  checksum: 10c0/f61d6d9864af2b91a592a83b868cfdf3c65e0a4c6a2acfe138deb3108560ba1d9d422c2ea0858345ae828a585f29c3c9998ba731b25de1a9ad460550c3fc92b6
   languageName: node
   linkType: hard
 
@@ -2620,14 +2621,14 @@ __metadata:
   languageName: node
   linkType: hard
 
-"js-yaml@npm:^4.1.1":
-  version: 4.1.1
-  resolution: "js-yaml@npm:4.1.1"
+"js-yaml@npm:^5.2.2":
+  version: 5.2.3
+  resolution: "js-yaml@npm:5.2.3"
   dependencies:
     argparse: "npm:^2.0.1"
   bin:
-    js-yaml: bin/js-yaml.js
-  checksum: 10c0/561c7d7088c40a9bb53cc75becbfb1df6ae49b34b5e6e5a81744b14ae8667ec564ad2527709d1a6e7d5e5fa6d483aa0f373a50ad98d42fde368ec4a190d4fae7
+    js-yaml: bin/js-yaml.mjs
+  checksum: 10c0/55cd6310c8eee88d432ae038d451ac9d6aa0eb9e5d38a94df3d6c4a4015d08c9dad7c18669e0e8854e4173a615d6b6b7448bd0aac408773f8a46122ffd863c69
   languageName: node
   linkType: hard
 
@@ -3376,6 +3377,13 @@ __metadata:
   version: 6.27.0
   resolution: "undici@npm:6.27.0"
   checksum: 10c0/f88c3dae3957dbf9d93cb481440aced317bd3c4941b5914fea5efba516d51138988cdb5c76006f0bb1337e41d56c3443351055d492e73af2428521c37ba2a76f
+  languageName: node
+  linkType: hard
+
+"undici@npm:^6.28.0":
+  version: 6.28.0
+  resolution: "undici@npm:6.28.0"
+  checksum: 10c0/3029a70df06b38b5b2f30732932a1e92544c753cd82c8abdf0d35afad48e0ba91612e79fe3a442dbbb9434d6a9eba2b714d5ea28984c903dda2b5d5444f38354
   languageName: node
   linkType: hard
 
