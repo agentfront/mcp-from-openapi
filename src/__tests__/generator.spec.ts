@@ -4635,6 +4635,34 @@ describe('Modern-spec surface: _meta, icons, x-mcp-header', () => {
     expect(tool._meta).toEqual({ 'com.example/flag': true });
   });
 
+  it('protects the generated reserved namespace from extension spoofing', async () => {
+    const spec = baseSpec();
+    spec.paths['/items'].get['x-frontmcp'] = {
+      meta: { 'dev.agentfront.openapi/operation': { path: '/FAKE', method: 'delete' }, 'com.example/ok': 1 },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const withFlag = await generator.generateTool('/items', 'get', { emitMeta: true });
+    expect((withFlag._meta as any)['dev.agentfront.openapi/operation'].path).toBe('/items');
+    expect((withFlag._meta as any)['com.example/ok']).toBe(1);
+
+    const withoutFlag = await generator.generateTool('/items', 'get');
+    expect((withoutFlag._meta as any)['dev.agentfront.openapi/operation']).toBeUndefined();
+    expect((withoutFlag._meta as any)['com.example/ok']).toBe(1);
+
+    // Only reserved keys supplied and flag off -> no _meta at all
+    const onlyReserved = baseSpec();
+    onlyReserved.paths['/items'].get['x-mcp'] = { meta: { 'dev.agentfront.openapi/operation': { path: '/FAKE' } } };
+    const g2 = await OpenAPIToolGenerator.fromJSON(onlyReserved, { validate: false });
+    expect((await g2.generateTool('/items', 'get'))._meta).toBeUndefined();
+  });
+
+  it('rejects non-https document logos', async () => {
+    const spec = baseSpec();
+    spec.info['x-logo'] = 'javascript:alert(1)';
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    expect((await generator.generateTool('/items', 'get', { inheritDocumentIcons: true })).icons).toBeUndefined();
+  });
+
   it('merges extension meta over the generated entry with x-frontmcp winning', async () => {
     const spec = baseSpec();
     spec.paths['/items'].get['x-mcp'] = { meta: { 'com.example/flag': true, 'com.example/level': 1 } };

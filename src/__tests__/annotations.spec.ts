@@ -241,6 +241,46 @@ describe('meta and icons extension extraction', () => {
     expect(overrides.icons).toEqual([{ src: 'https://e.com/ok.png' }]);
   });
 
+  it('rejects icon sources outside the https/data scheme contract', () => {
+    const overrides = extractExtensionOverrides({
+      'x-mcp': {
+        icons: [
+          { src: 'javascript:alert(1)' },
+          { src: 'http://e.com/insecure.png' },
+          { src: 'file:///etc/icon.png' },
+          { src: 'DATA:image/png;base64,AAAA' },
+          { src: 'https://e.com/ok.png' },
+        ],
+      },
+    } as any);
+    expect(overrides.icons).toEqual([{ src: 'DATA:image/png;base64,AAAA' }, { src: 'https://e.com/ok.png' }]);
+  });
+
+  it('copies icon sizes instead of aliasing the extension array', () => {
+    const sizes = ['48x48'];
+    const overrides = extractExtensionOverrides({ 'x-mcp': { icons: [{ src: 'https://e.com/i.png', sizes }] } } as any);
+    expect(overrides.icons![0].sizes).toEqual(['48x48']);
+    expect(overrides.icons![0].sizes).not.toBe(sizes);
+  });
+
+  it('strips pollution-gadget keys from meta recursively', () => {
+    const raw = JSON.parse('{"real": 1, "__proto__": {"polluted": true}, "constructor": {"x": 1}, "nested": {"prototype": 2, "keep": {"__proto__": 3, "ok": 4}}}');
+    const overrides = extractExtensionOverrides({ 'x-mcp': { meta: raw } } as any);
+    const meta = overrides.meta!;
+    expect(Object.keys(meta)).toEqual(['real', 'nested']);
+    expect(Object.getOwnPropertyNames(meta)).not.toContain('__proto__');
+    expect(meta['nested']).toEqual({ keep: { ok: 4 } });
+    expect(Object.getOwnPropertyNames((meta['nested'] as any).keep)).not.toContain('__proto__');
+    expect(({} as any).polluted).toBeUndefined();
+  });
+
+  it('cleanses meta arrays and scalars in place', () => {
+    const overrides = extractExtensionOverrides({
+      'x-mcp': { meta: { list: [1, { '__proto__': 1, a: 2 }, 'x'] } },
+    } as any);
+    expect(overrides.meta).toEqual({ list: [1, { a: 2 }, 'x'] });
+  });
+
   it('returns undefined icons when nothing well-formed remains', () => {
     const overrides = extractExtensionOverrides({ 'x-mcp': { icons: [{ bad: true }] } } as any);
     expect(overrides.icons).toBeUndefined();

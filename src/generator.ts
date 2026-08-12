@@ -242,14 +242,19 @@ function iconsFromInfoLogo(info: unknown): ToolIcon[] | undefined {
     return undefined;
   }
   const logo = (info as Record<string, unknown>)['x-logo'];
-  if (typeof logo === 'string' && logo !== '') {
-    return [{ src: logo }];
-  }
-  if (logo && typeof logo === 'object' && !Array.isArray(logo)) {
+  let src: string | undefined;
+  if (typeof logo === 'string') {
+    src = logo;
+  } else if (logo && typeof logo === 'object' && !Array.isArray(logo)) {
     const url = (logo as Record<string, unknown>)['url'];
-    if (typeof url === 'string' && url !== '') {
-      return [{ src: url }];
+    if (typeof url === 'string') {
+      src = url;
     }
+  }
+  // Same scheme contract as extension icons (https:/data: only)
+  const lower = src?.toLowerCase();
+  if (lower !== undefined && (lower.startsWith('https:') || lower.startsWith('data:'))) {
+    return [{ src: src as string }];
   }
   return undefined;
 }
@@ -940,22 +945,33 @@ export class OpenAPIToolGenerator {
 
     // MCP `_meta`: generated operation entry (opt-in) + extension pass-through (always)
     let toolMeta: Record<string, unknown> | undefined;
+    if (overrides.meta) {
+      // Extension meta may not claim the generated reserved namespace —
+      // consumers must be able to trust `dev.agentfront.openapi/*` entries
+      toolMeta = {};
+      for (const [key, value] of Object.entries(overrides.meta)) {
+        if (!key.startsWith('dev.agentfront.openapi/')) {
+          toolMeta[key] = value;
+        }
+      }
+    }
     if (options.emitMeta) {
       const info = document.info as Record<string, unknown> | undefined;
       toolMeta = {
+        ...toolMeta,
         'dev.agentfront.openapi/operation': {
           path: pathStr,
           method,
           ...(operation.operationId !== undefined && { operationId: operation.operationId }),
-          ...(operation.tags && { tags: operation.tags }),
+          ...(operation.tags && { tags: [...operation.tags] }),
           ...(operation.deprecated !== undefined && { deprecated: operation.deprecated }),
           ...(typeof info?.['title'] === 'string' && { specTitle: info['title'] }),
           ...(typeof info?.['version'] === 'string' && { specVersion: info['version'] }),
         },
       };
     }
-    if (overrides.meta) {
-      toolMeta = { ...toolMeta, ...overrides.meta };
+    if (toolMeta && Object.keys(toolMeta).length === 0) {
+      toolMeta = undefined;
     }
 
     // Icons: extension-supplied wins; document logo only on explicit opt-in

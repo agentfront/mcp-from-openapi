@@ -325,7 +325,8 @@ export interface McpOpenAPITool<TMeta extends ToolMetadata = ToolMetadata> {
    * Contains the `dev.agentfront.openapi/operation` entry when
    * `GenerateOptions.emitMeta` is set, plus any `meta` object supplied via
    * the `x-mcp` / `x-frontmcp` extensions (emitted even when the flag is
-   * off).
+   * off). Extension keys under `dev.agentfront.openapi/` are ignored, and
+   * pollution-gadget keys are stripped recursively.
    */
   _meta?: Record<string, unknown>;
 

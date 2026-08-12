@@ -97,16 +97,52 @@ function mergeOverrides(base: ExtensionToolOverrides, layer: ExtensionToolOverri
   };
 }
 
-/** Accept only a plain (non-array) object as a `_meta` contribution. */
+/** Rebuild a `_meta` contribution with pollution-gadget keys removed at every
+ * level — untrusted specs cross a trust boundary here, and JSON/YAML parsing
+ * creates `__proto__` as an own key that downstream deep-merges would follow. */
+function cleanseMeta(node: unknown, seen: Set<object>): unknown {
+  if (!node || typeof node !== 'object') {
+    return node;
+  }
+  /* c8 ignore next 3 -- extension objects come from JSON/YAML and cannot be cyclic */
+  if (seen.has(node)) {
+    return undefined;
+  }
+  seen.add(node);
+  try {
+    if (Array.isArray(node)) {
+      return node.map((item) => cleanseMeta(item, seen));
+    }
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(node)) {
+      // Literal comparisons (not a shared Set) so static analysis recognizes
+      // the prototype-pollution sanitizer
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+      out[key] = cleanseMeta(value, seen);
+    }
+    return out;
+  } finally {
+    seen.delete(node);
+  }
+}
+
+/** Accept only a plain (non-array) object as a `_meta` contribution,
+ * rebuilding it with pollution keys stripped recursively. */
 function sanitizeMeta(value: unknown): Record<string, unknown> | undefined {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
+    return cleanseMeta(value, new Set()) as Record<string, unknown>;
   }
   return undefined;
 }
 
-/** Keep only well-formed icon entries: objects with a string `src`, copying
- * just the MCP icon fields (`src`, `mimeType`, `sizes`). */
+/** Icon URI schemes matching the documented `ToolIcon.src` contract. */
+function isAllowedIconSrc(src: string): boolean {
+  const lower = src.toLowerCase();
+  return lower.startsWith('https:') || lower.startsWith('data:');
+}
+
+/** Keep only well-formed icon entries: objects with an `https:`/`data:`
+ * string `src`, copying just the MCP icon fields (`src`, `mimeType`, `sizes`). */
 function sanitizeIcons(value: unknown): ToolIcon[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
@@ -115,13 +151,13 @@ function sanitizeIcons(value: unknown): ToolIcon[] | undefined {
   for (const entry of value) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
     const raw = entry as Record<string, unknown>;
-    if (typeof raw['src'] !== 'string' || raw['src'] === '') continue;
+    if (typeof raw['src'] !== 'string' || !isAllowedIconSrc(raw['src'])) continue;
     const icon: ToolIcon = { src: raw['src'] };
     if (typeof raw['mimeType'] === 'string') {
       icon.mimeType = raw['mimeType'];
     }
     if (Array.isArray(raw['sizes']) && raw['sizes'].every((s) => typeof s === 'string')) {
-      icon.sizes = raw['sizes'] as string[];
+      icon.sizes = [...(raw['sizes'] as string[])];
     }
     icons.push(icon);
   }
