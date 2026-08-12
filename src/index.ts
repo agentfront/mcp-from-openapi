@@ -28,6 +28,10 @@ export type { BuildHttpRequestOptions, BuiltHttpRequest } from './request-builde
 export { toSdkTool } from './sdk';
 export type { SdkToolConfig, SdkSchemaWrapper } from './sdk';
 
+// Context-budget analysis
+export { estimateToolTokens, analyzeToolSet } from './token-report';
+export type { ToolTokenEstimate, ToolSetReport, AnalyzeToolSetOptions } from './token-report';
+
 // Error exports
 export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError, RequestBuildError } from './errors';
 
