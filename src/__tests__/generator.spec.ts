@@ -3966,3 +3966,263 @@ describe('Trimming options (maxProperties, maxDescriptionLength, stripExamples)'
     expect((tool.inputSchema as any).properties.name.examples).toEqual(['Ada']);
   });
 });
+
+describe('Description strategies and response summaries', () => {
+  const describedSpec: any = {
+    openapi: '3.0.0',
+    info: { title: 'Desc API', version: '1.0.0' },
+    paths: {
+      '/full': {
+        get: {
+          operationId: 'getFull',
+          summary: 'Short summary.',
+          description: 'Longer operation description with details.',
+          responses: {
+            '200': {
+              description: 'OK',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: { id: { type: 'string' }, name: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      '/summary-only': {
+        get: { operationId: 'getSummaryOnly', summary: 'Only a summary.', responses: { '200': { description: 'OK' } } },
+      },
+      '/bare': {
+        get: { operationId: 'getBare', responses: { '200': { description: 'OK' } } },
+      },
+    },
+  };
+
+  const descriptionFor = async (path: string, options: any = {}): Promise<string> => {
+    const generator = await OpenAPIToolGenerator.fromJSON(describedSpec);
+    return (await generator.generateTool(path, 'get', options)).description;
+  };
+
+  it('summaryOnly (default) prefers the summary', async () => {
+    expect(await descriptionFor('/full')).toBe('Short summary.');
+    expect(await descriptionFor('/bare')).toBe('GET /bare');
+  });
+
+  it('descriptionOnly prefers the description with summary fallback', async () => {
+    expect(await descriptionFor('/full', { descriptionStrategy: 'descriptionOnly' })).toBe(
+      'Longer operation description with details.',
+    );
+    expect(await descriptionFor('/summary-only', { descriptionStrategy: 'descriptionOnly' })).toBe('Only a summary.');
+    expect(await descriptionFor('/bare', { descriptionStrategy: 'descriptionOnly' })).toBe('GET /bare');
+  });
+
+  it('combined joins summary and description', async () => {
+    expect(await descriptionFor('/full', { descriptionStrategy: 'combined' })).toBe(
+      'Short summary.\n\nLonger operation description with details.',
+    );
+    expect(await descriptionFor('/summary-only', { descriptionStrategy: 'combined' })).toBe('Only a summary.');
+    expect(await descriptionFor('/bare', { descriptionStrategy: 'combined' })).toBe('GET /bare');
+  });
+
+  it('full includes the operation id and route', async () => {
+    expect(await descriptionFor('/full', { descriptionStrategy: 'full' })).toBe(
+      'Short summary.\n\nLonger operation description with details.\n\nOperation: getFull\n\nGET /full',
+    );
+    expect(await descriptionFor('/bare', { descriptionStrategy: 'full' })).toBe('Operation: getBare\n\nGET /bare');
+  });
+
+  it('extension description overrides beat the strategy', async () => {
+    const spec = JSON.parse(JSON.stringify(describedSpec));
+    spec.paths['/full'].get['x-mcp'] = { description: 'From extension.' };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tool = await generator.generateTool('/full', 'get', { descriptionStrategy: 'full' });
+
+    expect(tool.description).toBe('From extension.');
+  });
+
+  it('appendResponseSummary adds a compact Returns line', async () => {
+    const description = await descriptionFor('/full', { appendResponseSummary: true });
+
+    expect(description).toBe('Short summary.\n\nReturns: object with fields: id, name');
+  });
+
+  it('appendResponseSummary is silent without an output schema', async () => {
+    expect(await descriptionFor('/summary-only', { appendResponseSummary: true })).toBe('Only a summary.');
+  });
+
+  it('says nothing for no-content and unrecognizable schemas', async () => {
+    // '/summary-only' has a 200 WITHOUT content -> outputSchema { type: 'null' }
+    const generator = await OpenAPIToolGenerator.fromJSON(describedSpec);
+    const tool = await generator.generateTool('/summary-only', 'get', { appendResponseSummary: true });
+
+    expect(tool.outputSchema).toBeDefined();
+    expect(tool.description).toBe('Only a summary.');
+  });
+
+  it('summarizes primitive responses', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Prim API', version: '1.0.0' },
+      paths: {
+        '/count': {
+          get: {
+            operationId: 'getCount',
+            responses: {
+              '200': { description: 'OK', content: { 'application/json': { schema: { type: 'integer' } } } },
+            },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/count', 'get', { appendResponseSummary: true });
+
+    expect(tool.description).toContain('Returns: integer');
+  });
+
+  it('summarizes arrays, unions, primitives, and wide objects', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Shapes API', version: '1.0.0' },
+      paths: {
+        '/objects': {
+          get: {
+            operationId: 'listObjects',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: {
+                  'application/json': {
+                    schema: { type: 'array', items: { type: 'object', properties: { a: {}, b: {} } } },
+                  },
+                },
+              },
+            },
+          },
+        },
+        '/strings': {
+          get: {
+            operationId: 'listStrings',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: { 'application/json': { schema: { type: 'array', items: { type: 'string' } } } },
+              },
+              '404': {
+                description: 'NF',
+                content: { 'application/json': { schema: { type: 'string' } } },
+              },
+            },
+          },
+        },
+        '/wide': {
+          get: {
+            operationId: 'getWide',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: {
+                  'application/json': {
+                    schema: {
+                      type: 'object',
+                      properties: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`f${i}`, { type: 'string' }])),
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+
+    const objects = await generator.generateTool('/objects', 'get', { appendResponseSummary: true });
+    expect(objects.description).toContain('Returns: array of objects with fields: a, b');
+
+    // two responses -> oneOf union summarized via its first variant
+    const strings = await generator.generateTool('/strings', 'get', { appendResponseSummary: true });
+    expect(strings.description).toContain('Returns: array of string (2 response variants)');
+
+    const wide = await generator.generateTool('/wide', 'get', { appendResponseSummary: true });
+    expect(wide.description).toContain('f7, …'); // capped at 8 names
+  });
+
+  it('covers typeless objects, bare objects, bare object arrays, and null-first unions', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Shape Edge API', version: '1.0.0' },
+      paths: {
+        '/typeless': {
+          get: {
+            operationId: 'getTypeless',
+            responses: {
+              '200': { description: 'OK', content: { 'application/json': { schema: { properties: { a: {} } } } } },
+            },
+          },
+        },
+        '/bare-object': {
+          get: {
+            operationId: 'getBareObject',
+            responses: {
+              '200': { description: 'OK', content: { 'application/json': { schema: { type: 'object' } } } },
+            },
+          },
+        },
+        '/object-array': {
+          get: {
+            operationId: 'getObjectArray',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: { 'application/json': { schema: { type: 'array', items: { type: 'object' } } } },
+              },
+            },
+          },
+        },
+        '/null-first': {
+          get: {
+            operationId: 'getNullFirst',
+            responses: {
+              '204': { description: 'No content' }, // -> { type: 'null' } variant first
+              '404': { description: 'NF', content: { 'application/json': { schema: { type: 'string' } } } },
+            },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const describe = async (p: string) =>
+      (await generator.generateTool(p, 'get', { appendResponseSummary: true })).description;
+
+    expect(await describe('/typeless')).toContain('Returns: object with fields: a');
+    expect(await describe('/bare-object')).toContain('Returns: object');
+    expect(await describe('/object-array')).toContain('Returns: array of objects');
+    // first union variant is type:null -> nothing sensible to say
+    expect(await describe('/null-first')).not.toContain('Returns:');
+  });
+
+  it('summarizes itemless arrays plainly', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Bare Array API', version: '1.0.0' },
+      paths: {
+        '/raw': {
+          get: {
+            operationId: 'getRaw',
+            responses: {
+              '200': { description: 'OK', content: { 'application/json': { schema: { type: 'array' } } } },
+            },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/raw', 'get', { appendResponseSummary: true });
+
+    expect(tool.description).toContain('Returns: array');
+  });
+});

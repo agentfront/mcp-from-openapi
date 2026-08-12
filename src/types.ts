@@ -843,6 +843,26 @@ export interface GenerateOptions {
   maxSchemaDepth?: number;
 
   /**
+   * How the tool description is assembled from the operation:
+   * - `summaryOnly` (default): summary, else description, else `METHOD path`
+   * - `descriptionOnly`: description, else summary, else `METHOD path`
+   * - `combined`: summary + blank line + description (whichever exist)
+   * - `full`: summary, description, `Operation: <id>`, and `METHOD path`
+   * An `x-mcp`-family description override always wins over the strategy.
+   * @default 'summaryOnly'
+   */
+  descriptionStrategy?: 'summaryOnly' | 'descriptionOnly' | 'combined' | 'full';
+
+  /**
+   * Append a compact `Returns: ...` line to each tool description,
+   * summarizing the output schema (top-level shape and field names) — cheap
+   * context that measurably improves result-handling without shipping the
+   * whole response schema in prose.
+   * @default false
+   */
+  appendResponseSummary?: boolean;
+
+  /**
    * Limit every object node in generated schemas to its first N properties
    * (declaration order). Dropped properties are pruned from `required` and
    * counted in a description note. Unset = no limit.

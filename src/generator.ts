@@ -70,6 +70,90 @@ function applySecureDefaults(options: LoadOptions): LoadOptions {
   };
 }
 
+/** Assemble the tool description per the configured strategy. */
+function composeDescription(
+  operation: OperationObject,
+  method: string,
+  pathStr: string,
+  strategy: 'summaryOnly' | 'descriptionOnly' | 'combined' | 'full',
+): string {
+  const fallback = `${method.toUpperCase()} ${pathStr}`;
+  const summary = operation.summary?.trim();
+  const description = operation.description?.trim();
+
+  switch (strategy) {
+    case 'descriptionOnly':
+      return description || summary || fallback;
+    case 'combined':
+      if (summary && description && summary !== description) {
+        return `${summary}\n\n${description}`;
+      }
+      return summary || description || fallback;
+    case 'full': {
+      const parts: string[] = [];
+      if (summary) parts.push(summary);
+      if (description && description !== summary) parts.push(description);
+      if (operation.operationId) parts.push(`Operation: ${operation.operationId}`);
+      parts.push(fallback);
+      return parts.join('\n\n');
+    }
+    default:
+      return summary || description || fallback;
+  }
+}
+
+/** Names of an object schema's properties, capped for prose use. */
+function propertyNames(schema: Record<string, unknown>, cap = 8): string {
+  const properties = schema['properties'];
+  /* c8 ignore next -- callers verify properties exist before delegating here */
+  if (!properties || typeof properties !== 'object') return '';
+  const names = Object.keys(properties);
+  const listed = names.slice(0, cap).join(', ');
+  return names.length > cap ? `${listed}, …` : listed;
+}
+
+/**
+ * One-line summary of an output schema for description appending: top-level
+ * shape plus field names, never the full schema.
+ */
+function summarizeOutputSchema(schema: JsonSchema): string | undefined {
+  const record = schema as Record<string, unknown>;
+
+  const variants = record['oneOf'];
+  if (Array.isArray(variants) && variants.length > 0) {
+    const first = variants[0];
+    /* c8 ignore next 2 -- ResponseBuilder variants are always objects; guard for hand-built schemas */
+    const firstSummary =
+      first && typeof first === 'object' ? summarizeOutputSchema(first as JsonSchema) : undefined;
+    return firstSummary ? `${firstSummary} (${variants.length} response variants)` : undefined;
+  }
+
+  const type = record['type'];
+  if (type === 'object' || (type === undefined && record['properties'])) {
+    const names = propertyNames(record);
+    return names ? `object with fields: ${names}` : 'object';
+  }
+  if (type === 'array') {
+    const items = record['items'];
+    if (items && typeof items === 'object' && !Array.isArray(items)) {
+      const itemRecord = items as Record<string, unknown>;
+      if (itemRecord['type'] === 'object' || itemRecord['properties']) {
+        const names = propertyNames(itemRecord);
+        return names ? `array of objects with fields: ${names}` : 'array of objects';
+      }
+      if (typeof itemRecord['type'] === 'string') {
+        return `array of ${itemRecord['type']}`;
+      }
+    }
+    return 'array';
+  }
+  if (typeof type === 'string' && type !== 'null') {
+    return type;
+  }
+  // type 'null' (a no-content response) or no recognizable shape: say nothing
+  return undefined;
+}
+
 /**
  * Convert a path glob to a RegExp: `*` matches within one path segment,
  * `**` across segments, `?` a single non-slash character.
@@ -647,9 +731,10 @@ export class OpenAPIToolGenerator {
     // place, including as the value passed to a custom toolNameGenerator)
     const name = this.generateToolName(pathStr, method as HTTPMethod, overrides.name ?? operation.operationId, options);
 
-    // Generate description
+    // Generate description (extension override > strategy)
     const description =
-      overrides.description ?? (operation.summary || operation.description || `${method.toUpperCase()} ${pathStr}`);
+      overrides.description ??
+      composeDescription(operation, method, pathStr, options.descriptionStrategy ?? 'summaryOnly');
 
     // Display title (MCP Tool.title): extension override, else operation summary
     const title = overrides.title ?? operation.summary;
@@ -711,10 +796,19 @@ export class OpenAPIToolGenerator {
       }
     }
 
+    // Optional compact response summary appended to the description
+    let finalDescription = description;
+    if (options.appendResponseSummary && resolvedOutputSchema) {
+      const summary = summarizeOutputSchema(resolvedOutputSchema);
+      if (summary) {
+        finalDescription = `${finalDescription}\n\nReturns: ${summary}`;
+      }
+    }
+
     return {
       name,
       ...(title !== undefined && { title }),
-      description,
+      description: finalDescription,
       ...(annotations && { annotations }),
       inputSchema: resolvedInputSchema,
       outputSchema: resolvedOutputSchema,
