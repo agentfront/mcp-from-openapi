@@ -20,6 +20,41 @@ export type { DottedNamingOptions } from './naming-presets';
 // Security elicitation descriptors
 export { deriveSecurityElicitations } from './elicitation';
 export type { SecurityElicitation, ElicitationField } from './elicitation';
+
+// Arazzo 1.0 workflows
+export { fromArazzo } from './arazzo';
+export type { FromArazzoOptions, ArazzoGenerateOptions } from './arazzo';
+export { parseRuntimeExpression } from './arazzo-expressions';
+export type {
+  ArazzoDocument,
+  ArazzoInfo,
+  ArazzoSourceDescription,
+  ArazzoWorkflow,
+  ArazzoStep,
+  ArazzoParameter,
+  ArazzoRequestBody,
+  ArazzoPayloadReplacement,
+  ArazzoCriterion,
+  ArazzoCriterionType,
+  ArazzoSuccessAction,
+  ArazzoFailureAction,
+  ArazzoReusableObject,
+  ArazzoComponents,
+  WorkflowIR,
+  WorkflowStepIR,
+  OperationStepIR,
+  NestedWorkflowStepIR,
+  StepOperationIR,
+  StepParameterIR,
+  StepRequestBodyIR,
+  PayloadExpressionIR,
+  PayloadReplacementIR,
+  CriterionIR,
+  ActionIR,
+  RuntimeExpressionAST,
+  RuntimeExpressionType,
+  ExpressionValueIR,
+} from './arazzo-types';
 export {
   applyClientTarget,
   inlineLocalRefs,
@@ -53,7 +88,7 @@ export { lintDocument } from './lint';
 export type { LintResult, LintFinding, LintSeverity } from './lint';
 
 // Error exports
-export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError, RequestBuildError, OverlayError } from './errors';
+export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError, RequestBuildError, OverlayError, ArazzoError } from './errors';
 
 // SSRF protection (shared by spec-URL loading and $ref resolution; usable by
 // consumers that fetch spec URLs themselves, e.g. pollers)

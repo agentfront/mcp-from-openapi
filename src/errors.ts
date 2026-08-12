@@ -92,6 +92,19 @@ export class RequestBuildError extends OpenAPIToolError {
 }
 
 /**
+ * Error thrown when an Arazzo document is malformed or cannot be resolved
+ * against its sources. `path` is a JSON Pointer into the Arazzo document.
+ */
+export class ArazzoError extends OpenAPIToolError {
+  public readonly path?: string;
+
+  constructor(message: string, context?: Record<string, any>) {
+    super(message, context);
+    this.path = context?.['path'];
+  }
+}
+
+/**
  * Error thrown when a schema is invalid
  */
 export class SchemaError extends OpenAPIToolError {

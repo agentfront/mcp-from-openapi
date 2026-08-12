@@ -141,6 +141,15 @@ Apply a client dialect's schema transforms (`'claude' | 'openai' | 'gemini' | 's
 applyClientTarget(schema: JsonSchema, target: ClientTarget): JsonSchema
 ```
 
+### fromArazzo / parseRuntimeExpression
+
+Convert an Arazzo 1.0 workflow document into consolidated MCP tools (one per workflow, IR on `metadata.workflow`); parse Arazzo runtime expressions standalone. Throws `ArazzoError` with a JSON-Pointer `path`. See [Arazzo Workflows](./arazzo.md).
+
+```typescript
+fromArazzo(document: ArazzoDocument | string, options: FromArazzoOptions): Promise<McpOpenAPITool[]>
+parseRuntimeExpression(raw: string, docPath?: string): RuntimeExpressionAST
+```
+
 ### deriveSecurityElicitations
 
 Derive MCP-elicitation-compatible `{ message, requestedSchema }` credential requests from a tool's security data. See [Modern MCP Fields](./modern-mcp-fields.md).

@@ -567,6 +567,15 @@ export interface ToolMetadata {
    * transforms). The return type is the UNWRAPPED response type.
    */
   typescript?: import('./type-signature').ToolTypeScriptInfo;
+
+  /**
+   * Arazzo workflow IR — present only on tools produced by `fromArazzo()`.
+   * When set, `path`/`method` are non-HTTP placeholders
+   * (`arazzo:<workflowId>` / `'post'`); executors must drive requests from
+   * `workflow.steps[*].operation.mapper`, never from this tool's (empty)
+   * top-level mapper.
+   */
+  workflow?: import('./arazzo-types').WorkflowIR;
 }
 
 /**

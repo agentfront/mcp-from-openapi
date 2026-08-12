@@ -2,7 +2,7 @@
  * Tests for error classes
  */
 
-import { OpenAPIToolError, LoadError, ParseError, ValidationError, GenerationError, SchemaError } from '../errors';
+import { OpenAPIToolError, LoadError, ParseError, ValidationError, GenerationError, SchemaError, ArazzoError } from '../errors';
 
 describe('OpenAPIToolError', () => {
   it('should create error with message', () => {
@@ -186,5 +186,15 @@ describe('Error Inheritance Chain', () => {
     } catch (e) {
       expect((e as LoadError).stack).toContain('throwLoadError');
     }
+  });
+});
+
+describe('ArazzoError', () => {
+  it('promotes the document path from context and keeps the hierarchy', () => {
+    const error = new ArazzoError('bad step', { path: '/workflows/0/steps/1', stepId: 's' });
+    expect(error).toBeInstanceOf(OpenAPIToolError);
+    expect(error.path).toBe('/workflows/0/steps/1');
+    expect(error.context?.stepId).toBe('s');
+    expect(new ArazzoError('no context').path).toBeUndefined();
   });
 });

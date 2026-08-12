@@ -266,7 +266,7 @@ function trimUnderscores(value: string): string {
  * 32-bit FNV-1a hash rendered as 8 hex chars. Used for stable, content-derived
  * name suffixes (no Node `crypto` dependency, so V8-isolate runtimes work).
  */
-function fnv1aHex(input: string): string {
+export function fnv1aHex(input: string): string {
   let hash = 0x811c9dc5;
   for (let i = 0; i < input.length; i++) {
     hash ^= input.charCodeAt(i);
@@ -283,7 +283,7 @@ function fnv1aHex(input: string): string {
  * `fallbackSeed` names the operation (method + path) when sanitization leaves
  * nothing usable.
  */
-function normalizeToolName(raw: string, maxLength: number, fallbackSeed: string): string {
+export function normalizeToolName(raw: string, maxLength: number, fallbackSeed: string): string {
   // Hash the RAW name, not the sanitized one: two raws differing only in
   // invalid characters must not collapse to the same truncation suffix.
   let hashSeed = raw;
