@@ -30,6 +30,7 @@ import { SchemaBuilder } from './schema-builder';
 import { extractExtensionOverrides, inferAnnotationsFromMethod, resolveExtensionEnabled } from './annotations';
 import { applyClientTarget } from './client-targets';
 import { applyOverlay } from './overlay';
+import { lintDocument, type LintResult } from './lint';
 import { Validator } from './validator';
 import { GenerationError, LoadError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
@@ -294,6 +295,17 @@ export class OpenAPIToolGenerator {
   async validate(): Promise<ValidationResult> {
     const validator = new Validator();
     return validator.validate(this.document);
+  }
+
+  /**
+   * Lint the loaded document for agent-readiness (missing operationIds,
+   * vague descriptions, unpaginated lists, oversized schemas, ...). Runs
+   * after overlays and dereferencing so findings reflect what tools would
+   * actually be generated from.
+   */
+  async lint(): Promise<LintResult> {
+    await this.initialize();
+    return lintDocument(this.getDocument());
   }
 
   // NOTE: internal/private-address blocking + IPv4-mapped-IPv6 decoding now live

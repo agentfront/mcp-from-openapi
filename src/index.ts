@@ -36,6 +36,10 @@ export type { ToolTokenEstimate, ToolSetReport, AnalyzeToolSetOptions } from './
 export { applyOverlay } from './overlay';
 export type { OverlayDocument, OverlayAction } from './overlay';
 
+// Agent-readiness lint
+export { lintDocument } from './lint';
+export type { LintResult, LintFinding, LintSeverity } from './lint';
+
 // Error exports
 export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError, RequestBuildError, OverlayError } from './errors';
 
