@@ -162,7 +162,7 @@ jobs:
       - name: Generate AI changelog
         id: ai_changelog
         if: ${{ inputs.dry_run != true && inputs.release_type == 'stable' }}
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           VERSION: v${{ steps.version.outputs.version }}
