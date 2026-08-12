@@ -6,6 +6,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-yellow.svg)](https://opensource.org/license/apache-2-0)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-20+-green.svg)](https://nodejs.org/)
+[![CodeQL](https://github.com/agentfront/mcp-from-openapi/actions/workflows/codeql.yml/badge.svg)](https://github.com/agentfront/mcp-from-openapi/actions/workflows/codeql.yml)
 
 ## What This Solves
 
@@ -170,7 +171,18 @@ for (const tool of await generator.generateTools({ target: "claude" })) {
 
 ## Contributing
 
-Contributions are welcome! Please see our [issues page](https://github.com/agentfront/mcp-from-openapi/issues).
+Contributions are welcome! Start with the
+[contributing guide](https://github.com/agentfront/mcp-from-openapi/blob/main/CONTRIBUTING.md);
+this project follows the
+[Contributor Covenant](https://github.com/agentfront/mcp-from-openapi/blob/main/CODE_OF_CONDUCT.md).
+Bug reports and feature requests go through the
+[issue templates](https://github.com/agentfront/mcp-from-openapi/issues/new/choose).
+
+## Security
+
+Report vulnerabilities privately — see the
+[security policy](https://github.com/agentfront/mcp-from-openapi/blob/main/SECURITY.md).
+When loading untrusted specs, use `secureDefaults: true`.
 
 ## Related Projects
 

@@ -1,0 +1,44 @@
+name: Bug report
+description: Something behaves incorrectly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! For **security issues, do not file a public issue** —
+        see [SECURITY.md](https://github.com/agentfront/mcp-from-openapi/blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Library version
+      placeholder: "2.6.0"
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime
+      placeholder: "Node 22 / Cloudflare Workers / ..."
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: A minimal OpenAPI spec snippet plus the code that triggers the problem.
+      render: typescript
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the full error message / wrong output.
+    validations:
+      required: true
