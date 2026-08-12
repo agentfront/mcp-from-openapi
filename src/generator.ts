@@ -29,6 +29,7 @@ import { ResponseBuilder } from './response-builder';
 import { SchemaBuilder } from './schema-builder';
 import { extractExtensionOverrides, inferAnnotationsFromMethod, resolveExtensionEnabled } from './annotations';
 import { applyClientTarget } from './client-targets';
+import { applyOverlay } from './overlay';
 import { Validator } from './validator';
 import { GenerationError, LoadError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
@@ -150,7 +151,8 @@ function normalizeToolName(raw: string, maxLength: number, fallbackSeed: string)
 export class OpenAPIToolGenerator {
   private document: OpenAPIDocument;
   private dereferencedDocument?: OpenAPIDocument;
-  private options: Required<LoadOptions>;
+  private options: Required<Omit<LoadOptions, 'overlays'>> & Pick<LoadOptions, 'overlays'>;
+  private overlaysApplied = false;
 
   /**
    * Private constructor - use static factory methods to create instances
@@ -167,6 +169,7 @@ export class OpenAPIToolGenerator {
       followRedirects: options.followRedirects ?? true,
       refResolution: options.refResolution ?? {},
       secureDefaults: options.secureDefaults ?? false,
+      overlays: options.overlays,
     };
   }
 
@@ -455,6 +458,16 @@ export class OpenAPIToolGenerator {
    * Initialize the generator (dereference if needed, then validate)
    */
   private async initialize(): Promise<void> {
+    // Overlays first — they patch the RAW document, so dereferencing and
+    // validation see the curated spec. Applied exactly once.
+    if (!this.overlaysApplied && this.options.overlays) {
+      const overlays = Array.isArray(this.options.overlays) ? this.options.overlays : [this.options.overlays];
+      for (const overlay of overlays) {
+        this.document = applyOverlay(this.document, overlay);
+      }
+      this.overlaysApplied = true;
+    }
+
     if (this.options.dereference && !this.dereferencedDocument) {
       const cloned = JSON.parse(JSON.stringify(this.document)) as OpenAPIDocument;
       // Internal-only refs → dereference without `$RefParser` (no Node builtins,

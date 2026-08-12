@@ -715,6 +715,15 @@ export interface LoadOptions {
   followRedirects?: boolean;
 
   /**
+   * OpenAPI Overlay 1.0 document(s) applied to the spec at load time, BEFORE
+   * dereferencing and validation, in order. Overlays keep curation
+   * (agent-tuned descriptions, `x-mcp` flags) in a separate file that
+   * survives spec regeneration. See `applyOverlay` for the supported
+   * JSONPath subset.
+   */
+  overlays?: import('./overlay').OverlayDocument | import('./overlay').OverlayDocument[];
+
+  /**
    * Opt into the strictest loading posture in one flag: redirects are not
    * followed and external `$ref` resolution is disabled entirely
    * (`refResolution.allowedProtocols: []`) — the right default when loading

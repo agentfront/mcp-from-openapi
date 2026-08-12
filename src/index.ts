@@ -32,8 +32,12 @@ export type { SdkToolConfig, SdkSchemaWrapper } from './sdk';
 export { estimateToolTokens, analyzeToolSet } from './token-report';
 export type { ToolTokenEstimate, ToolSetReport, AnalyzeToolSetOptions } from './token-report';
 
+// OpenAPI Overlay support
+export { applyOverlay } from './overlay';
+export type { OverlayDocument, OverlayAction } from './overlay';
+
 // Error exports
-export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError, RequestBuildError } from './errors';
+export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError, RequestBuildError, OverlayError } from './errors';
 
 // SSRF protection (shared by spec-URL loading and $ref resolution; usable by
 // consumers that fetch spec URLs themselves, e.g. pollers)
