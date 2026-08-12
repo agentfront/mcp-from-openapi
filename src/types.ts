@@ -517,6 +517,28 @@ export interface ToolMetadata {
    * Contains annotations, cache config, codecall config, tags, etc.
    */
   frontmcp?: FrontMcpExtensionData;
+
+  /**
+   * Response-shaping signals for consumers that paginate, truncate, or cache:
+   * present only when there is something to know.
+   */
+  responseHints?: ResponseHints;
+}
+
+/**
+ * Detected response-shaping signals. Clients cap tool results hard (Claude
+ * Code: 25K tokens) — these hints tell a consumer WHICH tools need paging or
+ * truncation before the first oversized response happens.
+ */
+export interface ResponseHints {
+  /** The success response contains an array without `maxItems` */
+  unboundedArray?: boolean;
+
+  /** Query parameters that look like pagination controls (limit, cursor, ...) */
+  paginationParams?: string[];
+
+  /** Unbounded array AND no pagination controls: truncate or shape server-side */
+  largeResponseRisk?: boolean;
 }
 
 /**
@@ -715,6 +737,15 @@ export interface LoadOptions {
   followRedirects?: boolean;
 
   /**
+   * OpenAPI Overlay 1.0 document(s) applied to the spec at load time, BEFORE
+   * dereferencing and validation, in order. Overlays keep curation
+   * (agent-tuned descriptions, `x-mcp` flags) in a separate file that
+   * survives spec regeneration. See `applyOverlay` for the supported
+   * JSONPath subset.
+   */
+  overlays?: import('./overlay').OverlayDocument | import('./overlay').OverlayDocument[];
+
+  /**
    * Opt into the strictest loading posture in one flag: redirects are not
    * followed and external `$ref` resolution is disabled entirely
    * (`refResolution.allowedProtocols: []`) — the right default when loading
@@ -832,6 +863,48 @@ export interface GenerateOptions {
    * @default 10
    */
   maxSchemaDepth?: number;
+
+  /**
+   * How the tool description is assembled from the operation:
+   * - `summaryOnly` (default): summary, else description, else `METHOD path`
+   * - `descriptionOnly`: description, else summary, else `METHOD path`
+   * - `combined`: summary + blank line + description (whichever exist)
+   * - `full`: summary, description, `Operation: <id>`, and `METHOD path`
+   * An `x-mcp`-family description override always wins over the strategy.
+   * @default 'summaryOnly'
+   */
+  descriptionStrategy?: 'summaryOnly' | 'descriptionOnly' | 'combined' | 'full';
+
+  /**
+   * Append a compact `Returns: ...` line to each tool description,
+   * summarizing the output schema (top-level shape and field names) — cheap
+   * context that measurably improves result-handling without shipping the
+   * whole response schema in prose.
+   * @default false
+   */
+  appendResponseSummary?: boolean;
+
+  /**
+   * Limit object nodes in generated schemas to their first N properties
+   * (declaration order). Dropped properties are pruned from `required` and
+   * counted in a description note. The ROOT of `inputSchema` is exempt: its
+   * properties are mapper-backed parameters, so the cap applies inside each
+   * parameter subtree (and throughout output schemas). Unset = no limit.
+   */
+  maxProperties?: number;
+
+  /**
+   * Cap every description in generated schemas to N characters (ellipsis
+   * truncation). Unset = no cap.
+   */
+  maxDescriptionLength?: number;
+
+  /**
+   * Remove all `examples` arrays from generated schemas — a token-budget
+   * trimming step that leaves validation keywords untouched.
+   * @default false
+   */
+  stripExamples?: boolean;
 
   /**
    * Include OpenAPI parameter-level and media-type-level `example`/`examples`

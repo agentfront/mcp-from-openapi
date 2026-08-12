@@ -3901,3 +3901,591 @@ describe('secureDefaults per-key refResolution merge', () => {
     expect((generator as any).options.refResolution.allowedProtocols).toEqual([]);
   });
 });
+
+describe('Trimming options (maxProperties, maxDescriptionLength, stripExamples)', () => {
+  const trimSpec: any = {
+    openapi: '3.0.0',
+    info: { title: 'Trim API', version: '1.0.0' },
+    paths: {
+      '/things': {
+        post: {
+          operationId: 'createThing',
+          requestBody: {
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', description: 'A longer-than-ten-chars description', example: 'Ada' },
+                    kind: { type: 'string' },
+                    extra: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': {
+              description: 'OK',
+              content: {
+                'application/json': {
+                  schema: { type: 'object', properties: { id: { type: 'string', example: 'x1' } } },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  it('applies all three trims — but never drops mapper-backed root parameters', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(trimSpec);
+    const tool = await generator.generateTool('/things', 'post', {
+      maxProperties: 2,
+      maxDescriptionLength: 10,
+      stripExamples: true,
+    });
+    const input = tool.inputSchema as any;
+    const output = tool.outputSchema as any;
+
+    // ROOT input parameters are mapper-backed: all three survive the cap
+    expect(Object.keys(input.properties)).toEqual(['name', 'kind', 'extra']);
+    expect(input.properties.name.description!.length).toBeLessThanOrEqual(10); // cap INCLUDES the ellipsis
+    expect(input.properties.name.examples).toBeUndefined();
+    // output schemas trim from the root as usual
+    expect(output.properties.id.examples).toBeUndefined();
+  });
+
+  it('trims nested objects under root parameters and keeps omission notes intact', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Nested Trim API', version: '1.0.0' },
+      paths: {
+        '/things': {
+          post: {
+            operationId: 'createThing',
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      payload: {
+                        type: 'object',
+                        properties: { a: {}, b: {}, c: {}, d: {} },
+                        required: ['a', 'd'],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/things', 'post', {
+      maxProperties: 2,
+      maxDescriptionLength: 200,
+    });
+    const payload = (tool.inputSchema as any).properties.payload;
+
+    expect(Object.keys(payload.properties)).toEqual(['a', 'b']);
+    expect(payload.required).toEqual(['a']);
+    // caps run BEFORE limitProperties, so the omission note survives intact
+    expect(payload.description).toBe('[2 additional properties omitted: exceeds maxProperties]');
+  });
+
+  it('leaves schemas untouched when no trim option is set', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(trimSpec);
+    const tool = await generator.generateTool('/things', 'post');
+
+    expect(Object.keys((tool.inputSchema as any).properties)).toHaveLength(3);
+    expect((tool.inputSchema as any).properties.name.examples).toEqual(['Ada']);
+  });
+});
+
+describe('Description strategies and response summaries', () => {
+  const describedSpec: any = {
+    openapi: '3.0.0',
+    info: { title: 'Desc API', version: '1.0.0' },
+    paths: {
+      '/full': {
+        get: {
+          operationId: 'getFull',
+          summary: 'Short summary.',
+          description: 'Longer operation description with details.',
+          responses: {
+            '200': {
+              description: 'OK',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: { id: { type: 'string' }, name: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      '/summary-only': {
+        get: { operationId: 'getSummaryOnly', summary: 'Only a summary.', responses: { '200': { description: 'OK' } } },
+      },
+      '/bare': {
+        get: { operationId: 'getBare', responses: { '200': { description: 'OK' } } },
+      },
+    },
+  };
+
+  const descriptionFor = async (path: string, options: any = {}): Promise<string> => {
+    const generator = await OpenAPIToolGenerator.fromJSON(describedSpec);
+    return (await generator.generateTool(path, 'get', options)).description;
+  };
+
+  it('summaryOnly (default) prefers the summary', async () => {
+    expect(await descriptionFor('/full')).toBe('Short summary.');
+    expect(await descriptionFor('/bare')).toBe('GET /bare');
+  });
+
+  it('descriptionOnly prefers the description with summary fallback', async () => {
+    expect(await descriptionFor('/full', { descriptionStrategy: 'descriptionOnly' })).toBe(
+      'Longer operation description with details.',
+    );
+    expect(await descriptionFor('/summary-only', { descriptionStrategy: 'descriptionOnly' })).toBe('Only a summary.');
+    expect(await descriptionFor('/bare', { descriptionStrategy: 'descriptionOnly' })).toBe('GET /bare');
+  });
+
+  it('combined joins summary and description', async () => {
+    expect(await descriptionFor('/full', { descriptionStrategy: 'combined' })).toBe(
+      'Short summary.\n\nLonger operation description with details.',
+    );
+    expect(await descriptionFor('/summary-only', { descriptionStrategy: 'combined' })).toBe('Only a summary.');
+    expect(await descriptionFor('/bare', { descriptionStrategy: 'combined' })).toBe('GET /bare');
+  });
+
+  it('full includes the operation id and route', async () => {
+    expect(await descriptionFor('/full', { descriptionStrategy: 'full' })).toBe(
+      'Short summary.\n\nLonger operation description with details.\n\nOperation: getFull\n\nGET /full',
+    );
+    expect(await descriptionFor('/bare', { descriptionStrategy: 'full' })).toBe('Operation: getBare\n\nGET /bare');
+  });
+
+  it('extension description overrides beat the strategy', async () => {
+    const spec = JSON.parse(JSON.stringify(describedSpec));
+    spec.paths['/full'].get['x-mcp'] = { description: 'From extension.' };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tool = await generator.generateTool('/full', 'get', { descriptionStrategy: 'full' });
+
+    expect(tool.description).toBe('From extension.');
+  });
+
+  it('appendResponseSummary adds a compact Returns line', async () => {
+    const description = await descriptionFor('/full', { appendResponseSummary: true });
+
+    expect(description).toBe('Short summary.\n\nReturns: object with fields: id, name');
+  });
+
+  it('appendResponseSummary is silent without an output schema', async () => {
+    expect(await descriptionFor('/summary-only', { appendResponseSummary: true })).toBe('Only a summary.');
+  });
+
+  it('says nothing for no-content and unrecognizable schemas', async () => {
+    // '/summary-only' has a 200 WITHOUT content -> outputSchema { type: 'null' }
+    const generator = await OpenAPIToolGenerator.fromJSON(describedSpec);
+    const tool = await generator.generateTool('/summary-only', 'get', { appendResponseSummary: true });
+
+    expect(tool.outputSchema).toBeDefined();
+    expect(tool.description).toBe('Only a summary.');
+  });
+
+  it('summarizes primitive responses', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Prim API', version: '1.0.0' },
+      paths: {
+        '/count': {
+          get: {
+            operationId: 'getCount',
+            responses: {
+              '200': { description: 'OK', content: { 'application/json': { schema: { type: 'integer' } } } },
+            },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/count', 'get', { appendResponseSummary: true });
+
+    expect(tool.description).toContain('Returns: integer');
+  });
+
+  it('summarizes arrays, unions, primitives, and wide objects', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Shapes API', version: '1.0.0' },
+      paths: {
+        '/objects': {
+          get: {
+            operationId: 'listObjects',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: {
+                  'application/json': {
+                    schema: { type: 'array', items: { type: 'object', properties: { a: {}, b: {} } } },
+                  },
+                },
+              },
+            },
+          },
+        },
+        '/strings': {
+          get: {
+            operationId: 'listStrings',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: { 'application/json': { schema: { type: 'array', items: { type: 'string' } } } },
+              },
+              '404': {
+                description: 'NF',
+                content: { 'application/json': { schema: { type: 'string' } } },
+              },
+            },
+          },
+        },
+        '/wide': {
+          get: {
+            operationId: 'getWide',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: {
+                  'application/json': {
+                    schema: {
+                      type: 'object',
+                      properties: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`f${i}`, { type: 'string' }])),
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+
+    const objects = await generator.generateTool('/objects', 'get', { appendResponseSummary: true });
+    expect(objects.description).toContain('Returns: array of objects with fields: a, b');
+
+    // two responses -> oneOf union summarized via its first variant
+    const strings = await generator.generateTool('/strings', 'get', { appendResponseSummary: true });
+    expect(strings.description).toContain('Returns: array of string (2 response variants)');
+
+    const wide = await generator.generateTool('/wide', 'get', { appendResponseSummary: true });
+    expect(wide.description).toContain('f7, …'); // capped at 8 names
+  });
+
+  it('covers typeless objects, bare objects, bare object arrays, and null-first unions', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Shape Edge API', version: '1.0.0' },
+      paths: {
+        '/typeless': {
+          get: {
+            operationId: 'getTypeless',
+            responses: {
+              '200': { description: 'OK', content: { 'application/json': { schema: { properties: { a: {} } } } } },
+            },
+          },
+        },
+        '/bare-object': {
+          get: {
+            operationId: 'getBareObject',
+            responses: {
+              '200': { description: 'OK', content: { 'application/json': { schema: { type: 'object' } } } },
+            },
+          },
+        },
+        '/object-array': {
+          get: {
+            operationId: 'getObjectArray',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: { 'application/json': { schema: { type: 'array', items: { type: 'object' } } } },
+              },
+            },
+          },
+        },
+        '/null-first': {
+          get: {
+            operationId: 'getNullFirst',
+            responses: {
+              '204': { description: 'No content' }, // -> { type: 'null' } variant first
+              '404': { description: 'NF', content: { 'application/json': { schema: { type: 'string' } } } },
+            },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const describeShape = async (p: string) =>
+      (await generator.generateTool(p, 'get', { appendResponseSummary: true })).description;
+
+    expect(await describeShape('/typeless')).toContain('Returns: object with fields: a');
+    expect(await describeShape('/bare-object')).toContain('Returns: object');
+    expect(await describeShape('/object-array')).toContain('Returns: array of objects');
+    // first union variant is type:null -> nothing sensible to say
+    expect(await describeShape('/null-first')).not.toContain('Returns:');
+  });
+
+  it('summarizes itemless arrays plainly', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Bare Array API', version: '1.0.0' },
+      paths: {
+        '/raw': {
+          get: {
+            operationId: 'getRaw',
+            responses: {
+              '200': { description: 'OK', content: { 'application/json': { schema: { type: 'array' } } } },
+            },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/raw', 'get', { appendResponseSummary: true });
+
+    expect(tool.description).toContain('Returns: array');
+  });
+});
+
+describe('Response-shaping metadata hints', () => {
+  const hintSpec = (params: any[], schema: any): any => ({
+    openapi: '3.0.0',
+    info: { title: 'Hints API', version: '1.0.0' },
+    paths: {
+      '/items': {
+        get: {
+          operationId: 'listItems',
+          parameters: params,
+          responses: {
+            '200': { description: 'OK', content: { 'application/json': { schema } } },
+          },
+        },
+      },
+    },
+  });
+
+  const hintsFor = async (params: any[], schema: any) => {
+    const generator = await OpenAPIToolGenerator.fromJSON(hintSpec(params, schema));
+    return (await generator.generateTool('/items', 'get')).metadata.responseHints;
+  };
+
+  it('flags unbounded arrays with no pagination as large-response risks', async () => {
+    const hints = await hintsFor([], { type: 'array', items: { type: 'string' } });
+
+    expect(hints).toEqual({ unboundedArray: true, largeResponseRisk: true });
+  });
+
+  it('lists pagination params and clears the risk flag', async () => {
+    const hints = await hintsFor(
+      [
+        { name: 'limit', in: 'query', schema: { type: 'integer' } },
+        { name: 'cursor', in: 'query', schema: { type: 'string' } },
+        { name: 'q', in: 'query', schema: { type: 'string' } },
+      ],
+      { type: 'array', items: { type: 'string' } },
+    );
+
+    expect(hints).toEqual({ unboundedArray: true, paginationParams: ['limit', 'cursor'] });
+  });
+
+  it('respects maxItems bounds and nested arrays', async () => {
+    const bounded = await hintsFor([], { type: 'array', items: { type: 'string' }, maxItems: 100 });
+    expect(bounded).toBeUndefined();
+
+    const nested = await hintsFor([], {
+      type: 'object',
+      properties: { results: { type: 'array', items: { type: 'string' } } },
+    });
+    expect(nested).toEqual({ unboundedArray: true, largeResponseRisk: true });
+  });
+
+  it('reports pagination params even for bounded responses', async () => {
+    const hints = await hintsFor(
+      [{ name: 'page', in: 'query', schema: { type: 'integer' } }],
+      { type: 'object', properties: { total: { type: 'integer' } } },
+    );
+
+    expect(hints).toEqual({ paginationParams: ['page'] });
+  });
+
+  it('detects nullable type-array lists and ignores non-array type unions', async () => {
+    expect(await hintsFor([], { type: ['array', 'null'], items: { type: 'string' } })).toEqual({
+      unboundedArray: true,
+      largeResponseRisk: true,
+    });
+    expect(await hintsFor([], { type: ['string', 'null'] })).toBeUndefined();
+  });
+
+  it('omits hints entirely when there is nothing to say', async () => {
+    const hints = await hintsFor([], { type: 'object', properties: { id: { type: 'string' } } });
+
+    expect(hints).toBeUndefined();
+  });
+
+  it('ignores pagination-named path params and security query params', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Hints API', version: '1.0.0' },
+      security: [{ LimitKey: [] }],
+      components: {
+        securitySchemes: { LimitKey: { type: 'apiKey', name: 'limit', in: 'query' } },
+      },
+      paths: {
+        '/deep/{limit}': {
+          get: {
+            operationId: 'getDeep',
+            parameters: [{ name: 'limit', in: 'path', required: true, schema: { type: 'string' } }],
+            responses: {
+              '200': {
+                description: 'OK',
+                content: { 'application/json': { schema: { type: 'array', items: { type: 'string' } } } },
+              },
+            },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/deep/{limit}', 'get');
+
+    // the path param and the security query param named 'limit' don't count as pagination
+    expect(tool.metadata.responseHints).toEqual({ unboundedArray: true, largeResponseRisk: true });
+  });
+});
+
+describe('Review-fix regressions: lint on invalid specs, eager overlays', () => {
+  const invalidDoc = (): any => ({
+    openapi: '3.0.0',
+    info: { title: 'No version' }, // missing info.version -> invalid
+    paths: {
+      '/a': { get: { responses: { '200': { description: 'OK' } } } }, // no operationId either
+    },
+  });
+
+  it('lint() reports findings on an invalid spec instead of throwing', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(invalidDoc()); // validate defaults to true
+    const result = await generator.lint();
+
+    expect(result.findings.map((f) => f.code)).toContain('missing-operation-id');
+    // ...while generation still enforces validation
+    await expect(generator.generateTools()).rejects.toThrow(/Invalid OpenAPI document/);
+  });
+
+  it('validate() and getDocument() see the overlay-curated document immediately', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(invalidDoc(), {
+      overlays: {
+        overlay: '1.0.0',
+        actions: [{ target: '$.info', update: { version: '9.9.9' } }],
+      },
+    });
+
+    // no other method has run — the getter and validator agree with generation
+    expect((generator.getDocument() as any).info.version).toBe('9.9.9');
+    expect((await generator.validate()).valid).toBe(true);
+  });
+
+  it('malformed overlays fail at construction, not at first use', async () => {
+    await expect(
+      OpenAPIToolGenerator.fromJSON(invalidDoc(), { overlays: { overlay: '1.0.0' } as any }),
+    ).rejects.toThrow(/actions array/);
+  });
+});
+
+describe('Response hints inside tuple-style items', () => {
+  it('detects unbounded arrays nested in tuple members', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Tuple API', version: '1.0.0' },
+      paths: {
+        '/tuple': {
+          get: {
+            operationId: 'getTuple',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: {
+                  'application/json': {
+                    schema: {
+                      type: 'object',
+                      properties: {
+                        pair: {
+                          type: 'array',
+                          maxItems: 2, // the tuple itself is bounded...
+                          items: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+    const tool = await generator.generateTool('/tuple', 'get');
+
+    // ...but the second tuple member is an unbounded array
+    expect(tool.metadata.responseHints).toEqual({ unboundedArray: true, largeResponseRisk: true });
+  });
+});
+
+describe('OverlayError identity through factory methods', () => {
+  const badOverlay: any = { overlay: '1.0.0' }; // missing actions
+
+  it('propagates OverlayError unchanged from fromFile', async () => {
+    const os = require('os') as typeof import('os');
+    const fs = require('fs/promises') as typeof import('fs/promises');
+    const path = require('path') as typeof import('path');
+    const file = path.join(os.tmpdir(), `overlay-err-${process.pid}.json`);
+    await fs.writeFile(file, JSON.stringify({ openapi: '3.0.0', info: { title: 'T', version: '1' }, paths: {} }));
+    try {
+      const { OverlayError } = require('../errors');
+      await expect(OpenAPIToolGenerator.fromFile(file, { overlays: badOverlay })).rejects.toBeInstanceOf(OverlayError);
+    } finally {
+      await fs.unlink(file);
+    }
+  });
+
+  it('propagates OverlayError unchanged from fromURL', async () => {
+    let handler: LoopbackHandler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ openapi: '3.0.0', info: { title: 'T', version: '1' }, paths: {} }));
+    };
+    const loopback = createLoopbackServer(() => handler);
+    const baseUrl = await loopback.listen();
+    try {
+      const { OverlayError } = require('../errors');
+      await expect(
+        OpenAPIToolGenerator.fromURL(`${baseUrl}/spec.json`, {
+          overlays: badOverlay,
+          refResolution: { allowInternalIPs: true },
+        }),
+      ).rejects.toBeInstanceOf(OverlayError);
+    } finally {
+      await loopback.close();
+    }
+  });
+});

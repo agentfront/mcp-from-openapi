@@ -28,8 +28,20 @@ export type { BuildHttpRequestOptions, BuiltHttpRequest } from './request-builde
 export { toSdkTool } from './sdk';
 export type { SdkToolConfig, SdkSchemaWrapper } from './sdk';
 
+// Context-budget analysis
+export { estimateToolTokens, analyzeToolSet } from './token-report';
+export type { ToolTokenEstimate, ToolSetReport, AnalyzeToolSetOptions } from './token-report';
+
+// OpenAPI Overlay support
+export { applyOverlay } from './overlay';
+export type { OverlayDocument, OverlayAction } from './overlay';
+
+// Agent-readiness lint
+export { lintDocument } from './lint';
+export type { LintResult, LintFinding, LintSeverity } from './lint';
+
 // Error exports
-export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError, RequestBuildError } from './errors';
+export { OpenAPIToolError, LoadError, SsrfError, ParseError, ValidationError, GenerationError, SchemaError, RequestBuildError, OverlayError } from './errors';
 
 // SSRF protection (shared by spec-URL loading and $ref resolution; usable by
 // consumers that fetch spec URLs themselves, e.g. pollers)
@@ -52,6 +64,7 @@ export type {
   ToolAnnotations,
   ParameterMapper,
   ToolMetadata,
+  ResponseHints,
   FrontMcpExtensionData,
   SerializationInfo,
   SecurityRequirement,
