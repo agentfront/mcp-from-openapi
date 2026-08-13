@@ -1,5 +1,19 @@
 ## [2.7.0] - 2026-08-13
 
+### Added
+- New Arazzo 1.0 workflows conversion to MCP tools.
+- TypeScript call signatures emission via `emitTypeSignatures`.
+- Added `_meta`, tool icons, and security elicitation descriptors.
+- Added `dottedNaming` preset for CodeCall-bindable tool names.
+
+### Fixed
+- Resolved local parameter refs and stabilized schema validation.
+- Skipped reference-object parameters in validation and coverage checks.
+- Omitted non-object output schemas from SDK configurations.
+
+### Security
+- Mitigated dependency vulnerabilities and addressed CodeQL alerts.
+
 ## [2.5.0] - 2026-06-21
 
 ### Security (SSRF hardening — GHSA-65h7-9wrw-629c)
