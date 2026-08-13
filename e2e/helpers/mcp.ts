@@ -10,6 +10,8 @@ import { toSdkTool } from '../../src';
 import type { McpOpenAPITool } from '../../src';
 
 export interface CallOutcome {
+  // Index signature keeps this assignable to the SDK's ServerResult shape
+  [key: string]: unknown;
   content: Array<{ type: 'text'; text: string }>;
   structuredContent?: Record<string, unknown>;
   isError?: boolean;

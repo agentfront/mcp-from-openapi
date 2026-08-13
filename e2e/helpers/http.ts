@@ -20,9 +20,10 @@ export async function sendBuiltRequest(built: BuiltHttpRequest, security?: Resol
     headers['Cookie'] = headers['Cookie'] ? `${headers['Cookie']}; ${extra}` : extra;
   }
 
+  // Node's fetch typing comes from undici — derive the body type from it
   return fetch(url.toString(), {
     method: built.method,
     headers,
-    body: built.body as BodyInit | undefined,
+    body: built.body as NonNullable<Parameters<typeof fetch>[1]>['body'],
   });
 }
