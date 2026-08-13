@@ -180,16 +180,19 @@ export class Validator {
     }
 
     // Check for path parameters in path string. Path-item-level parameters
-    // count too — the spec merges them into every operation.
+    // count too — the spec merges them into every operation. When any
+    // contributing parameter is an unresolved Reference Object its target is
+    // unknowable here, so the coverage check is skipped (the dereferenced
+    // validation pass in initialize() still checks it fully).
+    const allParameters = [...pathLevelParameters, ...(operation.parameters ?? [])];
+    const hasReferenceParams = allParameters.some((p: any) => p && typeof p === 'object' && '$ref' in p);
     const pathParams = path.match(/\{([^{}]+)\}/g)?.map((p) => p.slice(1, -1)) ?? [];
     const definedPathParams = new Set(
-      [...pathLevelParameters, ...(operation.parameters ?? [])]
-        .filter((p: any) => p.in === 'path')
-        .map((p: any) => p.name)
+      allParameters.filter((p: any) => p.in === 'path').map((p: any) => p.name)
     );
 
     for (const param of pathParams) {
-      if (!definedPathParams.has(param)) {
+      if (!hasReferenceParams && !definedPathParams.has(param)) {
         errors.push({
           message: `Path parameter '${param}' not defined in parameters: ${method.toUpperCase()} ${path}`,
           path: `${basePath}/parameters`,
@@ -212,6 +215,12 @@ export class Validator {
     for (let i = 0; i < parameters.length; i++) {
       const param = parameters[i];
       const paramPath = `${basePath}/${i}`;
+
+      // Reference Objects are opaque until dereferenced (initialize() resolves
+      // them before its validation pass) — structural checks don't apply
+      if (param && typeof param === 'object' && '$ref' in param) {
+        continue;
+      }
 
       if (!param.name) {
         errors.push({

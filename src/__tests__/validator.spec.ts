@@ -717,3 +717,54 @@ describe('path-item-level parameters', () => {
     expect(result.errors.some((e: any) => e.code === 'MISSING_PATH_PARAMETER')).toBe(true);
   });
 });
+
+describe('reference-object parameters', () => {
+  const { Validator: V } = require('../validator');
+
+  it('accepts valid path-level parameter references without false positives', async () => {
+    const result = await new V().validate({
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1.0.0' },
+      components: { parameters: { Id: { name: 'id', in: 'path', required: true, schema: { type: 'string' } } } },
+      paths: {
+        '/things/{id}': {
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          get: { operationId: 'getThing', responses: { '200': { description: 'OK' } } },
+        },
+      },
+    } as any);
+    expect(result.valid).toBe(true);
+    expect(result.errors ?? []).toEqual([]);
+  });
+
+  it('accepts operation-level parameter references the same way', async () => {
+    const result = await new V().validate({
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1.0.0' },
+      components: { parameters: { Id: { name: 'id', in: 'path', required: true, schema: { type: 'string' } } } },
+      paths: {
+        '/things/{id}': {
+          get: {
+            operationId: 'getThing',
+            parameters: [{ $ref: '#/components/parameters/Id' }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    } as any);
+    expect(result.errors ?? []).toEqual([]);
+  });
+
+  it('still flags missing path parameters when no references are involved', async () => {
+    const result = await new V().validate({
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1.0.0' },
+      paths: {
+        '/things/{id}': {
+          get: { operationId: 'getThing', responses: { '200': { description: 'OK' } } },
+        },
+      },
+    } as any);
+    expect((result.errors ?? []).some((e: any) => e.code === 'MISSING_PATH_PARAMETER')).toBe(true);
+  });
+});
