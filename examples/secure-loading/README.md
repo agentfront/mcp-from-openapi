@@ -7,7 +7,7 @@ Loading a spec by URL is an SSRF vector — a hostile spec URL (or a hostile ext
 - `fromURL` with `secureDefaults: true` — the one-flag hardened posture (redirects off, external `$ref` resolution off; explicitly-set options still win)
 - Built-in SSRF blocking: the test proves `http://169.254.169.254/...` (cloud metadata) is rejected **before any connection**, surfacing as `SsrfError`
 - Distinguishing hostile URLs (`SsrfError`) from broken specs (parse/validation errors) in error handling
-- Opt-in overrides (`refResolution.allowInternalIPs`) — used by the test to permit loopback, and by production code to allowlist known hosts
+- Host controls: `refResolution.allowedHosts` restricts loading to named hosts; `allowInternalIPs` disables private-range blocking **globally** and should only be enabled together with an allowlist when a trusted internal endpoint is intentionally required — the test pairs both to scope its exception to loopback
 
 ## Run it
 

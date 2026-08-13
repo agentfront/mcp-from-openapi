@@ -58,7 +58,9 @@ export class Validator {
         code: 'NO_PATHS',
       });
     } else {
-      this.validatePaths(document.paths, errors, warnings);
+      const componentParameters =
+        (document as { components?: { parameters?: Record<string, unknown> } }).components?.parameters ?? {};
+      this.validatePaths(document.paths, componentParameters, errors, warnings);
     }
 
     // Check servers
@@ -96,8 +98,21 @@ export class Validator {
   /**
    * Validate paths
    */
+  /**
+   * Resolve a local `#/components/parameters/<name>` reference (JSON Pointer
+   * tokens decoded). Returns undefined for external or dangling references.
+   */
+  private resolveParameterRef(param: any, componentParameters: Record<string, unknown>): any {
+    if (!param || typeof param !== 'object' || !('$ref' in param)) return param;
+    const match = /^#\/components\/parameters\/(.+)$/.exec(String(param.$ref));
+    if (!match) return undefined;
+    const name = match[1].replace(/~1/g, '/').replace(/~0/g, '~');
+    return componentParameters[name];
+  }
+
   private validatePaths(
     paths: Record<string, any>,
+    componentParameters: Record<string, unknown>,
     errors: ValidationErrorDetail[],
     warnings: ValidationWarning[]
   ): void {
@@ -129,7 +144,7 @@ export class Validator {
         const operation = pathItem[method];
         if (operation) {
           hasOperations = true;
-          this.validateOperation(operation, path, method, errors, warnings, pathLevelParameters);
+          this.validateOperation(operation, path, method, errors, warnings, pathLevelParameters, componentParameters);
         }
       }
 
@@ -152,7 +167,8 @@ export class Validator {
     method: string,
     errors: ValidationErrorDetail[],
     warnings: ValidationWarning[],
-    pathLevelParameters: any[] = []
+    pathLevelParameters: any[] = [],
+    componentParameters: Record<string, unknown> = {}
   ): void {
     const basePath = `/paths/${path}/${method}`;
 
@@ -180,19 +196,22 @@ export class Validator {
     }
 
     // Check for path parameters in path string. Path-item-level parameters
-    // count too — the spec merges them into every operation. When any
-    // contributing parameter is an unresolved Reference Object its target is
-    // unknowable here, so the coverage check is skipped (the dereferenced
-    // validation pass in initialize() still checks it fully).
-    const allParameters = [...pathLevelParameters, ...(operation.parameters ?? [])];
-    const hasReferenceParams = allParameters.some((p: any) => p && typeof p === 'object' && '$ref' in p);
+    // count too — the spec merges them into every operation. Local
+    // `#/components/parameters/...` references are resolved so a query-param
+    // ref cannot mask a missing path variable; only refs that CANNOT be
+    // resolved here (external or dangling) defer the check to the
+    // dereferenced validation pass in initialize().
+    const allParameters = [...pathLevelParameters, ...(operation.parameters ?? [])].map((p: any) =>
+      this.resolveParameterRef(p, componentParameters),
+    );
+    const hasUnresolvableRefs = allParameters.some((p: any) => p === undefined);
     const pathParams = path.match(/\{([^{}]+)\}/g)?.map((p) => p.slice(1, -1)) ?? [];
     const definedPathParams = new Set(
-      allParameters.filter((p: any) => p.in === 'path').map((p: any) => p.name)
+      allParameters.filter((p: any) => p && p.in === 'path').map((p: any) => p.name)
     );
 
     for (const param of pathParams) {
-      if (!hasReferenceParams && !definedPathParams.has(param)) {
+      if (!hasUnresolvableRefs && !definedPathParams.has(param)) {
         errors.push({
           message: `Path parameter '${param}' not defined in parameters: ${method.toUpperCase()} ${path}`,
           path: `${basePath}/parameters`,

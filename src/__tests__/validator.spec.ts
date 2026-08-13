@@ -755,6 +755,57 @@ describe('reference-object parameters', () => {
     expect(result.errors ?? []).toEqual([]);
   });
 
+  it('does not let a resolvable query-param reference mask a missing path variable', async () => {
+    const result = await new V().validate({
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1.0.0' },
+      components: { parameters: { Filter: { name: 'filter', in: 'query', schema: { type: 'string' } } } },
+      paths: {
+        '/things/{id}': {
+          get: {
+            operationId: 'getThing',
+            parameters: [{ $ref: '#/components/parameters/Filter' }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    } as any);
+    expect((result.errors ?? []).some((e: any) => e.code === 'MISSING_PATH_PARAMETER')).toBe(true);
+  });
+
+  it('defers coverage only for unresolvable references', async () => {
+    for (const ref of ['./external.yaml#/components/parameters/Id', '#/components/parameters/Ghost']) {
+      const result = await new V().validate({
+        openapi: '3.0.0',
+        info: { title: 'T', version: '1.0.0' },
+        paths: {
+          '/things/{id}': {
+            get: { operationId: 'getThing', parameters: [{ $ref: ref }], responses: { '200': { description: 'OK' } } },
+          },
+        },
+      } as any);
+      expect((result.errors ?? []).some((e: any) => e.code === 'MISSING_PATH_PARAMETER')).toBe(false);
+    }
+  });
+
+  it('resolves pointer-escaped component parameter names', async () => {
+    const result = await new V().validate({
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1.0.0' },
+      components: { parameters: { 'a/b': { name: 'id', in: 'path', required: true, schema: { type: 'string' } } } },
+      paths: {
+        '/things/{id}': {
+          get: {
+            operationId: 'getThing',
+            parameters: [{ $ref: '#/components/parameters/a~1b' }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    } as any);
+    expect((result.errors ?? []).some((e: any) => e.code === 'MISSING_PATH_PARAMETER')).toBe(false);
+  });
+
   it('still flags missing path parameters when no references are involved', async () => {
     const result = await new V().validate({
       openapi: '3.0.0',

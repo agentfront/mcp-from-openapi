@@ -10,7 +10,7 @@ Real specs for the e2e story suite. **Unit tests never use fixture files** (inli
 | `github-trimmed-3.0.json` | [github/rest-api-description](https://github.com/github/rest-api-description) `descriptions/api.github.com/api.github.com.json` (OAS 3.0.3, 12.9 MB upstream) | `b26c240ded1c8b79cb0fb09dee4a21239061fa23` | 2026-08-13 | MIT — © GitHub, Inc. ([upstream LICENSE](https://github.com/github/rest-api-description/blob/main/LICENSE.md)) | ~579 KB (78 operations) |
 | `discord-trimmed-3.1.json` | [discord/discord-api-spec](https://github.com/discord/discord-api-spec) `specs/openapi.json` (OAS **3.1.0**, 1.18 MB upstream; dense `const`/`prefixItems`/`oneOf`, cyclic schemas) | `1314ec6fee3b2fdfb2c09b85fb49e467f84c1dd7` | 2026-08-13 | MIT — © Discord Inc. ([upstream LICENSE](https://github.com/discord/discord-api-spec/blob/main/LICENSE)) | ~410 KB (60 operations) |
 
-The MIT license requires the copyright notices above to accompany the redistributed portions; the trimmed files carry an `info['x-fixture-provenance']` note pointing back here.
+The MIT license texts are vendored verbatim in [NOTICES.md](./NOTICES.md), as required for the redistributed portions; the trimmed files carry an `info['x-fixture-provenance']` note pointing back here.
 
 ## Regenerating
 

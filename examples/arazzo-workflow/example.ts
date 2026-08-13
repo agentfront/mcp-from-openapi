@@ -86,20 +86,36 @@ export async function runWorkflow(
       input[parameter.name] = materialize(parameter.value, { inputs, steps });
     }
     if (step.requestBody?.payload !== undefined) {
-      const payload = JSON.parse(JSON.stringify(step.requestBody.payload)) as Record<string, unknown>;
+      let payload: unknown = JSON.parse(JSON.stringify(step.requestBody.payload));
       for (const expression of step.requestBody.payloadExpressions ?? []) {
+        const value = materialize(expression.value, { inputs, steps });
+        // Pointer '' means the expression IS the whole payload
+        if (expression.pointer === '') {
+          payload = value;
+          continue;
+        }
         // RFC 6901: decode ~1 -> / and ~0 -> ~ (in that order) per segment
         const segments = expression.pointer
           .slice(1)
           .split('/')
           .map((segment) => segment.replace(/~1/g, '/').replace(/~0/g, '~'));
-        let node: Record<string, unknown> = payload;
+        let node = payload as Record<string, unknown>;
         for (const segment of segments.slice(0, -1)) node = node[segment] as Record<string, unknown>;
-        node[segments[segments.length - 1]] = materialize(expression.value, { inputs, steps });
+        node[segments[segments.length - 1]] = value;
       }
-      for (const [key, value] of Object.entries(payload)) {
-        const entry = step.operation.mapper.find((m) => m.type === 'body' && m.key === key);
-        input[entry?.inputKey ?? key] = value;
+      // Whole-body operations take the payload as-is; flattened bodies map
+      // each property through the mapper's inputKey
+      const wholeBody = step.operation.mapper.find((entry) => entry.type === 'body' && entry.wholeBody);
+      if (wholeBody) {
+        input[wholeBody.inputKey] = payload;
+      } else {
+        if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+          throw new Error('flattened request body payload must be an object');
+        }
+        for (const [key, value] of Object.entries(payload)) {
+          const entry = step.operation.mapper.find((m) => m.type === 'body' && m.key === key);
+          input[entry?.inputKey ?? key] = value;
+        }
       }
     }
 

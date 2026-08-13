@@ -26,11 +26,12 @@ describe('example: secure-loading', () => {
     }
   });
 
-  it('loads from an explicitly allowed internal host', async () => {
+  it('loads from an explicitly allowed loopback host', async () => {
     const baseUrl = await loopback.listen();
-    // Tests allow loopback deliberately; production allowlists name real hosts
+    // Internal access is opt-in, and the host allowlist restricts the
+    // exception to loopback — never disable the block globally on its own
     const tools = await loadUntrustedSpec(`${baseUrl}/openapi.json`, {
-      refResolution: { allowInternalIPs: true },
+      refResolution: { allowInternalIPs: true, allowedHosts: ['127.0.0.1'] },
     });
     expect(tools.map((tool) => tool.name)).toEqual(['ping']);
   });
