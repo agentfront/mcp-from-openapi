@@ -937,7 +937,7 @@ describe('fromArazzo remaining coverage', () => {
       ],
       { components: { parameters: { broken: { in: 'query', value: 1 } as any } } },
     );
-    await expectArazzoError(fromArazzo(doc, { sources: sources() }), /Resolved parameter requires "name" and "value"/);
+    await expectArazzoError(fromArazzo(doc, { sources: sources() }), /Parameter requires a non-empty string "name"/);
   });
 
   it('degrades direct workflow-level $response.body outputs to unknown', async () => {
@@ -1121,5 +1121,255 @@ describe('fromArazzo branch completeness', () => {
     expect(tools[0].description).toBe('Arazzo workflow: bare');
     expect(tools[0].title).toBeUndefined();
     expect(tools[1].description).toBe('Only description.');
+  });
+});
+
+describe('fromArazzo review-fix regressions', () => {
+  it('expands YAML anchors so payload expressions cover every occurrence', async () => {
+    const yamlDoc = [
+      'arazzo: 1.0.0',
+      'info: { title: F, version: "1" }',
+      'sourceDescriptions: [{ name: pets, url: "https://x" }]',
+      'workflows:',
+      '  - workflowId: w',
+      '    steps:',
+      '      - stepId: s',
+      '        operationId: createPet',
+      '        requestBody:',
+      '          payload:',
+      '            a: &shared { v: $inputs.foo }',
+      '            b: *shared',
+    ].join('\n');
+    const [tool] = await fromArazzo(yamlDoc, { sources: { pets: petstoreDoc() } });
+    const step = tool.metadata.workflow!.steps[0] as OperationStepIR;
+    expect(step.requestBody?.payloadExpressions?.map((e) => e.pointer).sort()).toEqual(['/a/v', '/b/v']);
+    expect(JSON.stringify(tool)).toBeDefined();
+  });
+
+  it('rejects cyclic YAML documents with an ArazzoError', async () => {
+    const cyclic = ['arazzo: 1.0.0', 'x: &c', '  self: *c'].join('\n');
+    await expectArazzoError(fromArazzo(cyclic, { sources: {} }), /JSON-serializable/);
+    const loop: any = { arazzo: '1.0.0' };
+    loop.self = loop;
+    await expectArazzoError(fromArazzo(loop, { sources: {} }), /JSON-serializable/);
+  });
+
+  it('supports the $message expression root', async () => {
+    expect(parseRuntimeExpression('$message.body#/x')).toEqual({
+      type: 'message',
+      raw: '$message.body#/x',
+      path: [],
+      source: 'body',
+      pointer: '/x',
+    });
+    expect(parseRuntimeExpression('$message.header.X-Id').name).toBe('X-Id');
+    const doc = arazzoWith([
+      simpleWorkflow({
+        outputs: undefined,
+        steps: [
+          {
+            stepId: 's',
+            operationId: 'getPet',
+            parameters: [{ name: 'petId', in: 'path', value: 'x' }],
+            successCriteria: [{ condition: 'ok', context: '$message.body', type: 'regex' }],
+          },
+        ],
+      }),
+    ]);
+    const [tool] = await fromArazzo(doc, { sources: sources() });
+    const step = tool.metadata.workflow!.steps[0] as OperationStepIR;
+    expect(step.successCriteria![0].context?.type).toBe('message');
+  });
+
+  it('keeps unknown-root dollar strings literal at exact boundaries', () => {
+    expect(parseExpressionValue('$request-id')).toEqual({ kind: 'literal', value: '$request-id' });
+    expect(parseExpressionValue('$urlx')).toEqual({ kind: 'literal', value: '$urlx' });
+    expect(parseExpressionValue('$inputsfoo')).toEqual({ kind: 'literal', value: '$inputsfoo' });
+  });
+
+  it('resolves dotted component names', async () => {
+    const doc = arazzoWith(
+      [
+        simpleWorkflow({
+          outputs: undefined,
+          steps: [
+            { stepId: 's', operationId: 'getPet', parameters: [{ reference: '$components.parameters.my.org.petId' }] },
+          ],
+        }),
+      ],
+      { components: { parameters: { 'my.org.petId': { name: 'petId', in: 'path', value: 'x' } } } },
+    );
+    const [tool] = await fromArazzo(doc, { sources: sources() });
+    const step = tool.metadata.workflow!.steps[0] as OperationStepIR;
+    expect(step.parameters![0].name).toBe('petId');
+  });
+
+  it('accepts cross-document dependsOn expressions and rejects malformed ones', async () => {
+    const doc = arazzoWith([
+      simpleWorkflow({ dependsOn: ['$sourceDescriptions.flows.otherWf'], outputs: undefined }),
+    ]);
+    doc.sourceDescriptions.push({ name: 'flows', url: 'https://x/flows.yaml', type: 'arazzo' });
+    const [tool] = await fromArazzo(doc, { sources: sources() });
+    expect(tool.metadata.workflow!.dependsOn).toEqual(['$sourceDescriptions.flows.otherWf']);
+
+    const badSource = arazzoWith([
+      simpleWorkflow({ dependsOn: ['$sourceDescriptions.ghost.wf'], outputs: undefined }),
+    ]);
+    await expectArazzoError(fromArazzo(badSource, { sources: sources() }), /must reference a declared source/);
+
+    const notArray = arazzoWith([simpleWorkflow({ dependsOn: 'other', outputs: undefined })]);
+    await expectArazzoError(fromArazzo(notArray, { sources: sources() }), /must be an array/);
+
+    const badEntry = arazzoWith([simpleWorkflow({ dependsOn: [42], outputs: undefined })]);
+    await expectArazzoError(fromArazzo(badEntry, { sources: sources() }), /entries must be strings/);
+  });
+
+  it('rejects non-string criterion contexts as ArazzoError, not a crash', async () => {
+    const doc = arazzoWith([
+      simpleWorkflow({
+        outputs: undefined,
+        steps: [
+          {
+            stepId: 's',
+            operationId: 'getPet',
+            parameters: [{ name: 'petId', in: 'path', value: 'x' }],
+            successCriteria: [{ condition: 'x', context: 123, type: 'regex' }],
+          },
+        ],
+      }),
+    ]);
+    await expectArazzoError(fromArazzo(doc, { sources: sources() }), /"context" must be a runtime expression string/);
+  });
+
+  it('gives cross-document workflow steps the nested-unsupported error and rejects their request bodies', async () => {
+    const crossDoc = arazzoWith([
+      simpleWorkflow({ outputs: undefined, steps: [{ stepId: 's', workflowId: '$sourceDescriptions.flows.wf' }] }),
+    ]);
+    crossDoc.sourceDescriptions.push({ name: 'flows', url: 'https://x/f.yaml', type: 'arazzo' });
+    await expectArazzoError(fromArazzo(crossDoc, { sources: sources() }), /nested Arazzo sources are not supported/);
+
+    const bodyOnWorkflow = arazzoWith([
+      simpleWorkflow({ workflowId: 'a', outputs: undefined }),
+      simpleWorkflow({
+        workflowId: 'b',
+        outputs: undefined,
+        steps: [{ stepId: 's', workflowId: 'a', requestBody: { payload: {} } }],
+      }),
+    ]);
+    await expectArazzoError(fromArazzo(bodyOnWorkflow, { sources: sources() }), /must not declare a requestBody/);
+  });
+
+  it('re-validates reusable-sourced actions and parameters fully', async () => {
+    const smuggledGoto = arazzoWith(
+      [
+        simpleWorkflow({
+          outputs: undefined,
+          steps: [{ stepId: 's', operationId: 'getPet', parameters: [{ name: 'petId', in: 'path', value: 'x' }], onSuccess: [{ reference: '$components.successActions.bad' }] }],
+        }),
+      ],
+      { components: { successActions: { bad: { name: 'g', type: 'goto' } } } },
+    );
+    await expectArazzoError(fromArazzo(smuggledGoto, { sources: sources() }), /exactly one of "workflowId" or "stepId"/);
+
+    const dupViaRefs = arazzoWith(
+      [
+        simpleWorkflow({
+          outputs: undefined,
+          steps: [
+            {
+              stepId: 's',
+              operationId: 'getPet',
+              parameters: [
+                { reference: '$components.parameters.petParam' },
+                { reference: '$components.parameters.petParam' },
+              ],
+            },
+          ],
+        }),
+      ],
+      { components: { parameters: { petParam: { name: 'petId', in: 'path', value: 'x' } } } },
+    );
+    await expectArazzoError(fromArazzo(dupViaRefs, { sources: sources() }), /Duplicate parameter "petId"/);
+
+    const noIn = arazzoWith(
+      [
+        simpleWorkflow({
+          outputs: undefined,
+          steps: [{ stepId: 's', operationId: 'getPet', parameters: [{ reference: '$components.parameters.inless' }] }],
+        }),
+      ],
+      { components: { parameters: { inless: { name: 'petId', value: 'x' } as any } } },
+    );
+    await expectArazzoError(fromArazzo(noIn, { sources: sources() }), /requires "in"/);
+  });
+
+  it('never aliases the tool output schema with the embedded step schemas', async () => {
+    const [tool] = await fromArazzo(arazzoWith([simpleWorkflow()]), { sources: sources() });
+    const outputPet = (tool.outputSchema as any).properties.pet;
+    const step = tool.metadata.workflow!.steps[0] as OperationStepIR;
+    const embedded: any = step.operation.outputSchema;
+    expect(outputPet.properties).not.toBe(embedded.properties);
+    outputPet.properties.id.type = 'MUTATED';
+    expect(embedded.properties.id.type).toBe('string');
+  });
+
+  it('reports per-index paths for action criteria failures', async () => {
+    const doc = arazzoWith([
+      simpleWorkflow({
+        outputs: undefined,
+        steps: [
+          {
+            stepId: 's',
+            operationId: 'getPet',
+            parameters: [{ name: 'petId', in: 'path', value: 'x' }],
+            onFailure: [{ name: 'r', type: 'end', criteria: [{ condition: 'ok' }, { condition: '' }] }],
+          },
+        ],
+      }),
+    ]);
+    await expectArazzoError(
+      fromArazzo(doc, { sources: sources() }),
+      /non-empty string "condition"/,
+      '/workflows/0/steps/0/onFailure/0/criteria/1',
+    );
+  });
+});
+
+describe('fromArazzo location-less parameters through resolution', () => {
+  it('resolves in-less workflow and nested-step parameters and dedupes them', async () => {
+    const doc = arazzoWith(
+      [
+        simpleWorkflow({ workflowId: 'inner', outputs: undefined }),
+        simpleWorkflow({
+          workflowId: 'outer',
+          outputs: undefined,
+          parameters: [{ name: 'shared', value: 1 }],
+          steps: [{ stepId: 'call', workflowId: 'inner', parameters: [{ name: 'input', value: '$inputs.petId' }] }],
+        }),
+      ],
+    );
+    const tools = await fromArazzo(doc, { sources: sources() });
+    expect(tools[1].metadata.workflow!.parameters).toEqual([{ name: 'shared', value: { kind: 'literal', value: 1 } }]);
+    const step = tools[1].metadata.workflow!.steps[0] as NestedWorkflowStepIR;
+    expect(step.parameters![0].in).toBeUndefined();
+
+    const dupInless = arazzoWith(
+      [
+        simpleWorkflow({ workflowId: 'inner', outputs: undefined }),
+        simpleWorkflow({
+          workflowId: 'outer',
+          outputs: undefined,
+          steps: [
+            {
+              stepId: 'call',
+              workflowId: 'inner',
+              parameters: [{ reference: '$components.parameters.p' }, { reference: '$components.parameters.p' }],
+            },
+          ],
+        }),
+      ],
+      { components: { parameters: { p: { name: 'dup', value: 1 } as any } } },
+    );
+    await expectArazzoError(fromArazzo(dupInless, { sources: sources() }), /Duplicate parameter "dup"/);
   });
 });

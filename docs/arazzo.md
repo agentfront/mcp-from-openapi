@@ -42,9 +42,11 @@ Each operation step embeds the resolved operation's essentials — its `mapper` 
 
 **Placeholders:** a workflow tool's `metadata.path` is `arazzo:<workflowId>` and `method` is `'post'` — never feed the workflow tool itself to `buildHttpRequest`; its top-level `mapper` is `[]` by design. Executors drive each step's `operation.mapper`.
 
+**Treat the IR as immutable:** steps referencing the same operation share embedded schema/mapper structure in memory (JSON serialization is unaffected). Documents are normalized through a JSON round-trip on input — YAML anchors expand into distinct nodes, YAML-only scalars become their JSON forms, and cyclic or absurdly deep documents are rejected with `ArazzoError`. Cross-document `dependsOn` entries (`$sourceDescriptions.<name>.<workflowId>`) are accepted and carried verbatim; cross-document *step* invocations are not supported. One documented strictness deviation: `workflowId`/`stepId` must match `[A-Za-z0-9_-]+` (a SHOULD in the spec, enforced here so `$steps.<id>` references stay parseable).
+
 ## Runtime expressions
 
-Every Arazzo runtime expression is parsed into a serializable AST (`{ type, raw, path, source?, name?, pointer? }`) — `$inputs.x`, `$steps.id.outputs.y`, `$response.body#/json/pointer`, `$request.header.Name`, `$statusCode`, `$url`, `$method`, `$workflows.*`, `$sourceDescriptions.*`, `$components.*`. Strings with embedded `{$...}` become templates; strings whose `$` prefix matches no known root (like `"$50"`) stay literals. The parser is exported standalone:
+Every Arazzo runtime expression is parsed into a serializable AST (`{ type, raw, path, source?, name?, pointer? }`) — `$inputs.x`, `$steps.id.outputs.y`, `$response.body#/json/pointer`, `$request.header.Name`, `$message.body`, `$statusCode`, `$url`, `$method`, `$workflows.*`, `$sourceDescriptions.*`, `$components.*`. Strings with embedded `{$...}` become templates; strings whose `$` prefix matches no known root (like `"$50"` or `"$request-id"`) stay literals. The parser is exported standalone:
 
 ```typescript
 import { parseRuntimeExpression } from 'mcp-from-openapi';

@@ -158,6 +158,7 @@ export type RuntimeExpressionType =
   | 'statusCode'
   | 'request'
   | 'response'
+  | 'message'
   | 'inputs'
   | 'outputs'
   | 'steps'

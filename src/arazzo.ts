@@ -108,6 +108,25 @@ function err(message: string, path: string, extra?: Record<string, unknown>): ne
 // Parsing & validation
 // ---------------------------------------------------------------------------
 
+/**
+ * Normalize to plain, alias-free JSON data. The round-trip expands YAML
+ * anchors into distinct nodes (so payload expression pointers see every
+ * occurrence), converts YAML-only scalars (dates, binary) to their JSON
+ * forms, and rejects cyclic or absurdly deep structures with an ArazzoError
+ * instead of letting later passes crash.
+ */
+function toPlainJson(value: unknown): unknown {
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch (error: unknown) {
+    /* c8 ignore next -- JSON.stringify only throws Error instances */
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ArazzoError(`Arazzo document must be JSON-serializable (acyclic, bounded depth): ${message}`, {
+      path: '',
+    });
+  }
+}
+
 function parseArazzoInput(input: ArazzoDocument | string): ArazzoDocument {
   if (typeof input === 'string') {
     let parsed: unknown;
@@ -121,13 +140,13 @@ function parseArazzoInput(input: ArazzoDocument | string): ArazzoDocument {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       err('Arazzo document must be an object', '');
     }
-    return parsed as ArazzoDocument;
+    return toPlainJson(parsed) as ArazzoDocument;
   }
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     err('Arazzo document must be an object', '');
   }
   // Never mutate caller input (components inlining edits the tree)
-  return JSON.parse(JSON.stringify(input)) as ArazzoDocument;
+  return toPlainJson(input) as ArazzoDocument;
 }
 
 function validateCriteria(criteria: unknown, path: string): void {
@@ -160,6 +179,9 @@ function validateCriteria(criteria: unknown, path: string): void {
         err('Criterion "type" must be a string or a Criterion Expression Type Object', cPath);
       }
     }
+    if (criterion.context !== undefined && typeof criterion.context !== 'string') {
+      err('Criterion "context" must be a runtime expression string', cPath);
+    }
     if (effectiveType !== undefined && effectiveType !== 'simple' && criterion.context === undefined) {
       err(`Criterion of type "${effectiveType}" requires a "context" expression`, cPath);
     }
@@ -181,31 +203,36 @@ function validateActions(
       err('Action must be an object', aPath);
     }
     if ('reference' in action) {
-      return; // Reusable Object — resolved and re-validated later
+      return; // Reusable Object — resolved and re-validated in resolveActions
     }
-    const act = action as ArazzoSuccessAction & ArazzoFailureAction;
-    if (typeof act.name !== 'string' || act.name === '') {
-      err('Action requires a non-empty string "name"', aPath);
-    }
-    const allowed = kind === 'success' ? ['end', 'goto'] : ['end', 'retry', 'goto'];
-    if (!allowed.includes(act.type)) {
-      err(`Invalid ${kind}-action type "${String(act.type)}" (allowed: ${allowed.join(', ')})`, aPath);
-    }
-    const targets = [act.workflowId, act.stepId].filter((t) => t !== undefined).length;
-    if (act.type === 'goto' && targets !== 1) {
-      err('A "goto" action requires exactly one of "workflowId" or "stepId"', aPath);
-    }
-    if (act.type === 'end' && targets !== 0) {
-      err('An "end" action must not specify "workflowId" or "stepId"', aPath);
-    }
-    if (act.retryAfter !== undefined && (typeof act.retryAfter !== 'number' || act.retryAfter < 0)) {
-      err('"retryAfter" must be a non-negative number', aPath);
-    }
-    if (act.retryLimit !== undefined && (typeof act.retryLimit !== 'number' || !Number.isInteger(act.retryLimit) || act.retryLimit < 0)) {
-      err('"retryLimit" must be a non-negative integer', aPath);
-    }
-    validateCriteria(act.criteria, `${aPath}/criteria`);
+    validateActionObject(action, kind, aPath);
   });
+}
+
+/** Validation for one concrete action — also run on resolved reusables. */
+function validateActionObject(action: ArazzoSuccessAction | ArazzoFailureAction, kind: 'success' | 'failure', aPath: string): void {
+  const act = action as ArazzoSuccessAction & ArazzoFailureAction;
+  if (typeof act.name !== 'string' || act.name === '') {
+    err('Action requires a non-empty string "name"', aPath);
+  }
+  const allowed = kind === 'success' ? ['end', 'goto'] : ['end', 'retry', 'goto'];
+  if (!allowed.includes(act.type)) {
+    err(`Invalid ${kind}-action type "${String(act.type)}" (allowed: ${allowed.join(', ')})`, aPath);
+  }
+  const targets = [act.workflowId, act.stepId].filter((t) => t !== undefined).length;
+  if (act.type === 'goto' && targets !== 1) {
+    err('A "goto" action requires exactly one of "workflowId" or "stepId"', aPath);
+  }
+  if (act.type === 'end' && targets !== 0) {
+    err('An "end" action must not specify "workflowId" or "stepId"', aPath);
+  }
+  if (act.retryAfter !== undefined && (typeof act.retryAfter !== 'number' || act.retryAfter < 0)) {
+    err('"retryAfter" must be a non-negative number', aPath);
+  }
+  if (act.retryLimit !== undefined && (typeof act.retryLimit !== 'number' || !Number.isInteger(act.retryLimit) || act.retryLimit < 0)) {
+    err('"retryLimit" must be a non-negative integer', aPath);
+  }
+  validateCriteria(act.criteria, `${aPath}/criteria`);
 }
 
 function validateParameters(
@@ -224,31 +251,36 @@ function validateParameters(
       err('Parameter must be an object', pPath);
     }
     if ('reference' in parameter) {
-      return; // Reusable Object — resolved and re-validated later
+      return; // Reusable Object — resolved and re-validated in resolveParameters
     }
+    validateParameterObject(parameter, requireIn, pPath);
     const param = parameter as ArazzoParameter;
-    if (typeof param.name !== 'string' || param.name === '') {
-      err('Parameter requires a non-empty string "name"', pPath);
-    }
-    const paramName = param.name;
-    if (!('value' in param)) {
-      err(`Parameter "${paramName}" requires a "value"`, pPath);
-    }
-    if (param.in !== undefined && !PARAMETER_LOCATIONS.includes(param.in)) {
-      err(`Invalid parameter location "${String(param.in)}"`, pPath);
-    }
-    if (requireIn === true && param.in === undefined) {
-      err(`Parameter "${param.name}" on an operation step requires "in"`, pPath);
-    }
-    if (requireIn === false && param.in !== undefined) {
-      err(`Parameter "${param.name}" on a workflowId step must not specify "in"`, pPath);
-    }
-    const key = `${param.name} ${param.in ?? ''}`;
+    const key = `${param.name} ${param.in ?? ''}`;
     if (seen.has(key)) {
       err(`Duplicate parameter "${param.name}"${param.in ? ` (in: ${param.in})` : ''}`, pPath);
     }
     seen.add(key);
   });
+}
+
+/** Validation for one concrete parameter — also run on resolved reusables. */
+function validateParameterObject(param: ArazzoParameter, requireIn: boolean | undefined, pPath: string): void {
+  if (typeof param.name !== 'string' || param.name === '') {
+    err('Parameter requires a non-empty string "name"', pPath);
+  }
+  const paramName = param.name;
+  if (!('value' in param)) {
+    err(`Parameter "${paramName}" requires a "value"`, pPath);
+  }
+  if (param.in !== undefined && !PARAMETER_LOCATIONS.includes(param.in)) {
+    err(`Invalid parameter location "${String(param.in)}"`, pPath);
+  }
+  if (requireIn === true && param.in === undefined) {
+    err(`Parameter "${param.name}" on an operation step requires "in"`, pPath);
+  }
+  if (requireIn === false && param.in !== undefined) {
+    err(`Parameter "${param.name}" on a workflowId step must not specify "in"`, pPath);
+  }
 }
 
 function validateOutputs(outputs: unknown, path: string): void {
@@ -358,10 +390,11 @@ function resolveReusable<T>(
     err('Reusable Object "reference" must be a string', path);
   }
   const ast = parseRuntimeExpression(reusable.reference, path);
-  if (ast.type !== 'components' || ast.path.length !== 2 || ast.path[0] !== expectedGroup) {
+  if (ast.type !== 'components' || ast.path.length < 2 || ast.path[0] !== expectedGroup) {
     err(`Reference "${reusable.reference}" must point at $components.${expectedGroup}.<name>`, path);
   }
-  const name = ast.path[1];
+  // Component names may legally contain dots (`my.org.petId`) — re-join
+  const name = ast.path.slice(1).join('.');
   const target = components?.[expectedGroup]?.[name];
   if (!target) {
     err(`Unknown reference "$components.${expectedGroup}.${name}"`, path);
@@ -622,7 +655,7 @@ function toActionIR(
     ...(action.stepId !== undefined && { stepId: action.stepId }),
     ...(failure.retryAfter !== undefined && { retryAfter: failure.retryAfter }),
     ...(failure.retryLimit !== undefined && { retryLimit: failure.retryLimit }),
-    ...(action.criteria && { criteria: action.criteria.map((c) => toCriterionIR(c, path)) }),
+    ...(action.criteria && { criteria: action.criteria.map((c, i) => toCriterionIR(c, `${path}/criteria/${i}`)) }),
   };
 }
 
@@ -633,32 +666,34 @@ function resolveActions(
   path: string,
 ): ActionIR[] {
   const group = kind === 'success' ? 'successActions' : 'failureActions';
-  const resolved = actions.map((action, index) => {
+  return actions.map((action, index) => {
     const aPath = `${path}/${index}`;
     const concrete = resolveReusable<ArazzoSuccessAction | ArazzoFailureAction>(action, components, group, aPath);
+    // Reusable-sourced actions bypass the first validation pass — re-run the
+    // full object validation so components can't smuggle in malformed actions
+    validateActionObject(concrete, kind, aPath);
     return toActionIR(concrete, kind, aPath);
   });
-  // Reusable-sourced actions bypass the first validation pass
-  resolved.forEach((action, index) => {
-    const allowed = kind === 'success' ? ['end', 'goto'] : ['end', 'retry', 'goto'];
-    if (!allowed.includes(action.type)) {
-      err(`Invalid ${kind}-action type "${action.type}" (allowed: ${allowed.join(', ')})`, `${path}/${index}`);
-    }
-  });
-  return resolved;
 }
 
 function resolveParameters(
   parameters: Array<ArazzoParameter | ArazzoReusableObject>,
   components: ArazzoComponents | undefined,
+  requireIn: boolean | undefined,
   path: string,
 ): StepParameterIR[] {
+  const seen = new Set<string>();
   return parameters.map((parameter, index) => {
     const pPath = `${path}/${index}`;
     const concrete = resolveReusable<ArazzoParameter>(parameter, components, 'parameters', pPath);
-    if (typeof concrete.name !== 'string' || concrete.name === '' || !('value' in concrete)) {
-      err('Resolved parameter requires "name" and "value"', pPath);
+    // Reusable-sourced parameters bypass the first validation pass — re-run
+    // the object validation and the duplicate check on the RESOLVED list
+    validateParameterObject(concrete, requireIn, pPath);
+    const key = `${concrete.name} ${concrete.in ?? ''}`;
+    if (seen.has(key)) {
+      err(`Duplicate parameter "${concrete.name}"${concrete.in ? ` (in: ${concrete.in})` : ''}`, pPath);
     }
+    seen.add(key);
     return {
       name: concrete.name,
       ...(concrete.in !== undefined && { in: concrete.in }),
@@ -681,7 +716,7 @@ async function resolveStepOperation(
   ctx: BuildContext,
   docPath: string,
 ): Promise<McpOpenAPITool> {
-  const key = `${ref.source} ${ref.method} ${ref.path}`;
+  const key = `${ref.source} ${ref.method} ${ref.path}`;
   let cached = ctx.operationCache.get(key);
   if (!cached) {
     const generator = requireGenerator(ctx.sources, ref.source, docPath);
@@ -703,7 +738,14 @@ async function buildStepIR(step: ArazzoStep, ctx: BuildContext, path: string): P
   const base = {
     stepId: step.stepId,
     ...(step.description !== undefined && { description: step.description }),
-    ...(step.parameters && { parameters: resolveParameters(step.parameters, components, `${path}/parameters`) }),
+    ...(step.parameters && {
+      parameters: resolveParameters(
+        step.parameters,
+        components,
+        step.workflowId !== undefined ? false : true,
+        `${path}/parameters`,
+      ),
+    }),
     ...(step.successCriteria && {
       successCriteria: step.successCriteria.map((c, i) => toCriterionIR(c, `${path}/successCriteria/${i}`)),
     }),
@@ -713,6 +755,13 @@ async function buildStepIR(step: ArazzoStep, ctx: BuildContext, path: string): P
   };
 
   if (step.workflowId !== undefined) {
+    if (step.requestBody !== undefined) {
+      err(`Step "${step.stepId}" invokes a workflow and must not declare a requestBody`, `${path}/requestBody`);
+    }
+    if (step.workflowId.startsWith('$')) {
+      // $sourceDescriptions.<name>.<workflowId> targets another Arazzo doc
+      err(`Step "${step.stepId}" invokes a workflow in another Arazzo document — nested Arazzo sources are not supported`, path);
+    }
     if (!ctx.workflowIds.has(step.workflowId)) {
       err(`Step "${step.stepId}" references unknown workflow "${step.workflowId}"`, path);
     }
@@ -842,7 +891,8 @@ function deriveOutputSchema(
   }
   if (ast.type === 'inputs') {
     const properties = isRecord(inputSchema) ? inputSchema['properties'] : undefined;
-    const target = isRecord(properties) ? properties[ast.path[0]] : undefined;
+    // Input names may legally contain dots — the whole remainder is the name
+    const target = isRecord(properties) ? properties[ast.path.join('.')] : undefined;
     return isRecord(target) ? (target as JsonSchema) : {};
   }
   if (ast.type === 'steps' && ast.path.length >= 3 && ast.path[1] === 'outputs') {
@@ -870,7 +920,10 @@ function deriveOutputsSchema(
   const properties: Record<string, JsonSchema> = {};
   for (const [name, ast] of Object.entries(outputs)) {
     const derived = deriveOutputSchema(ast, stepMap, inputSchema, 0);
-    properties[name] = { ...derived, description: `Arazzo output: ${ast.raw}` };
+    // Deep-copy so the tool's output schema never aliases the embedded step
+    // schemas inside the IR (mutating one view must not corrupt the other)
+    const copied = JSON.parse(JSON.stringify(derived)) as JsonSchema;
+    properties[name] = { ...copied, description: `Arazzo output: ${ast.raw}` };
   }
   // No `required`: outputs exist only after successful execution
   return { type: 'object', properties };
@@ -967,7 +1020,7 @@ function buildWorkflowTool(
     ...(rawInputSchema !== undefined && { inputSchema: rawInputSchema }),
     ...(workflow.dependsOn && { dependsOn: workflow.dependsOn }),
     ...(workflow.parameters && {
-      parameters: resolveParameters(workflow.parameters, ctx.doc.components, `${wPath}/parameters`),
+      parameters: resolveParameters(workflow.parameters, ctx.doc.components, undefined, `${wPath}/parameters`),
     }),
     steps: stepIRs,
     ...(workflow.successActions && {
@@ -1031,17 +1084,40 @@ export async function fromArazzo(document: ArazzoDocument | string, options: Fro
   // dependsOn edges and nested workflowId-step edges must both be acyclic
   const dependsEdges = new Map<string, string[]>();
   const nestedEdges = new Map<string, string[]>();
+  const declaredSources = new Set(doc.sourceDescriptions.map((s) => s.name));
   doc.workflows.forEach((workflow, index) => {
-    const targets = workflow.dependsOn ?? [];
-    for (const target of targets) {
+    if (workflow.dependsOn !== undefined && !Array.isArray(workflow.dependsOn)) {
+      err(`Workflow "${workflow.workflowId}" dependsOn must be an array of workflowIds`, `/workflows/${index}/dependsOn`);
+    }
+    const localTargets: string[] = [];
+    for (const target of workflow.dependsOn ?? []) {
+      if (typeof target !== 'string') {
+        err(`Workflow "${workflow.workflowId}" dependsOn entries must be strings`, `/workflows/${index}/dependsOn`);
+      }
+      if (target.startsWith('$')) {
+        // Cross-document form (spec-mandated for external workflows):
+        // $sourceDescriptions.<name>.<workflowId> — carried verbatim in the
+        // IR, outside the local cycle graph
+        const ast = parseRuntimeExpression(target, `/workflows/${index}/dependsOn`);
+        if (ast.type !== 'sourceDescriptions' || ast.path.length < 2 || !declaredSources.has(ast.path[0])) {
+          err(
+            `Workflow "${workflow.workflowId}" dependsOn "${target}" must reference a declared source ($sourceDescriptions.<name>.<workflowId>)`,
+            `/workflows/${index}/dependsOn`,
+          );
+        }
+        continue;
+      }
       if (!workflowIds.has(target)) {
         err(`Workflow "${workflow.workflowId}" dependsOn unknown workflow "${target}"`, `/workflows/${index}/dependsOn`);
       }
+      localTargets.push(target);
     }
-    dependsEdges.set(workflow.workflowId, targets);
+    dependsEdges.set(workflow.workflowId, localTargets);
     nestedEdges.set(
       workflow.workflowId,
-      workflow.steps.filter((s) => s.workflowId !== undefined).map((s) => s.workflowId as string),
+      workflow.steps
+        .filter((s) => s.workflowId !== undefined && !s.workflowId.startsWith('$'))
+        .map((s) => s.workflowId as string),
     );
   });
   checkCycles(dependsEdges, 'dependsOn chain');

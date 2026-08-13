@@ -2,7 +2,7 @@
  * Arazzo runtime-expression parsing.
  *
  * Hand-rolled tokenizer over the Arazzo 1.0 runtime-expression grammar
- * (`$url`, `$method`, `$statusCode`, `$request.…`, `$response.…`, `$inputs.…`,
+ * (`$url`, `$method`, `$statusCode`, `$request.…`, `$response.…`, `$message.…`, `$inputs.…`,
  * `$outputs.…`, `$steps.…`, `$workflows.…`, `$sourceDescriptions.…`,
  * `$components.…`), producing a small serializable AST. Expressions are
  * parsed, never evaluated.
@@ -25,8 +25,12 @@ const DOTTED_ROOTS: Record<string, RuntimeExpressionType> = {
   $components: 'components',
 };
 
-/** All roots the grammar knows, used to decide expression-vs-literal. */
-const KNOWN_ROOT = /^\$(url|method|statusCode|request|response|inputs|outputs|steps|workflows|sourceDescriptions|components)\b/;
+/**
+ * All roots the grammar knows, with the exact boundary each requires —
+ * used to decide expression-vs-literal. `$request-id` matches no root
+ * (the source roots require a literal dot) and stays a literal.
+ */
+const KNOWN_ROOT = /^\$(?:(?:url|method|statusCode)$|(?:request|response|message)\.|(?:inputs|outputs|steps|workflows|sourceDescriptions|components)\.)/;
 
 function fail(message: string, docPath: string, expression: string): never {
   throw new ArazzoError(message, { path: docPath, expression });
@@ -35,7 +39,12 @@ function fail(message: string, docPath: string, expression: string): never {
 /** RFC 7230 token characters (header names). */
 const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
-function parseSourceRef(prefix: 'request' | 'response', rest: string, raw: string, docPath: string): RuntimeExpressionAST {
+function parseSourceRef(
+  prefix: 'request' | 'response' | 'message',
+  rest: string,
+  raw: string,
+  docPath: string,
+): RuntimeExpressionAST {
   if (rest.startsWith('header.')) {
     const name = rest.slice('header.'.length);
     if (name === '' || !TOKEN.test(name)) {
@@ -80,9 +89,10 @@ export function parseRuntimeExpression(raw: string, docPath = ''): RuntimeExpres
     }
   }
 
-  if (raw.startsWith('$request.') || raw.startsWith('$response.')) {
-    const prefix = raw.startsWith('$request.') ? 'request' : 'response';
-    return parseSourceRef(prefix, raw.slice(prefix.length + 2), raw, docPath);
+  for (const prefix of ['request', 'response', 'message'] as const) {
+    if (raw.startsWith(`$${prefix}.`)) {
+      return parseSourceRef(prefix, raw.slice(prefix.length + 2), raw, docPath);
+    }
   }
 
   const dot = raw.indexOf('.');
