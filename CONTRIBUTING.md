@@ -22,6 +22,7 @@ Useful commands:
 | `yarn test`             | Run all tests (unit + integration)    |
 | `yarn test:unit`        | Unit tests only                       |
 | `yarn test:integration` | Integration tests only                |
+| `yarn test:e2e`         | E2E story suite (run `yarn build` first) |
 | `yarn test:coverage`    | Tests with the enforced coverage gate |
 | `yarn build`            | Build CJS + ESM + type declarations   |
 

@@ -58,7 +58,9 @@ export class Validator {
         code: 'NO_PATHS',
       });
     } else {
-      this.validatePaths(document.paths, errors, warnings);
+      const componentParameters =
+        (document as { components?: { parameters?: Record<string, unknown> } }).components?.parameters ?? {};
+      this.validatePaths(document.paths, componentParameters, errors, warnings);
     }
 
     // Check servers
@@ -96,8 +98,21 @@ export class Validator {
   /**
    * Validate paths
    */
+  /**
+   * Resolve a local `#/components/parameters/<name>` reference (JSON Pointer
+   * tokens decoded). Returns undefined for external or dangling references.
+   */
+  private resolveParameterRef(param: any, componentParameters: Record<string, unknown>): any {
+    if (!param || typeof param !== 'object' || !('$ref' in param)) return param;
+    const match = /^#\/components\/parameters\/(.+)$/.exec(String(param.$ref));
+    if (!match) return undefined;
+    const name = match[1].replace(/~1/g, '/').replace(/~0/g, '~');
+    return componentParameters[name];
+  }
+
   private validatePaths(
     paths: Record<string, any>,
+    componentParameters: Record<string, unknown>,
     errors: ValidationErrorDetail[],
     warnings: ValidationWarning[]
   ): void {
@@ -117,11 +132,19 @@ export class Validator {
       const methods = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
       let hasOperations = false;
 
+      // Path-item-level parameters apply to every operation (OpenAPI 4.8.9).
+      // They get their own validation pass (their location is the path item,
+      // not any single operation) before contributing to template coverage.
+      const pathLevelParameters = Array.isArray(pathItem.parameters) ? pathItem.parameters : [];
+      if (pathLevelParameters.length > 0) {
+        this.validateParameters(pathLevelParameters, `/paths/${path}/parameters`, errors, warnings);
+      }
+
       for (const method of methods) {
         const operation = pathItem[method];
         if (operation) {
           hasOperations = true;
-          this.validateOperation(operation, path, method, errors, warnings);
+          this.validateOperation(operation, path, method, errors, warnings, pathLevelParameters, componentParameters);
         }
       }
 
@@ -143,7 +166,9 @@ export class Validator {
     path: string,
     method: string,
     errors: ValidationErrorDetail[],
-    warnings: ValidationWarning[]
+    warnings: ValidationWarning[],
+    pathLevelParameters: any[] = [],
+    componentParameters: Record<string, unknown> = {}
   ): void {
     const basePath = `/paths/${path}/${method}`;
 
@@ -167,19 +192,26 @@ export class Validator {
 
     // Validate parameters
     if (operation.parameters) {
-      this.validateParameters(operation.parameters, path, method, errors, warnings);
+      this.validateParameters(operation.parameters, `${basePath}/parameters`, errors, warnings);
     }
 
-    // Check for path parameters in path string
+    // Check for path parameters in path string. Path-item-level parameters
+    // count too — the spec merges them into every operation. Local
+    // `#/components/parameters/...` references are resolved so a query-param
+    // ref cannot mask a missing path variable; only refs that CANNOT be
+    // resolved here (external or dangling) defer the check to the
+    // dereferenced validation pass in initialize().
+    const allParameters = [...pathLevelParameters, ...(operation.parameters ?? [])].map((p: any) =>
+      this.resolveParameterRef(p, componentParameters),
+    );
+    const hasUnresolvableRefs = allParameters.some((p: any) => p === undefined);
     const pathParams = path.match(/\{([^{}]+)\}/g)?.map((p) => p.slice(1, -1)) ?? [];
     const definedPathParams = new Set(
-      operation.parameters
-        ?.filter((p: any) => p.in === 'path')
-        .map((p: any) => p.name) ?? []
+      allParameters.filter((p: any) => p && p.in === 'path').map((p: any) => p.name)
     );
 
     for (const param of pathParams) {
-      if (!definedPathParams.has(param)) {
+      if (!hasUnresolvableRefs && !definedPathParams.has(param)) {
         errors.push({
           message: `Path parameter '${param}' not defined in parameters: ${method.toUpperCase()} ${path}`,
           path: `${basePath}/parameters`,
@@ -194,16 +226,20 @@ export class Validator {
    */
   private validateParameters(
     parameters: any[],
-    path: string,
-    method: string,
+    basePath: string,
     errors: ValidationErrorDetail[],
     warnings: ValidationWarning[]
   ): void {
-    const basePath = `/paths/${path}/${method}/parameters`;
 
     for (let i = 0; i < parameters.length; i++) {
       const param = parameters[i];
       const paramPath = `${basePath}/${i}`;
+
+      // Reference Objects are opaque until dereferenced (initialize() resolves
+      // them before its validation pass) — structural checks don't apply
+      if (param && typeof param === 'object' && '$ref' in param) {
+        continue;
+      }
 
       if (!param.name) {
         errors.push({

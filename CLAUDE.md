@@ -60,6 +60,7 @@ OpenAPIToolGenerator (src/generator.ts)
 yarn test              # Run all tests (unit + integration)
 yarn test:unit         # Run unit tests only
 yarn test:integration  # Run integration tests only
+yarn test:e2e          # E2E story suite (requires `yarn build` first — the packaging story consumes dist/)
 yarn test:coverage     # Run tests with coverage report
 yarn build             # Build CJS + ESM + type declarations
 yarn build:cjs         # Build CommonJS output only
@@ -81,16 +82,19 @@ yarn clean             # Remove dist/ and coverage/
 
 - **Framework**: Jest 29 with SWC transformer (`@swc/jest`)
 - **Coverage provider**: V8 (`coverageProvider: 'v8'` in jest.config.js)
-- **Coverage target**: 100% statements, branches, functions, lines
+- **Coverage target**: 100% statements, branches, functions, lines — a UNIT-suite contract; the e2e suite never runs under `test:coverage`
 - **Unit tests**: `src/__tests__/*.spec.ts` (one per module)
 - **Integration tests**: `src/__tests__/integration.spec.ts` (full pipeline, imports from entrypoint only)
+- **E2E stories**: `e2e/*.e2e.ts` under `jest.e2e.config.js` (the `.e2e.ts` suffix + separate `roots` keep the suites structurally separate). Real loopback HTTP, the real MCP SDK over `InMemoryTransport`, vendored real-world specs, dist packaging, and tsc-compiled emitted declarations. `@modelcontextprotocol/sdk` and `ajv` are dev-only and must never be imported from `src/`.
+- **Tested examples**: `examples/<name>/` pairs consumer-style code (`example.ts`, importing `mcp-from-openapi` — the e2e runner maps the bare specifier onto `src/index.ts`) with a colocated `example.e2e.ts` executed by `yarn test:e2e`. Each folder has a README; the index at `examples/README.md` and `docs/examples.md` point to them. New examples must follow this shape — an untested example is a doc bug.
 - **Coverage exclusion**: `src/index.ts` (barrel file)
 
 ### Testing Patterns
 
-- **Inline specs**: Tests create OpenAPI spec objects directly (no fixture files)
-- **Real loopback servers**: URL-loading and SSRF/connection-pinning tests drive a real
-  `127.0.0.1` HTTP server (via the shared `createLoopbackServer` helper) with
+- **Inline specs (unit tests)**: Unit tests create OpenAPI spec objects directly (no fixture files). E2E story tests MAY load vendored real-world fixtures from `e2e/fixtures/` — provenance, pinned commits, and licenses documented in `e2e/fixtures/README.md`; regenerating a fixture requires updating the literal count assertions that pin it
+- **Real loopback servers**: URL-loading, SSRF/connection-pinning, and e2e wire tests drive a real
+  `127.0.0.1` HTTP server (via the shared `src/__tests__/helpers/loopback.ts` helper, which also
+  captures each request's method/url/headers/raw body for wire assertions) with
   `refResolution.allowInternalIPs`, exercising the actual Node pinned transport + SSRF guard.
   This replaces `global.fetch` mocks and `$RefParser.dereference` spies for those paths, because
   the pinned transport bypasses `global.fetch`. Use `jest.spyOn(Response.prototype, …)` for

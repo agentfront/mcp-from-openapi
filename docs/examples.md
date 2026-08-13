@@ -4,6 +4,8 @@
 
 ---
 
+> **Runnable, tested examples live in [`examples/`](https://github.com/agentfront/mcp-from-openapi/tree/main/examples)** — each folder pairs consumer-style code with an e2e test that executes it against a real server on every CI run, so they cannot rot: [quickstart MCP server](https://github.com/agentfront/mcp-from-openapi/tree/main/examples/quickstart-mcp-server), [HTTP requests](https://github.com/agentfront/mcp-from-openapi/tree/main/examples/http-requests), [secure loading](https://github.com/agentfront/mcp-from-openapi/tree/main/examples/secure-loading), [curation](https://github.com/agentfront/mcp-from-openapi/tree/main/examples/curation), [client targets](https://github.com/agentfront/mcp-from-openapi/tree/main/examples/client-targets), [typed tools](https://github.com/agentfront/mcp-from-openapi/tree/main/examples/typed-tools), [Arazzo workflows](https://github.com/agentfront/mcp-from-openapi/tree/main/examples/arazzo-workflow). The snippets below are quick-reference excerpts.
+
 ## Building an MCP Server
 
 > **Prefer `buildHttpRequest`** from the library for real integrations — see [Request Builder](./request-builder.md). This example shows the underlying mapper contract.

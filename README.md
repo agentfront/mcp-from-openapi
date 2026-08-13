@@ -156,6 +156,7 @@ for (const tool of await generator.generateTools({ target: "claude" })) {
 | [Type Signatures](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/type-signatures.md)         | TypeScript call contracts for code-execution surfaces             |
 | [Modern MCP Fields](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/modern-mcp-fields.md)     | Tool `_meta`, icons, `x-mcp-header`, elicitation descriptors      |
 | [Arazzo Workflows](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/arazzo.md)                 | fromArazzo() — Arazzo 1.0 workflows as consolidated MCP tools     |
+| [Tested Examples](https://github.com/agentfront/mcp-from-openapi/tree/main/examples)                        | Runnable examples, each executed as an e2e test on every CI run   |
 | [Response Schemas](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/response-schemas.md)       | Output schemas, status codes, oneOf unions                        |
 | [Annotations & Extensions](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/annotations.md)    | Tool title, annotation inference, `x-mcp` extension family        |
 | [Security](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/security.md)                       | SecurityResolver, all auth types, custom resolvers                |

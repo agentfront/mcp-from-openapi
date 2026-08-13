@@ -622,3 +622,31 @@ describe('toJsonSchema 2020-12 keyword traversal', () => {
     expect(result.anyOf[1]).toEqual({ type: 'null' });
   });
 });
+
+describe('toJsonSchema cycle safety', () => {
+  const { toJsonSchema } = require('../types');
+
+  it('breaks true cycles with an unconstrained schema instead of recursing forever', () => {
+    const message: any = { type: 'object', properties: {} };
+    message.properties.referencedMessage = message;
+    const result: any = toJsonSchema(message);
+    expect(result.properties.referencedMessage).toEqual({});
+  });
+
+  it('still converts diamond-shared nodes to fresh copies', () => {
+    const shared: any = { type: 'string', nullable: true };
+    const doc: any = { type: 'object', properties: { a: shared, b: shared } };
+    const result: any = toJsonSchema(doc);
+    expect(result.properties.a).toEqual({ type: ['string', 'null'] });
+    expect(result.properties.b).toEqual({ type: ['string', 'null'] });
+    expect(result.properties.a).not.toBe(result.properties.b);
+  });
+
+  it('breaks mutual cycles through composition keywords', () => {
+    const a: any = { type: 'object', properties: {} };
+    const b: any = { anyOf: [a] };
+    a.properties.b = b;
+    const result: any = toJsonSchema(a);
+    expect(result.properties.b.anyOf[0]).toEqual({});
+  });
+});

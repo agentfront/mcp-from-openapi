@@ -45,6 +45,9 @@ jobs:
       - name: Test with coverage
         run: yarn test:coverage --coverageReporters=text --coverageReporters=json-summary
 
+      - name: E2E stories (uses dist/ from the Build step)
+        run: yarn test:e2e
+
       - name: Coverage summary
         if: always()
         run: |

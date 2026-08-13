@@ -42,12 +42,22 @@ export function toSdkTool<TSchema>(
  * Without a wrapper the config carries raw JSON Schemas — suitable for the
  * low-level v1 `Server` (`tools/list` handlers) or any framework that accepts
  * JSON Schema directly. This library never imports the SDK itself.
+ *
+ * MCP requires `outputSchema` to be a root `type: 'object'` schema
+ * (structured content is an object) — real SDK clients reject listings that
+ * violate this. Output schemas with any other root (arrays, scalars, and the
+ * `includeAllResponses` status-union roots) are therefore OMITTED from the
+ * SDK config; the full schema remains available on `tool.outputSchema`.
  */
 export function toSdkTool(
   tool: McpOpenAPITool,
   wrapper?: SdkSchemaWrapper<unknown>,
 ): [name: string, config: SdkToolConfig<unknown>] {
   const wrapSchema = wrapper?.fromJsonSchema ?? ((schema: JsonSchema) => schema);
+  const outputSchema =
+    tool.outputSchema !== undefined && (tool.outputSchema as Record<string, unknown>)['type'] === 'object'
+      ? tool.outputSchema
+      : undefined;
 
   return [
     tool.name,
@@ -55,7 +65,7 @@ export function toSdkTool(
       ...(tool.title !== undefined && { title: tool.title }),
       description: tool.description,
       inputSchema: wrapSchema(tool.inputSchema),
-      ...(tool.outputSchema !== undefined && { outputSchema: wrapSchema(tool.outputSchema) }),
+      ...(outputSchema !== undefined && { outputSchema: wrapSchema(outputSchema) }),
       ...(tool.annotations !== undefined && { annotations: tool.annotations }),
     },
   ];
