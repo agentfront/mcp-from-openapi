@@ -374,7 +374,9 @@ export function buildHttpRequest(
       case 'body':
         hasBody = true;
         contentType = contentType ?? mapper.serialization?.contentType ?? 'application/json';
-        if (mapper.serialization?.binary) binaryBody = true;
+        // `binary` on a flattened param marks a FILE PART inside a multipart
+        // form; only a whole-body binary mapper makes the entire payload raw
+        if (mapper.serialization?.binary && mapper.wholeBody) binaryBody = true;
         if (mapper.wholeBody) {
           rawBody = value;
         } else {

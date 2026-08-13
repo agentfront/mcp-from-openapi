@@ -857,3 +857,40 @@ describe('serialization defaults and hardening', () => {
     expect(buildHttpRequest(digestTool, { id: '1', digestAuth: 'rawcred' }).headers['Authorization']).toBe('rawcred');
   });
 });
+
+describe('flattened multipart bodies with binary parts', () => {
+  it('builds FormData (not a raw binary body) when a body PART is binary', () => {
+    const tool: any = {
+      name: 'uploadFile',
+      description: 'd',
+      inputSchema: { type: 'object', properties: {} },
+      mapper: [
+        { inputKey: 'label', type: 'body', key: 'label', serialization: { contentType: 'multipart/form-data' } },
+        { inputKey: 'file', type: 'body', key: 'file', serialization: { contentType: 'multipart/form-data', binary: true } },
+      ],
+      metadata: { path: '/files', method: 'post' },
+    };
+    const built = buildHttpRequest(tool, { label: 'x', file: new Uint8Array([1, 2]) }, { baseUrl: 'http://h' });
+
+    expect(built.body).toBeInstanceOf(FormData);
+    expect(built.contentType).toBe('multipart/form-data');
+    // no bare content-type header: the HTTP client must set the boundary
+    expect(Object.keys(built.headers).map((h) => h.toLowerCase())).not.toContain('content-type');
+  });
+
+  it('keeps whole-body binary payloads raw', () => {
+    const tool: any = {
+      name: 'uploadRaw',
+      description: 'd',
+      inputSchema: { type: 'object', properties: {} },
+      mapper: [
+        { inputKey: 'body', type: 'body', key: 'body', wholeBody: true, serialization: { contentType: 'application/octet-stream', binary: true } },
+      ],
+      metadata: { path: '/raw', method: 'post' },
+    };
+    const bytes = new Uint8Array([1, 2, 3]);
+    const built = buildHttpRequest(tool, { body: bytes }, { baseUrl: 'http://h' });
+    expect(built.body).toBe(bytes);
+    expect(built.headers['content-type']).toBe('application/octet-stream');
+  });
+});

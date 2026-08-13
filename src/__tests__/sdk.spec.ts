@@ -14,7 +14,7 @@ const fullTool: McpOpenAPITool = {
   description: 'Lists items.',
   annotations: { readOnlyHint: true },
   inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
-  outputSchema: { type: 'array', items: { type: 'string' } },
+  outputSchema: { type: 'object', properties: { items: { type: 'array', items: { type: 'string' } } } },
   mapper: [],
   metadata: { path: '/items', method: 'get' },
 };
@@ -59,6 +59,25 @@ describe('toSdkTool', () => {
     expect(wrapped).toEqual([fullTool.inputSchema, fullTool.outputSchema]);
     expect((config.inputSchema as any).kind).toBe('wrapped');
     expect((config.outputSchema as any).kind).toBe('wrapped');
+  });
+
+  it('omits output schemas whose root is not type object (MCP requirement)', () => {
+    const arrayRoot: McpOpenAPITool = {
+      ...fullTool,
+      outputSchema: { type: 'array', items: { type: 'string' } },
+    };
+    expect('outputSchema' in toSdkTool(arrayRoot)[1]).toBe(false);
+
+    const unionRoot: McpOpenAPITool = {
+      ...fullTool,
+      outputSchema: { oneOf: [{ type: 'object' }, { type: 'string' }] } as any,
+    };
+    expect('outputSchema' in toSdkTool(unionRoot)[1]).toBe(false);
+
+    // the wrapper is never invoked for an omitted output schema
+    const wrapped: unknown[] = [];
+    toSdkTool(arrayRoot, { fromJsonSchema: (s) => (wrapped.push(s), s) });
+    expect(wrapped).toEqual([arrayRoot.inputSchema]);
   });
 
   it('spreads into a registerTool-style call for generator output', async () => {
