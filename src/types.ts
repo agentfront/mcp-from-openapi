@@ -72,9 +72,34 @@ export function isReferenceObject(obj: any): obj is ReferenceObject {
  * - OpenAPI-only `xml` metadata is dropped
  */
 export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema {
+  return convertSchema(schema, new Set());
+}
+
+/**
+ * Recursive core of `toJsonSchema`. `stack` holds the ancestors on the
+ * current path: dereferenced real-world specs can be cyclic (self-referential
+ * schemas), and a revisit within the same path breaks the cycle with an
+ * unconstrained schema instead of recursing forever. Diamond-shared nodes are
+ * NOT cached — every occurrence still converts to a fresh copy, because
+ * downstream steps annotate parameter schemas in place.
+ */
+function convertSchema(schema: SchemaObject | ReferenceObject, stack: Set<object>): JsonSchema {
   if (isReferenceObject(schema)) {
     return { $ref: schema.$ref } as JsonSchema;
   }
+  if (stack.has(schema as object)) {
+    return {} as JsonSchema;
+  }
+  stack.add(schema as object);
+  try {
+    return convertSchemaInner(schema, stack);
+  } finally {
+    stack.delete(schema as object);
+  }
+}
+
+function convertSchemaInner(schema: SchemaObject, stack: Set<object>): JsonSchema {
+  const recurse = (value: SchemaObject | ReferenceObject): JsonSchema => convertSchema(value, stack);
 
   // Handle OpenAPI 3.0 boolean exclusiveMaximum/exclusiveMinimum
   // by converting them to JSON Schema Draft 7 numeric format
@@ -160,31 +185,31 @@ export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema
   if (result['properties'] && typeof result['properties'] === 'object') {
     const props: Record<string, JsonSchema> = {};
     for (const [key, value] of Object.entries(result['properties'] as Record<string, SchemaObject | ReferenceObject>)) {
-      props[key] = toJsonSchema(value);
+      props[key] = recurse(value);
     }
     result['properties'] = props;
   }
 
   if (result['items']) {
     if (Array.isArray(result['items'])) {
-      result['items'] = (result['items'] as (SchemaObject | ReferenceObject)[]).map(toJsonSchema);
+      result['items'] = (result['items'] as (SchemaObject | ReferenceObject)[]).map(recurse);
     } else {
-      result['items'] = toJsonSchema(result['items'] as SchemaObject | ReferenceObject);
+      result['items'] = recurse(result['items'] as SchemaObject | ReferenceObject);
     }
   }
 
   if (result['additionalProperties'] && typeof result['additionalProperties'] === 'object') {
-    result['additionalProperties'] = toJsonSchema(result['additionalProperties'] as SchemaObject | ReferenceObject);
+    result['additionalProperties'] = recurse(result['additionalProperties'] as SchemaObject | ReferenceObject);
   }
 
   for (const key of ['allOf', 'anyOf', 'oneOf'] as const) {
     if (result[key] && Array.isArray(result[key])) {
-      result[key] = (result[key] as (SchemaObject | ReferenceObject)[]).map(toJsonSchema);
+      result[key] = (result[key] as (SchemaObject | ReferenceObject)[]).map(recurse);
     }
   }
 
   if (result['not']) {
-    result['not'] = toJsonSchema(result['not'] as SchemaObject | ReferenceObject);
+    result['not'] = recurse(result['not'] as SchemaObject | ReferenceObject);
   }
 
   // Remaining JSON Schema 2020-12 structural keywords, so nested `nullable`/
@@ -195,7 +220,7 @@ export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       const mapped: Record<string, JsonSchema> = {};
       for (const [name, sub] of Object.entries(value as Record<string, SchemaObject | ReferenceObject>)) {
-        mapped[name] = toJsonSchema(sub);
+        mapped[name] = recurse(sub);
       }
       result[key] = mapped;
     }
@@ -213,12 +238,12 @@ export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema
   ] as const) {
     const value = result[key];
     if (value && typeof value === 'object') {
-      result[key] = toJsonSchema(value as SchemaObject | ReferenceObject);
+      result[key] = recurse(value as SchemaObject | ReferenceObject);
     }
   }
   // Array-of-schemas keyword:
   if (Array.isArray(result['prefixItems'])) {
-    result['prefixItems'] = (result['prefixItems'] as (SchemaObject | ReferenceObject)[]).map(toJsonSchema);
+    result['prefixItems'] = (result['prefixItems'] as (SchemaObject | ReferenceObject)[]).map(recurse);
   }
 
   if (wrapNullable) {

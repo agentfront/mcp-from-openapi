@@ -655,3 +655,38 @@ describe('Validator', () => {
     });
   });
 });
+
+describe('path-item-level parameters', () => {
+  const { Validator } = require('../validator');
+
+  it('counts path-level parameters toward path template coverage', async () => {
+    const validator = new Validator();
+    const result = await validator.validate({
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1.0.0' },
+      paths: {
+        '/channels/{channel_id}': {
+          parameters: [{ name: 'channel_id', in: 'path', required: true, schema: { type: 'string' } }],
+          get: { operationId: 'getChannel', responses: { '200': { description: 'OK' } } },
+        },
+      },
+    } as any);
+    expect(result.valid).toBe(true);
+    expect((result.errors ?? []).filter((e: any) => e.code === 'MISSING_PATH_PARAMETER')).toEqual([]);
+  });
+
+  it('still flags genuinely undeclared path parameters', async () => {
+    const validator = new Validator();
+    const result = await validator.validate({
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1.0.0' },
+      paths: {
+        '/things/{id}': {
+          parameters: [{ name: 'other', in: 'query', schema: { type: 'string' } }],
+          get: { operationId: 'getThing', responses: { '200': { description: 'OK' } } },
+        },
+      },
+    } as any);
+    expect(result.errors.some((e: any) => e.code === 'MISSING_PATH_PARAMETER')).toBe(true);
+  });
+});

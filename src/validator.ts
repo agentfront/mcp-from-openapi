@@ -117,11 +117,14 @@ export class Validator {
       const methods = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
       let hasOperations = false;
 
+      // Path-item-level parameters apply to every operation (OpenAPI 4.8.9)
+      const pathLevelParameters = Array.isArray(pathItem.parameters) ? pathItem.parameters : [];
+
       for (const method of methods) {
         const operation = pathItem[method];
         if (operation) {
           hasOperations = true;
-          this.validateOperation(operation, path, method, errors, warnings);
+          this.validateOperation(operation, path, method, errors, warnings, pathLevelParameters);
         }
       }
 
@@ -143,7 +146,8 @@ export class Validator {
     path: string,
     method: string,
     errors: ValidationErrorDetail[],
-    warnings: ValidationWarning[]
+    warnings: ValidationWarning[],
+    pathLevelParameters: any[] = []
   ): void {
     const basePath = `/paths/${path}/${method}`;
 
@@ -170,12 +174,13 @@ export class Validator {
       this.validateParameters(operation.parameters, path, method, errors, warnings);
     }
 
-    // Check for path parameters in path string
+    // Check for path parameters in path string. Path-item-level parameters
+    // count too — the spec merges them into every operation.
     const pathParams = path.match(/\{([^{}]+)\}/g)?.map((p) => p.slice(1, -1)) ?? [];
     const definedPathParams = new Set(
-      operation.parameters
-        ?.filter((p: any) => p.in === 'path')
-        .map((p: any) => p.name) ?? []
+      [...pathLevelParameters, ...(operation.parameters ?? [])]
+        .filter((p: any) => p.in === 'path')
+        .map((p: any) => p.name)
     );
 
     for (const param of pathParams) {
