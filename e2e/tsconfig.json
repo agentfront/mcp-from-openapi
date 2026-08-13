@@ -3,8 +3,10 @@
   "compilerOptions": {
     "rootDir": "..",
     "noEmit": true,
-    "types": ["jest", "node"]
+    "types": ["jest", "node"],
+    "baseUrl": "..",
+    "paths": { "mcp-from-openapi": ["src/index.ts"] }
   },
-  "include": ["./**/*.ts", "../src/**/*.ts"],
+  "include": ["./**/*.ts", "../src/**/*.ts", "../examples/**/*.ts"],
   "exclude": ["../src/__tests__/**/*.spec.ts"]
 }
