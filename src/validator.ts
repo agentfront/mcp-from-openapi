@@ -117,8 +117,13 @@ export class Validator {
       const methods = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
       let hasOperations = false;
 
-      // Path-item-level parameters apply to every operation (OpenAPI 4.8.9)
+      // Path-item-level parameters apply to every operation (OpenAPI 4.8.9).
+      // They get their own validation pass (their location is the path item,
+      // not any single operation) before contributing to template coverage.
       const pathLevelParameters = Array.isArray(pathItem.parameters) ? pathItem.parameters : [];
+      if (pathLevelParameters.length > 0) {
+        this.validateParameters(pathLevelParameters, `/paths/${path}/parameters`, errors, warnings);
+      }
 
       for (const method of methods) {
         const operation = pathItem[method];
@@ -171,7 +176,7 @@ export class Validator {
 
     // Validate parameters
     if (operation.parameters) {
-      this.validateParameters(operation.parameters, path, method, errors, warnings);
+      this.validateParameters(operation.parameters, `${basePath}/parameters`, errors, warnings);
     }
 
     // Check for path parameters in path string. Path-item-level parameters
@@ -199,12 +204,10 @@ export class Validator {
    */
   private validateParameters(
     parameters: any[],
-    path: string,
-    method: string,
+    basePath: string,
     errors: ValidationErrorDetail[],
     warnings: ValidationWarning[]
   ): void {
-    const basePath = `/paths/${path}/${method}/parameters`;
 
     for (let i = 0; i < parameters.length; i++) {
       const param = parameters[i];

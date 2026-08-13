@@ -62,22 +62,32 @@ const collect = (node) => {
 collect(paths);
 if (doc.security) collect(doc.security);
 
+// JSON Pointer tokens: `~1` is `/`, `~0` is `~` (RFC 6901)
+const decodePointerSegment = (segment) => segment.replace(/~1/g, '/').replace(/~0/g, '~');
+const resolveRef = (ref) => {
+  const [, , group, name] = ref.split('/').map(decodePointerSegment);
+  return { group, name, target: doc.components?.[group]?.[name] };
+};
+
 let previousSize = -1;
 while (refs.size !== previousSize) {
   previousSize = refs.size;
   for (const ref of [...refs]) {
-    const [, , group, name] = ref.split('/');
-    const target = doc.components?.[group]?.[name];
+    const { target } = resolveRef(ref);
     if (target) collect(target);
   }
 }
 
-// 3. Copy only reachable components (securitySchemes always kept whole)
+// 3. Copy only reachable components (securitySchemes always kept whole).
+// An unresolvable reference means the trim would vendor a dangling $ref —
+// fail loudly instead of silently skipping it.
 const components = {};
 for (const ref of refs) {
-  const [, , group, name] = ref.split('/');
-  const target = doc.components?.[group]?.[name];
-  if (target === undefined) continue;
+  const { group, name, target } = resolveRef(ref);
+  if (target === undefined) {
+    console.error(`unresolved component reference: ${ref}`);
+    process.exit(1);
+  }
   components[group] ??= {};
   components[group][name] = target;
 }

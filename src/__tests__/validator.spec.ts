@@ -675,6 +675,33 @@ describe('path-item-level parameters', () => {
     expect((result.errors ?? []).filter((e: any) => e.code === 'MISSING_PATH_PARAMETER')).toEqual([]);
   });
 
+  it('validates path-level parameters with the path-item location', async () => {
+    const validator = new Validator();
+    const result = await validator.validate({
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1.0.0' },
+      paths: {
+        '/things/{id}': {
+          parameters: [
+            { name: 'id', in: 'path', required: false, schema: { type: 'string' } },
+            { name: 'filter', in: 'query' },
+          ],
+          get: { operationId: 'getThing', responses: { '200': { description: 'OK' } } },
+        },
+      },
+    } as any);
+
+    // a non-required path-level path parameter satisfies coverage but is flagged
+    expect(result.errors ?? []).toContainEqual(
+      expect.objectContaining({ code: 'PATH_PARAMETER_NOT_REQUIRED', path: '/paths//things/{id}/parameters/0/required' }),
+    );
+    expect((result.errors ?? []).some((e: any) => e.code === 'MISSING_PATH_PARAMETER')).toBe(false);
+    // a path-level parameter without schema/content is flagged at the path-item location
+    expect(result.errors ?? []).toContainEqual(
+      expect.objectContaining({ code: 'MISSING_PARAMETER_SCHEMA', path: '/paths//things/{id}/parameters/1' }),
+    );
+  });
+
   it('still flags genuinely undeclared path parameters', async () => {
     const validator = new Validator();
     const result = await validator.validate({

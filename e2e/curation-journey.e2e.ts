@@ -23,8 +23,13 @@ describe('story: curation journey over the GitHub fixture', () => {
     const rawLint = lintDocument(document());
     const vague = rawLint.findings.filter((finding) => finding.code === 'vague-description');
     expect(vague.length).toBeGreaterThan(0);
-    // finding.path is "METHOD /path" — patch that exact operation
-    const [method, opPath] = vague[0].path!.split(' ');
+    // finding.path is "METHOD /path" — validate the parse and pin the exact
+    // operation so a fixture regeneration fails loudly here, not downstream
+    const parsed = vague[0].path?.match(/^([A-Z]+) (\/\S+)$/);
+    expect(parsed).not.toBeNull();
+    const [, method, opPath] = parsed!;
+    expect(method).toBe('DELETE');
+    expect(opPath).toBe('/gists/{gist_id}');
 
     const generator = await OpenAPIToolGenerator.fromJSON(document(), {
       overlays: {

@@ -14,7 +14,7 @@ The MIT license requires the copyright notices above to accompany the redistribu
 
 ## Regenerating
 
-Trimming is done by the vendored [`trim-openapi.mjs`](./trim-openapi.mjs) (operation filter by tags or path prefixes + transitive `$ref` component closure, stable key order). Exact invocations:
+Trimming is done by the vendored [`trim-openapi.mjs`](https://github.com/agentfront/mcp-from-openapi/blob/main/e2e/fixtures/trim-openapi.mjs) (operation filter by tags or path prefixes + transitive `$ref` component closure, stable key order). Exact invocations:
 
 ```bash
 PET_SHA=8f0dd286987880b4af7bce552aca3813166f3049

@@ -110,7 +110,12 @@ export async function executeWorkflow(
       if (wholeBody) {
         input[wholeBody.inputKey] = payload;
       } else {
-        Object.assign(input, payload);
+        // buildHttpRequest reads input[mapper.inputKey]; flattened payload
+        // keys are wire names (mapper.key), which conflict renames can differ
+        for (const [key, value] of Object.entries(payload)) {
+          const entry = step.operation.mapper.find((m) => m.type === 'body' && m.key === key);
+          input[entry?.inputKey ?? key] = value;
+        }
       }
     }
 

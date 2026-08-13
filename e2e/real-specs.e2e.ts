@@ -20,7 +20,12 @@ const FIXTURES: Array<{
   { file: 'discord-trimmed-3.1.json', toolCount: 60, lintCounts: { error: 0, warning: 64, info: 72 } },
 ];
 
-const TARGETS: ClientTarget[] = ['claude', 'openai', 'gemini', 'strict'];
+const TARGETS = ['claude', 'openai', 'gemini', 'strict'] as const satisfies readonly ClientTarget[];
+// Compile-time exhaustiveness: a new ClientTarget member breaks this line
+// until it is added to TARGETS above.
+type MissingTarget = Exclude<ClientTarget, (typeof TARGETS)[number]>;
+const allTargetsCovered: [MissingTarget] extends [never] ? true : never = true;
+void allTargetsCovered;
 const MCP_NAME = /^[A-Za-z0-9_.-]+$/;
 
 const loadDocument = (file: string): OpenAPIDocument =>
@@ -73,7 +78,8 @@ describe.each(FIXTURES)('story: real spec $file', ({ file, toolCount, lintCounts
         if (Array.isArray(node)) return node.forEach(walk);
         if (!node || typeof node !== 'object') return;
         const record = node as Record<string, unknown>;
-        if (record['type'] === 'array') {
+        const type = record['type'];
+        if (type === 'array' || (Array.isArray(type) && type.includes('array'))) {
           expect(record['items'] ?? record['prefixItems']).toBeDefined();
         }
         Object.values(record).forEach(walk);
