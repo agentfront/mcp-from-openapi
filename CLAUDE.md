@@ -41,13 +41,17 @@ OpenAPIToolGenerator (src/generator.ts)
 | `src/overlay.ts`            | OpenAPI Overlay 1.0 application with a JSONPath subset (filters, recursive descent); `OverlayError`                                                                      |
 | `src/lint.ts`               | `lintDocument` agent-readiness findings (severity + fix hints); `PAGINATION_PARAM` shared regex                                                                          |
 | `src/sdk.ts`                | `toSdkTool` — registerTool-shaped output for the official MCP SDK (no SDK dependency)                                                                                    |
+| `src/type-signature.ts`     | `emitToolTypeScript` — TypeScript signature/declaration rendering of a tool's call contract (`emitTypeSignatures` option → `metadata.typescript`)                        |
+| `src/naming-presets.ts`     | `dottedNaming` — two-segment `ns.method` naming preset for CodeCall namespace binding; `CODECALL_RESERVED_NAMESPACES`                                                    |
+| `src/elicitation.ts`        | `deriveSecurityElicitations` — MCP elicitation descriptors (`{message, requestedSchema}`) from a tool's security data                                                    |
+| `src/arazzo.ts`             | `fromArazzo()` — Arazzo 1.0 parsing, source/operation resolution, workflow IR + consolidated tools (companions: `arazzo-types.ts`, `arazzo-expressions.ts`)              |
 | `src/parameter-resolver.ts` | Resolves OpenAPI parameters + requestBody into flat inputSchema with conflict resolution; flattens `allOf` bodies, flags `wholeBody`/`binary`                            |
 | `src/response-builder.ts`   | Builds outputSchema from OpenAPI responses with content-type and status code preferences                                                                                 |
 | `src/format-resolver.ts`    | Format-to-schema resolution. Built-in resolvers for uuid, date-time, email, int32, etc.                                                                                  |
 | `src/schema-builder.ts`     | Static utilities: merge, union, clone, flatten, simplify, withFormat, etc.                                                                                               |
 | `src/security-resolver.ts`  | Resolves security schemes (Bearer, Basic, Digest, API Key, OAuth2, OpenID Connect)                                                                                       |
 | `src/validator.ts`          | Validates OpenAPI document structure                                                                                                                                     |
-| `src/errors.ts`             | Error class hierarchy: LoadError, ParseError, ValidationError, GenerationError, SchemaError                                                                              |
+| `src/errors.ts`             | Error class hierarchy: LoadError, ParseError, ValidationError, GenerationError, SchemaError, OverlayError, RequestBuildError, ArazzoError                                 |
 | `src/index.ts`              | Barrel file for public exports                                                                                                                                           |
 
 ## Development Commands

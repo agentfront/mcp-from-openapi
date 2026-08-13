@@ -31,12 +31,17 @@ export interface ParameterResolverOptions {
  * Resolves parameters and handles naming conflicts
  */
 export class ParameterResolver {
-  private namingStrategy: NamingStrategy;
+  private namingStrategy: NamingStrategy & { conflictResolver: NonNullable<NamingStrategy['conflictResolver']> };
   private includeExamples: boolean;
 
   constructor(namingStrategy?: NamingStrategy, options?: ParameterResolverOptions) {
-    this.namingStrategy = namingStrategy ?? {
-      conflictResolver: this.defaultConflictResolver,
+    this.namingStrategy = {
+      ...namingStrategy,
+      // Bind a supplied resolver to its own strategy object so class-based
+      // strategies keep their `this` (we invoke it off a spread clone).
+      conflictResolver: namingStrategy?.conflictResolver
+        ? namingStrategy.conflictResolver.bind(namingStrategy)
+        : this.defaultConflictResolver,
     };
     this.includeExamples = options?.includeExamples ?? false;
   }
@@ -291,6 +296,10 @@ export class ParameterResolver {
 
     // Add parameter metadata
     (schema as any)['x-parameter-location'] = param.location;
+    if (param.location === 'header') {
+      // Original wire header name (conflict renames only change the inputKey)
+      (schema as any)['x-mcp-header'] = param.name;
+    }
     if (param.style) {
       (schema as any)['x-parameter-style'] = param.style;
     }
@@ -419,6 +428,9 @@ export class ParameterResolver {
       // (all schemes stay in the mapper either way)
       const schemeInInput = includeInInput === true || (Array.isArray(includeInInput) && includeInInput.includes(scheme));
       if (schemeInInput) {
+        if (paramLocation === 'header') {
+          (schema as any)['x-mcp-header'] = headerKey;
+        }
         properties[inputKey] = schema;
         required.push(inputKey);
       }

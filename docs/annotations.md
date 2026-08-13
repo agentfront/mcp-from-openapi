@@ -42,7 +42,7 @@ Disable inference with `{ inferAnnotations: false }`; extension overrides (below
 
 ## Extension Overrides
 
-Spec authors can override the tool name, title, description, and annotations — and exclude operations entirely — through the `x-mcp` extension family at the **operation level**. Three dialects are read, in ascending precedence (later wins field-by-field):
+Spec authors can override the tool name, title, description, annotations, `_meta` entries, and icons — and exclude operations entirely — through the `x-mcp` extension family at the **operation level**. Three dialects are read, in ascending precedence (later wins field-by-field; `meta` merges key-by-key, `icons` replaces wholesale, and `x-speakeasy-mcp` supports neither):
 
 ### 1. `x-speakeasy-mcp` (interop)
 
@@ -78,7 +78,7 @@ x-mcp:
 
 ### 3. `x-frontmcp` (canonical, highest precedence)
 
-Only its `annotations` block participates here (including `annotations.title`); the rest of the extension (cache, codecall, tags, examples, ...) flows through `tool.metadata.frontmcp` untouched — see [x-frontmcp Extension](./x-frontmcp.md).
+Its `annotations` block (including `annotations.title`, which also becomes the tool title), `meta`, and `icons` map onto tool overrides; the rest of the extension (cache, codecall, tags, examples, ...) flows through `tool.metadata.frontmcp` untouched — see [x-frontmcp Extension](./x-frontmcp.md).
 
 ```yaml
 x-frontmcp:
@@ -117,7 +117,7 @@ inferAnnotationsFromMethod('delete');
 // { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
 
 extractExtensionOverrides(operation);
-// { disabled?, name?, title?, description?, annotations? }
+// { disabled?, name?, title?, description?, annotations?, meta?, icons? }
 ```
 
 ---

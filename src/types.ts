@@ -270,6 +270,26 @@ export interface ToolAnnotations {
 }
 
 /**
+ * Tool icon (MCP spec 2025-11-25).
+ */
+export interface ToolIcon {
+  /**
+   * Icon URI (`https:` or `data:`).
+   */
+  src: string;
+
+  /**
+   * MIME type, e.g. `image/png`.
+   */
+  mimeType?: string;
+
+  /**
+   * Sizes the icon is available in, e.g. `['48x48', 'any']`.
+   */
+  sizes?: string[];
+}
+
+/**
  * Main MCP Tool definition generated from OpenAPI.
  *
  * `TMeta` lets embedding frameworks extend the metadata contract without
@@ -299,6 +319,23 @@ export interface McpOpenAPITool<TMeta extends ToolMetadata = ToolMetadata> {
    * precedence).
    */
   annotations?: ToolAnnotations;
+
+  /**
+   * MCP `_meta` (spec 2025-06-18): namespaced, client-visible metadata.
+   * Contains the `dev.agentfront.openapi/operation` entry when
+   * `GenerateOptions.emitMeta` is set, plus any `meta` object supplied via
+   * the `x-mcp` / `x-frontmcp` extensions (emitted even when the flag is
+   * off). Extension keys under `dev.agentfront.openapi/` are ignored, and
+   * pollution-gadget keys are stripped recursively.
+   */
+  _meta?: Record<string, unknown>;
+
+  /**
+   * Tool icons (MCP spec 2025-11-25). From `x-frontmcp.icons` /
+   * `x-mcp.icons`, or the document's `info['x-logo']` when
+   * `GenerateOptions.inheritDocumentIcons` is set.
+   */
+  icons?: ToolIcon[];
 
   /**
    * Combined input schema including all parameters
@@ -523,6 +560,23 @@ export interface ToolMetadata {
    * present only when there is something to know.
    */
   responseHints?: ResponseHints;
+
+  /**
+   * TypeScript rendering of the tool's call contract — present when
+   * `GenerateOptions.emitTypeSignatures` is set. Computed on the FINAL
+   * schemas (after formats, depth truncation, trimming, and client-target
+   * transforms). The return type is the UNWRAPPED response type.
+   */
+  typescript?: import('./type-signature').ToolTypeScriptInfo;
+
+  /**
+   * Arazzo workflow IR — present only on tools produced by `fromArazzo()`.
+   * When set, `path`/`method` are non-HTTP placeholders
+   * (`arazzo:<workflowId>` / `'post'`); executors must drive requests from
+   * `workflow.steps[*].operation.mapper`, never from this tool's (empty)
+   * top-level mapper.
+   */
+  workflow?: import('./arazzo-types').WorkflowIR;
 }
 
 /**
@@ -586,6 +640,16 @@ export interface FrontMcpExtensionData {
     input: Record<string, unknown>;
     output?: unknown;
   }>;
+
+  /**
+   * MCP `_meta` entries to emit on the tool.
+   */
+  meta?: Record<string, unknown>;
+
+  /**
+   * Tool icons to emit on the tool.
+   */
+  icons?: ToolIcon[];
 }
 
 /**
@@ -978,6 +1042,38 @@ export interface GenerateOptions {
    * When used without `resolveFormats`, only custom resolvers are applied.
    */
   formatResolvers?: Record<string, FormatResolver>;
+
+  /**
+   * Emit a TypeScript rendering of each tool's call contract as
+   * `metadata.typescript = { signature, declaration }`. The signature is a
+   * one-line arrow type with inline anonymous types; the declaration is a
+   * self-contained block with named `<ToolName>Input` / `<ToolName>Output`
+   * types and JSDoc from schema descriptions. Computed on the FINAL schemas
+   * (after format resolution, depth truncation, trimming, and client-target
+   * transforms). The return type is the unwrapped OpenAPI response type —
+   * consumers that wrap results must wrap the type themselves.
+   * @default false
+   */
+  emitTypeSignatures?: boolean;
+
+  /**
+   * Emit `_meta['dev.agentfront.openapi/operation']` on every tool with the
+   * source operation's coordinates: `{ path, method, operationId?, tags?,
+   * deprecated?, specTitle?, specVersion? }` (reverse-DNS key per MCP `_meta`
+   * conventions). Extension-supplied `meta` (`x-mcp` / `x-frontmcp`) merges
+   * on top and is emitted even when this flag is off.
+   * @default false
+   */
+  emitMeta?: boolean;
+
+  /**
+   * When an operation has no extension-supplied icons, fall back to the
+   * document's `info['x-logo']` (Redoc convention) as a single icon applied
+   * to every tool. Off by default so one logo doesn't silently inflate all
+   * tool definitions.
+   * @default false
+   */
+  inheritDocumentIcons?: boolean;
 }
 
 /**
@@ -991,22 +1087,25 @@ export type FormatResolver = (schema: JsonSchema) => JsonSchema;
  */
 export interface NamingStrategy {
   /**
-   * Resolver function for parameter name conflicts
+   * Resolver function for parameter name conflicts.
    * @param paramName - Original parameter name
    * @param location - Parameter location
    * @param index - Index of conflicting parameter (0-based)
    * @returns New parameter name
+   * @default a location-prefix resolver (`headerX_Trace`-style)
    */
-  conflictResolver: (paramName: string, location: ParameterLocation, index: number) => string;
+  conflictResolver?: (paramName: string, location: ParameterLocation, index: number) => string;
 
   /**
    * Function to generate tool names
    * @param path - OpenAPI path
    * @param method - HTTP method
-   * @param operationId - Operation ID if available
+   * @param operationId - Operation ID if available (an `x-mcp` family name
+   *   override arrives through this argument in place of the operationId)
+   * @param operation - The full operation object (for tag-aware strategies)
    * @returns Tool name
    */
-  toolNameGenerator?: (path: string, method: HTTPMethod, operationId?: string) => string;
+  toolNameGenerator?: (path: string, method: HTTPMethod, operationId?: string, operation?: OperationObject) => string;
 }
 
 /**

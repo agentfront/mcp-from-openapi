@@ -150,6 +150,9 @@ for (const tool of await generator.generateTools({ target: "claude" })) {
 | [Request Builder](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/request-builder.md)         | `buildHttpRequest` — full OpenAPI parameter serialization         |
 | [Client Targets](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/client-targets.md)           | Per-client schema dialects (Claude, OpenAI, Gemini)               |
 | [Curation](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/curation.md)                       | Token budgets, overlays, lint, trimming, response hints           |
+| [Type Signatures](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/type-signatures.md)         | TypeScript call contracts for code-execution surfaces             |
+| [Modern MCP Fields](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/modern-mcp-fields.md)     | Tool `_meta`, icons, `x-mcp-header`, elicitation descriptors      |
+| [Arazzo Workflows](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/arazzo.md)                 | fromArazzo() — Arazzo 1.0 workflows as consolidated MCP tools     |
 | [Response Schemas](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/response-schemas.md)       | Output schemas, status codes, oneOf unions                        |
 | [Annotations & Extensions](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/annotations.md)    | Tool title, annotation inference, `x-mcp` extension family        |
 | [Security](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/security.md)                       | SecurityResolver, all auth types, custom resolvers                |

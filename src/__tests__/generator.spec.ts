@@ -1,4 +1,5 @@
 import { OpenAPIToolGenerator } from '../generator';
+import { toPascalIdentifier } from '../type-signature';
 import { ParameterResolver } from '../parameter-resolver';
 import { ResponseBuilder } from '../response-builder';
 import { ParseError, LoadError } from '../errors';
@@ -4487,5 +4488,257 @@ describe('OverlayError identity through factory methods', () => {
     } finally {
       await loopback.close();
     }
+  });
+});
+
+describe('TypeScript signature emission (emitTypeSignatures)', () => {
+  const spec: any = {
+    openapi: '3.0.0',
+    info: { title: 'Sig API', version: '1.0.0' },
+    paths: {
+      '/users/{id}': {
+        get: {
+          operationId: 'getUser',
+          summary: 'Get a user',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': {
+              description: 'OK',
+              content: {
+                'application/json': {
+                  schema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  it('emits metadata.typescript from the final schemas when enabled', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tool = await generator.generateTool('/users/{id}', 'get', { emitTypeSignatures: true });
+
+    expect(tool.metadata.typescript).toBeDefined();
+    expect(tool.metadata.typescript?.signature).toBe('(input: { id: string }) => Promise<{ name: string }>');
+    expect(tool.metadata.typescript?.declaration).toContain('interface GetUserInput {');
+    expect(tool.metadata.typescript?.declaration).toContain('declare function getUser(input: GetUserInput): Promise<GetUserOutput>;');
+    // the tool description leads the declaration as JSDoc
+    expect(tool.metadata.typescript?.declaration).toContain('/** Get a user */');
+  });
+
+  it('does not emit metadata.typescript by default', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tool = await generator.generateTool('/users/{id}', 'get');
+    expect(tool.metadata.typescript).toBeUndefined();
+  });
+
+  it('recomputes the declaration when collision dedup renames a tool', async () => {
+    const dupSpec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Dup API', version: '1.0.0' },
+      paths: {
+        '/a': { get: { operationId: 'dupOp', responses: { '200': { description: 'OK' } } } },
+        '/b': { post: { operationId: 'dupOp', responses: { '200': { description: 'OK' } } } },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(dupSpec, { validate: false });
+    const tools = await generator.generateTools({ emitTypeSignatures: true });
+
+    expect(tools[1].name).toMatch(/^dupOp_[0-9a-f]{8}$/);
+    expect(tools[0].metadata.typescript?.declaration).toContain('DupOpInput');
+    const dedupedPascal = toPascalIdentifier(tools[1].name);
+    expect(dedupedPascal).not.toBe('DupOp');
+    expect(tools[1].metadata.typescript?.declaration).toContain(`${dedupedPascal}Input`);
+    expect(tools[1].metadata.typescript?.declaration).not.toContain('DupOpInput =');
+  });
+});
+
+describe('Type-signature depth follows maxSchemaDepth', () => {
+  it('prints levels beyond the old printer default when the schema carries them', async () => {
+    // Build a 9-level-deep response schema: l1.l2....l9: string
+    let leaf: any = { type: 'string' };
+    for (let i = 9; i >= 1; i--) {
+      leaf = { type: 'object', properties: { [`l${i}`]: leaf } };
+    }
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Deep API', version: '1.0.0' },
+      paths: {
+        '/deep': {
+          get: {
+            operationId: 'getDeep',
+            responses: { '200': { description: 'OK', content: { 'application/json': { schema: leaf } } } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tool = await generator.generateTool('/deep', 'get', { emitTypeSignatures: true });
+    // depth 10 default: all 9 object levels print; the leaf string survives
+    expect(tool.metadata.typescript?.signature).toContain('l9?: string');
+  });
+});
+
+describe('Modern-spec surface: _meta, icons, x-mcp-header', () => {
+  const baseSpec = (): any => ({
+    openapi: '3.0.0',
+    info: { title: 'Meta API', version: '2.0.0', 'x-logo': { url: 'https://example.com/logo.png' } },
+    paths: {
+      '/items': {
+        get: {
+          operationId: 'listItems',
+          tags: ['items'],
+          deprecated: true,
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+    },
+  });
+
+  it('emits the namespaced operation _meta entry when emitMeta is set', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(baseSpec(), { validate: false });
+    const tool = await generator.generateTool('/items', 'get', { emitMeta: true });
+    expect(tool._meta).toEqual({
+      'dev.agentfront.openapi/operation': {
+        path: '/items',
+        method: 'get',
+        operationId: 'listItems',
+        tags: ['items'],
+        deprecated: true,
+        specTitle: 'Meta API',
+        specVersion: '2.0.0',
+      },
+    });
+  });
+
+  it('elides absent operation fields from the _meta entry', async () => {
+    const spec = baseSpec();
+    spec.info = { title: 'Meta API', version: '2.0.0' };
+    spec.paths['/items'].get = { responses: { '200': { description: 'OK' } } };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tool = await generator.generateTool('/items', 'get', { emitMeta: true });
+    const entry = (tool._meta as any)['dev.agentfront.openapi/operation'];
+    expect(entry).toEqual({ path: '/items', method: 'get', specTitle: 'Meta API', specVersion: '2.0.0' });
+  });
+
+  it('omits _meta entirely by default and passes extension meta through even then', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(baseSpec(), { validate: false });
+    const plain = await generator.generateTool('/items', 'get');
+    expect(plain._meta).toBeUndefined();
+
+    const spec = baseSpec();
+    spec.paths['/items'].get['x-mcp'] = { meta: { 'com.example/flag': true } };
+    const extGenerator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tool = await extGenerator.generateTool('/items', 'get');
+    expect(tool._meta).toEqual({ 'com.example/flag': true });
+  });
+
+  it('protects the generated reserved namespace from extension spoofing', async () => {
+    const spec = baseSpec();
+    spec.paths['/items'].get['x-frontmcp'] = {
+      meta: { 'dev.agentfront.openapi/operation': { path: '/FAKE', method: 'delete' }, 'com.example/ok': 1 },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const withFlag = await generator.generateTool('/items', 'get', { emitMeta: true });
+    expect((withFlag._meta as any)['dev.agentfront.openapi/operation'].path).toBe('/items');
+    expect((withFlag._meta as any)['com.example/ok']).toBe(1);
+
+    const withoutFlag = await generator.generateTool('/items', 'get');
+    expect((withoutFlag._meta as any)['dev.agentfront.openapi/operation']).toBeUndefined();
+    expect((withoutFlag._meta as any)['com.example/ok']).toBe(1);
+
+    // Only reserved keys supplied and flag off -> no _meta at all
+    const onlyReserved = baseSpec();
+    onlyReserved.paths['/items'].get['x-mcp'] = { meta: { 'dev.agentfront.openapi/operation': { path: '/FAKE' } } };
+    const g2 = await OpenAPIToolGenerator.fromJSON(onlyReserved, { validate: false });
+    expect((await g2.generateTool('/items', 'get'))._meta).toBeUndefined();
+  });
+
+  it('rejects non-https document logos', async () => {
+    const spec = baseSpec();
+    spec.info['x-logo'] = 'javascript:alert(1)';
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    expect((await generator.generateTool('/items', 'get', { inheritDocumentIcons: true })).icons).toBeUndefined();
+  });
+
+  it('merges extension meta over the generated entry with x-frontmcp winning', async () => {
+    const spec = baseSpec();
+    spec.paths['/items'].get['x-mcp'] = { meta: { 'com.example/flag': true, 'com.example/level': 1 } };
+    spec.paths['/items'].get['x-frontmcp'] = { meta: { 'com.example/level': 2 } };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tool = await generator.generateTool('/items', 'get', { emitMeta: true });
+    expect((tool._meta as any)['com.example/flag']).toBe(true);
+    expect((tool._meta as any)['com.example/level']).toBe(2);
+    expect((tool._meta as any)['dev.agentfront.openapi/operation']).toBeDefined();
+  });
+
+  it('emits extension icons always, and the document logo only on opt-in', async () => {
+    const spec = baseSpec();
+    spec.paths['/items'].get['x-mcp'] = { icons: [{ src: 'https://example.com/op.png', mimeType: 'image/png' }] };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tool = await generator.generateTool('/items', 'get');
+    expect(tool.icons).toEqual([{ src: 'https://example.com/op.png', mimeType: 'image/png' }]);
+
+    const plainGenerator = await OpenAPIToolGenerator.fromJSON(baseSpec(), { validate: false });
+    expect((await plainGenerator.generateTool('/items', 'get')).icons).toBeUndefined();
+    const inherited = await plainGenerator.generateTool('/items', 'get', { inheritDocumentIcons: true });
+    expect(inherited.icons).toEqual([{ src: 'https://example.com/logo.png' }]);
+  });
+
+  it('supports string x-logo and ignores malformed logos', async () => {
+    const stringLogo = baseSpec();
+    stringLogo.info['x-logo'] = 'https://example.com/s.svg';
+    const g1 = await OpenAPIToolGenerator.fromJSON(stringLogo, { validate: false });
+    expect((await g1.generateTool('/items', 'get', { inheritDocumentIcons: true })).icons).toEqual([
+      { src: 'https://example.com/s.svg' },
+    ]);
+
+    const badLogo = baseSpec();
+    badLogo.info['x-logo'] = { alt: 'no url' };
+    const g2 = await OpenAPIToolGenerator.fromJSON(badLogo, { validate: false });
+    expect((await g2.generateTool('/items', 'get', { inheritDocumentIcons: true })).icons).toBeUndefined();
+
+    const emptyLogo = baseSpec();
+    emptyLogo.info['x-logo'] = '';
+    const g3 = await OpenAPIToolGenerator.fromJSON(emptyLogo, { validate: false });
+    expect((await g3.generateTool('/items', 'get', { inheritDocumentIcons: true })).icons).toBeUndefined();
+
+    const noInfo = baseSpec();
+    delete noInfo.info;
+    const g4 = await OpenAPIToolGenerator.fromJSON(noInfo, { validate: false });
+    expect((await g4.generateTool('/items', 'get', { inheritDocumentIcons: true })).icons).toBeUndefined();
+  });
+
+  it('marks header parameters with x-mcp-header, surviving conflict renames and client targets', async () => {
+    const spec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Header API', version: '1.0.0' },
+      components: { securitySchemes: { apiAuth: { type: 'apiKey', name: 'X-Auth', in: 'header' } } },
+      paths: {
+        '/data/{trace}': {
+          get: {
+            operationId: 'getData',
+            security: [{ apiAuth: [] }],
+            parameters: [
+              { name: 'trace', in: 'path', required: true, schema: { type: 'string' } },
+              { name: 'trace', in: 'header', schema: { type: 'string' } },
+              { name: 'limit', in: 'query', schema: { type: 'integer' } },
+            ],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+    const tool = await generator.generateTool('/data/{trace}', 'get', {
+      includeSecurityInInput: true,
+      target: 'gemini',
+    });
+    const props = (tool.inputSchema as any).properties;
+    expect(props.headerTrace['x-mcp-header']).toBe('trace');
+    expect(props.limit['x-mcp-header']).toBeUndefined();
+    expect(props.apiAuth['x-mcp-header']).toBe('X-Auth');
   });
 });

@@ -1,4 +1,4 @@
-import type { FrontMcpExtensionData, HTTPMethod, OperationObject, ToolAnnotations } from './types';
+import type { FrontMcpExtensionData, HTTPMethod, OperationObject, ToolAnnotations, ToolIcon } from './types';
 
 /**
  * Tool-level overrides read from the `x-mcp` extension family on an operation.
@@ -30,6 +30,17 @@ export interface ExtensionToolOverrides {
    * Annotation overrides, merged field-by-field over inferred values.
    */
   annotations?: ToolAnnotations;
+
+  /**
+   * MCP `_meta` entries supplied by the extension (merged key-by-key across
+   * layers, emitted on the tool's `_meta` even when `emitMeta` is off).
+   */
+  meta?: Record<string, unknown>;
+
+  /**
+   * Tool icons supplied by the extension (later layers replace wholesale).
+   */
+  icons?: ToolIcon[];
 }
 
 /**
@@ -81,7 +92,80 @@ function mergeOverrides(base: ExtensionToolOverrides, layer: ExtensionToolOverri
     ...((base.annotations || layer.annotations) && {
       annotations: { ...base.annotations, ...layer.annotations },
     }),
+    ...((base.meta || layer.meta) && { meta: { ...base.meta, ...layer.meta } }),
+    ...(layer.icons !== undefined && { icons: layer.icons }),
   };
+}
+
+/** Rebuild a `_meta` contribution with pollution-gadget keys removed at every
+ * level — untrusted specs cross a trust boundary here, and JSON/YAML parsing
+ * creates `__proto__` as an own key that downstream deep-merges would follow. */
+function cleanseMeta(node: unknown, seen: Set<object>): unknown {
+  if (!node || typeof node !== 'object') {
+    return node;
+  }
+  /* c8 ignore next 3 -- extension objects come from JSON/YAML and cannot be cyclic */
+  if (seen.has(node)) {
+    return undefined;
+  }
+  seen.add(node);
+  try {
+    if (Array.isArray(node)) {
+      return node.map((item) => cleanseMeta(item, seen));
+    }
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(node)) {
+      // Literal comparisons (not a shared Set) so static analysis recognizes
+      // the prototype-pollution sanitizer
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+      out[key] = cleanseMeta(value, seen);
+    }
+    return out;
+  } finally {
+    seen.delete(node);
+  }
+}
+
+/** Accept only a plain (non-array) object as a `_meta` contribution,
+ * rebuilding it with pollution keys stripped recursively. */
+function sanitizeMeta(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return cleanseMeta(value, new Set()) as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+/**
+ * Whether an icon source URI matches the documented `ToolIcon.src` scheme
+ * contract (`https:` or `data:` only, case-insensitive). Shared by extension
+ * icon sanitization and the generator's `info['x-logo']` inheritance.
+ */
+export function isAllowedIconSrc(src: string): boolean {
+  const lower = src.toLowerCase();
+  return lower.startsWith('https:') || lower.startsWith('data:');
+}
+
+/** Keep only well-formed icon entries: objects with an `https:`/`data:`
+ * string `src`, copying just the MCP icon fields (`src`, `mimeType`, `sizes`). */
+function sanitizeIcons(value: unknown): ToolIcon[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const icons: ToolIcon[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const raw = entry as Record<string, unknown>;
+    if (typeof raw['src'] !== 'string' || !isAllowedIconSrc(raw['src'])) continue;
+    const icon: ToolIcon = { src: raw['src'] };
+    if (typeof raw['mimeType'] === 'string') {
+      icon.mimeType = raw['mimeType'];
+    }
+    if (Array.isArray(raw['sizes']) && raw['sizes'].every((s) => typeof s === 'string')) {
+      icon.sizes = [...(raw['sizes'] as string[])];
+    }
+    icons.push(icon);
+  }
+  return icons.length > 0 ? icons : undefined;
 }
 
 /** Read the `x-mcp` extension off any spec node (document, path item, operation). */
@@ -165,19 +249,27 @@ export function extractExtensionOverrides(operation: OperationObject): Extension
       title: typeof ext['title'] === 'string' ? ext['title'] : undefined,
       description: typeof ext['description'] === 'string' ? ext['description'] : undefined,
       annotations: pickAnnotations(ext['annotations'] as Record<string, unknown> | undefined),
+      meta: sanitizeMeta(ext['meta']),
+      icons: sanitizeIcons(ext['icons']),
     });
   }
 
-  // 3. x-frontmcp (highest precedence): only `annotations` maps onto tool
-  // overrides; the rest of the extension (cache, codecall, tags, ...) flows
-  // through `metadata.frontmcp` untouched.
+  // 3. x-frontmcp (highest precedence): `annotations`, `meta`, and `icons`
+  // map onto tool overrides; the rest of the extension (cache, codecall,
+  // tags, ...) flows through `metadata.frontmcp` untouched.
   const frontmcp = op['x-frontmcp'] as FrontMcpExtensionData | undefined;
-  if (frontmcp && typeof frontmcp === 'object' && frontmcp.annotations) {
-    const annotations = pickAnnotations(frontmcp.annotations as Record<string, unknown>);
-    result = mergeOverrides(result, {
-      annotations,
-      title: typeof frontmcp.annotations.title === 'string' ? frontmcp.annotations.title : undefined,
-    });
+  if (frontmcp && typeof frontmcp === 'object') {
+    const layer: ExtensionToolOverrides = {
+      meta: sanitizeMeta(frontmcp.meta),
+      icons: sanitizeIcons(frontmcp.icons),
+    };
+    if (frontmcp.annotations) {
+      layer.annotations = pickAnnotations(frontmcp.annotations as Record<string, unknown>);
+      if (typeof frontmcp.annotations.title === 'string') {
+        layer.title = frontmcp.annotations.title;
+      }
+    }
+    result = mergeOverrides(result, layer);
   }
 
   return result;

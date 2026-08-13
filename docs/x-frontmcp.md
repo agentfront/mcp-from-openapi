@@ -109,6 +109,28 @@ x-frontmcp:
       input: {}
 ```
 
+### meta
+
+MCP `_meta` entries emitted on the tool (merged over `x-mcp.meta` and any generated `emitMeta` entry — see [Modern MCP Fields](./modern-mcp-fields.md)):
+
+```yaml
+x-frontmcp:
+  meta:
+    com.example/billing-tier: pro
+```
+
+### icons
+
+Tool icons (MCP 2025-11-25 shape; replaces any `x-mcp.icons` wholesale):
+
+```yaml
+x-frontmcp:
+  icons:
+    - src: https://example.com/invoice.png
+      mimeType: image/png
+      sizes: ["48x48"]
+```
+
 ---
 
 ## Accessing in Code
@@ -118,7 +140,7 @@ const tools = await generator.generateTools();
 
 for (const tool of tools) {
   if (tool.metadata.frontmcp) {
-    const { annotations, cache, codecall, tags, hideFromDiscovery, examples } = tool.metadata.frontmcp;
+    const { annotations, cache, codecall, tags, hideFromDiscovery, examples, meta, icons } = tool.metadata.frontmcp;
 
     if (annotations?.readOnlyHint) {
       // Safe to cache or retry
@@ -131,6 +153,9 @@ for (const tool of tools) {
     if (hideFromDiscovery) {
       // Skip in tool listings
     }
+
+    // meta and icons also surface on the tool itself (tool._meta / tool.icons)
+    // after sanitization — see Modern MCP Fields.
   }
 }
 ```
@@ -163,6 +188,8 @@ interface FrontMcpExtensionData {
     input: Record<string, unknown>;
     output?: unknown;
   }>;
+  meta?: Record<string, unknown>;
+  icons?: ToolIcon[];
 }
 ```
 

@@ -38,6 +38,8 @@ module.exports = {
   collectCoverageFrom: [
     'src/**/*.ts',
     '!src/index.ts',
+    // Types-only module (import type everywhere) — never loaded at runtime
+    '!src/arazzo-types.ts',
     '!src/**/*.spec.ts',
     '!src/**/*.test.ts',
     '!src/**/__tests__/**',

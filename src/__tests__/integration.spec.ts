@@ -738,3 +738,74 @@ describe('Integration: Entrypoint Exports', () => {
     expect(typeof lib.SchemaError).toBe('function');
   });
 });
+
+describe('Tier 4 surface through the entrypoint', () => {
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  const lib = require('../index');
+
+  it('runs the full Arazzo + signatures + elicitation pipeline from the barrel', async () => {
+    const petSpec: any = {
+      openapi: '3.0.0',
+      info: { title: 'Pets', version: '1.0.0' },
+      components: { securitySchemes: { auth: { type: 'http', scheme: 'bearer' } } },
+      paths: {
+        '/pets/{petId}': {
+          get: {
+            operationId: 'getPet',
+            tags: ['pets'],
+            security: [{ auth: [] }],
+            parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+            responses: {
+              '200': {
+                description: 'OK',
+                content: {
+                  'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    // Per-operation tools with the Tier 4 emissions on
+    const generator = await lib.OpenAPIToolGenerator.fromJSON(petSpec);
+    const tools = await generator.generateTools({
+      emitTypeSignatures: true,
+      emitMeta: true,
+      namingStrategy: lib.dottedNaming(),
+    });
+    expect(tools[0].name).toBe('pets.getPet');
+    expect(tools[0].metadata.typescript?.declaration).toContain('declare function petsGetPet');
+    expect(tools[0]._meta?.['dev.agentfront.openapi/operation']).toMatchObject({ path: '/pets/{petId}' });
+    expect(lib.deriveSecurityElicitations(tools[0])[0].scheme).toBe('auth');
+
+    // Arazzo consolidation over the same source, YAML in
+    const arazzoYaml = [
+      'arazzo: 1.0.0',
+      'info: { title: Flows, version: 1.0.0 }',
+      'sourceDescriptions:',
+      '  - { name: pets, url: "https://x/pets.json" }',
+      'workflows:',
+      '  - workflowId: fetchPet',
+      '    summary: Fetch a pet',
+      '    inputs: { type: object, properties: { petId: { type: string } }, required: [petId] }',
+      '    steps:',
+      '      - stepId: fetch',
+      '        operationId: getPet',
+      '        parameters:',
+      '          - { name: petId, in: path, value: $inputs.petId }',
+      '        outputs: { pet: $response.body }',
+      '    outputs: { pet: $steps.fetch.outputs.pet }',
+    ].join('\n');
+    const [workflowTool] = await lib.fromArazzo(arazzoYaml, {
+      sources: { pets: petSpec },
+      generateOptions: { emitTypeSignatures: true },
+    });
+    expect(workflowTool.name).toBe('fetchPet');
+    expect(workflowTool.metadata.workflow.steps[0].operation.mapper).toHaveLength(2);
+    expect(workflowTool.metadata.typescript?.signature).toContain('petId');
+    expect(lib.parseRuntimeExpression('$steps.fetch.outputs.pet').type).toBe('steps');
+    expect(() => lib.parseRuntimeExpression('$nope')).toThrow(lib.ArazzoError);
+  });
+});

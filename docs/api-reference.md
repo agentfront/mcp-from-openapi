@@ -141,6 +141,40 @@ Apply a client dialect's schema transforms (`'claude' | 'openai' | 'gemini' | 's
 applyClientTarget(schema: JsonSchema, target: ClientTarget): JsonSchema
 ```
 
+### fromArazzo / parseRuntimeExpression
+
+Convert an Arazzo 1.0 workflow document into consolidated MCP tools (one per workflow, IR on `metadata.workflow`); parse Arazzo runtime expressions standalone. Throws `ArazzoError` with a JSON-Pointer `path`. See [Arazzo Workflows](./arazzo.md).
+
+```typescript
+fromArazzo(document: ArazzoDocument | string, options: FromArazzoOptions): Promise<McpOpenAPITool[]>
+parseRuntimeExpression(raw: string, docPath?: string): RuntimeExpressionAST
+```
+
+### deriveSecurityElicitations
+
+Derive MCP-elicitation-compatible `{ message, requestedSchema }` credential requests from a tool's security data. See [Modern MCP Fields](./modern-mcp-fields.md).
+
+```typescript
+deriveSecurityElicitations(tool: McpOpenAPITool): SecurityElicitation[]
+```
+
+### dottedNaming
+
+Naming preset producing two-segment `ns.method` tool names bindable by code-execution namespaces (FrontMCP CodeCall). See [Naming Strategies](./naming-strategies.md).
+
+```typescript
+dottedNaming(options?: DottedNamingOptions): NamingStrategy
+```
+
+### emitToolTypeScript / toPascalIdentifier
+
+Render a tool's call contract as TypeScript text (one-line `signature` + self-contained `declaration`). Also emitted during generation via `GenerateOptions.emitTypeSignatures` as `metadata.typescript`. See [Type Signatures](./type-signatures.md).
+
+```typescript
+emitToolTypeScript(toolName: string, description: string | undefined, inputSchema: JsonSchema, outputSchema?: JsonSchema, options?: TypeSignatureOptions): ToolTypeScriptInfo
+toPascalIdentifier(toolName: string): string
+```
+
 ### analyzeToolSet / estimateToolTokens
 
 Context-budget analysis: per-tool token estimates (heaviest first) and curation warnings. See [Curation](./curation.md).

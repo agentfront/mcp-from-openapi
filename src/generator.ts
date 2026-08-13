@@ -21,19 +21,21 @@ import type {
   ServerObject,
   PathItemObject,
   JsonSchema,
+  ToolIcon,
 } from './types';
 import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import { isReferenceObject } from './types';
 import { ParameterResolver } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
 import { SchemaBuilder } from './schema-builder';
-import { extractExtensionOverrides, inferAnnotationsFromMethod, resolveExtensionEnabled } from './annotations';
+import { extractExtensionOverrides, inferAnnotationsFromMethod, isAllowedIconSrc, resolveExtensionEnabled } from './annotations';
 import { applyClientTarget } from './client-targets';
 import { applyOverlay } from './overlay';
 import { lintDocument, PAGINATION_PARAM, type LintResult } from './lint';
 import { Validator } from './validator';
 import { GenerationError, LoadError, OverlayError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
+import { emitToolTypeScript } from './type-signature';
 import { isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
 
 /** MCP hard limit for tool name length (spec revision 2025-11-25, SEP-986) */
@@ -231,6 +233,31 @@ function matchesAnyGlob(path: string, globs: string[]): boolean {
  * repetition is polynomial on adversarial inputs (CodeQL js/polynomial-redos),
  * and tool names derive from uncontrolled spec data.
  */
+/**
+ * Map the document's `info['x-logo']` (Redoc convention: a URL string or an
+ * object with `url`) to a single tool icon.
+ */
+function iconsFromInfoLogo(info: unknown): ToolIcon[] | undefined {
+  if (!info || typeof info !== 'object') {
+    return undefined;
+  }
+  const logo = (info as Record<string, unknown>)['x-logo'];
+  let src: string | undefined;
+  if (typeof logo === 'string') {
+    src = logo;
+  } else if (logo && typeof logo === 'object' && !Array.isArray(logo)) {
+    const url = (logo as Record<string, unknown>)['url'];
+    if (typeof url === 'string') {
+      src = url;
+    }
+  }
+  // Same scheme contract as extension icons (https:/data: only)
+  if (src !== undefined && isAllowedIconSrc(src)) {
+    return [{ src }];
+  }
+  return undefined;
+}
+
 function trimUnderscores(value: string): string {
   let start = 0;
   let end = value.length;
@@ -243,7 +270,7 @@ function trimUnderscores(value: string): string {
  * 32-bit FNV-1a hash rendered as 8 hex chars. Used for stable, content-derived
  * name suffixes (no Node `crypto` dependency, so V8-isolate runtimes work).
  */
-function fnv1aHex(input: string): string {
+export function fnv1aHex(input: string): string {
   let hash = 0x811c9dc5;
   for (let i = 0; i < input.length; i++) {
     hash ^= input.charCodeAt(i);
@@ -260,7 +287,7 @@ function fnv1aHex(input: string): string {
  * `fallbackSeed` names the operation (method + path) when sanitization leaves
  * nothing usable.
  */
-function normalizeToolName(raw: string, maxLength: number, fallbackSeed: string): string {
+export function normalizeToolName(raw: string, maxLength: number, fallbackSeed: string): string {
   // Hash the RAW name, not the sanitized one: two raws differing only in
   // invalid characters must not collapse to the same truncation suffix.
   let hashSeed = raw;
@@ -722,6 +749,16 @@ export class OpenAPIToolGenerator {
               attempts++;
             }
             tool = { ...tool, name: deduped };
+            // The TypeScript declaration derives its type names from the tool
+            // name — recompute it so a dedup rename can't leave them stale.
+            if (tool.metadata.typescript) {
+              tool.metadata = {
+                ...tool.metadata,
+                typescript: emitToolTypeScript(deduped, tool.description, tool.inputSchema, tool.outputSchema, {
+                  maxDepth: Math.max(1, options.maxSchemaDepth ?? 10),
+                }),
+              };
+            }
           }
           usedNames.add(tool.name);
           tools.push(tool);
@@ -791,7 +828,13 @@ export class OpenAPIToolGenerator {
 
     // Generate tool name (an extension name override takes the operationId's
     // place, including as the value passed to a custom toolNameGenerator)
-    const name = this.generateToolName(pathStr, method as HTTPMethod, overrides.name ?? operation.operationId, options);
+    const name = this.generateToolName(
+      pathStr,
+      method as HTTPMethod,
+      overrides.name ?? operation.operationId,
+      options,
+      operation,
+    );
 
     // Generate description (extension override > strategy)
     const description =
@@ -890,11 +933,57 @@ export class OpenAPIToolGenerator {
       }
     }
 
+    // TypeScript call contract (computed on the FINAL schemas)
+    if (options.emitTypeSignatures) {
+      metadata.typescript = emitToolTypeScript(name, finalDescription, resolvedInputSchema, resolvedOutputSchema, {
+        // Print at least as deep as the schemas were truncated, so the
+        // emitted types never collapse levels the schema still carries.
+        maxDepth: Math.max(1, options.maxSchemaDepth ?? 10),
+      });
+    }
+
+    // MCP `_meta`: generated operation entry (opt-in) + extension pass-through (always)
+    let toolMeta: Record<string, unknown> | undefined;
+    if (overrides.meta) {
+      // Extension meta may not claim the generated reserved namespace —
+      // consumers must be able to trust `dev.agentfront.openapi/*` entries
+      toolMeta = {};
+      for (const [key, value] of Object.entries(overrides.meta)) {
+        if (!key.startsWith('dev.agentfront.openapi/')) {
+          toolMeta[key] = value;
+        }
+      }
+    }
+    if (options.emitMeta) {
+      const info = document.info as Record<string, unknown> | undefined;
+      toolMeta = {
+        ...toolMeta,
+        'dev.agentfront.openapi/operation': {
+          path: pathStr,
+          method,
+          ...(operation.operationId !== undefined && { operationId: operation.operationId }),
+          ...(operation.tags && { tags: [...operation.tags] }),
+          ...(operation.deprecated !== undefined && { deprecated: operation.deprecated }),
+          ...(typeof info?.['title'] === 'string' && { specTitle: info['title'] }),
+          ...(typeof info?.['version'] === 'string' && { specVersion: info['version'] }),
+        },
+      };
+    }
+    if (toolMeta && Object.keys(toolMeta).length === 0) {
+      toolMeta = undefined;
+    }
+
+    // Icons: extension-supplied wins; document logo only on explicit opt-in
+    const icons =
+      overrides.icons ?? (options.inheritDocumentIcons ? iconsFromInfoLogo(document.info) : undefined);
+
     return {
       name,
       ...(title !== undefined && { title }),
       description: finalDescription,
       ...(annotations && { annotations }),
+      ...(toolMeta && { _meta: toolMeta }),
+      ...(icons && { icons }),
       inputSchema: resolvedInputSchema,
       outputSchema: resolvedOutputSchema,
       mapper,
@@ -996,11 +1085,12 @@ export class OpenAPIToolGenerator {
     method: HTTPMethod,
     operationId?: string,
     options: GenerateOptions = {},
+    operation?: OperationObject,
   ): string {
     let rawName: string;
 
     if (options.namingStrategy?.toolNameGenerator) {
-      rawName = options.namingStrategy.toolNameGenerator(path, method, operationId);
+      rawName = options.namingStrategy.toolNameGenerator(path, method, operationId, operation);
     } else if (operationId) {
       rawName = operationId;
     } else {
