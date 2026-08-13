@@ -2,11 +2,14 @@
 
 > Convert OpenAPI specifications into MCP tool definitions with automatic parameter conflict resolution
 
-[![npm version](https://badge.fury.io/js/mcp-from-openapi.svg)](https://www.npmjs.com/package/mcp-from-openapi)
+[![npm version](https://img.shields.io/npm/v/mcp-from-openapi.svg)](https://www.npmjs.com/package/mcp-from-openapi)
+[![npm downloads](https://img.shields.io/npm/dm/mcp-from-openapi.svg)](https://www.npmjs.com/package/mcp-from-openapi)
+[![CI](https://github.com/agentfront/mcp-from-openapi/actions/workflows/push.yml/badge.svg)](https://github.com/agentfront/mcp-from-openapi/actions/workflows/push.yml)
+[![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](https://github.com/agentfront/mcp-from-openapi/actions/workflows/push.yml)
+[![CodeQL](https://github.com/agentfront/mcp-from-openapi/actions/workflows/codeql.yml/badge.svg)](https://github.com/agentfront/mcp-from-openapi/actions/workflows/codeql.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-yellow.svg)](https://opensource.org/license/apache-2-0)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-20+-green.svg)](https://nodejs.org/)
-[![CodeQL](https://github.com/agentfront/mcp-from-openapi/actions/workflows/codeql.yml/badge.svg)](https://github.com/agentfront/mcp-from-openapi/actions/workflows/codeql.yml)
+[![node](https://img.shields.io/node/v/mcp-from-openapi.svg)](https://nodejs.org/)
 
 ## What This Solves
 
