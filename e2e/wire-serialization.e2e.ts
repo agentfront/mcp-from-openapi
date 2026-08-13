@@ -167,18 +167,20 @@ describe('story: serialization on the wire', () => {
     await sendBuiltRequest(buildHttpRequest(tool, {}, { baseUrl }), bearer);
     expect(loopback.requests.at(-1)!.headers.authorization).toBe('Bearer tok-123');
 
+    // SecurityContext.basic is the PRE-ENCODED base64 "username:password"
     const basic = await resolver.resolve(
       tool.mapper,
-      createSecurityContext({ basic: { username: 'ada', password: 's3cret' } }),
+      createSecurityContext({ basic: Buffer.from('ada:s3cret').toString('base64') }),
     );
     await sendBuiltRequest(buildHttpRequest(tool, {}, { baseUrl }), basic);
     expect(loopback.requests.at(-1)!.headers.authorization).toBe(
       `Basic ${Buffer.from('ada:s3cret').toString('base64')}`,
     );
 
+    // apiKeys is keyed by the WIRE parameter name (apiKeyName), not the scheme
     const keys = await resolver.resolve(
       tool.mapper,
-      createSecurityContext({ apiKeys: { headerKey: 'hk-1', queryKey: 'qk-2' } }),
+      createSecurityContext({ apiKeys: { 'X-API-Key': 'hk-1', api_key: 'qk-2' } }),
     );
     await sendBuiltRequest(buildHttpRequest(tool, {}, { baseUrl }), keys);
     const captured = loopback.requests.at(-1)!;
