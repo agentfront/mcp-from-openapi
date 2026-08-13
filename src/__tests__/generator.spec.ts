@@ -4,27 +4,7 @@ import { ParameterResolver } from '../parameter-resolver';
 import { ResponseBuilder } from '../response-builder';
 import { ParseError, LoadError } from '../errors';
 import type { OpenAPIDocument } from '../types';
-
-type LoopbackHandler = (req: import('http').IncomingMessage, res: import('http').ServerResponse) => void;
-
-/**
- * Shared loopback HTTP server for URL-loading / pinned-transport tests. A real 127.0.0.1 server
- * (paired with `allowInternalIPs`) replaces `global.fetch` / `$RefParser.dereference` mocks so the
- * tests exercise the actual SSRF guard and Node connection pinning. See CLAUDE.md "Testing Patterns".
- */
-function createLoopbackServer(getHandler: () => LoopbackHandler): { listen: () => Promise<string>; close: () => Promise<void> } {
-  const http = require('http') as typeof import('http');
-  const server = http.createServer((req, res) => getHandler()(req, res));
-  return {
-    listen: () =>
-      new Promise<string>((resolve) =>
-        server.listen(0, '127.0.0.1', () =>
-          resolve(`http://127.0.0.1:${(server.address() as import('net').AddressInfo).port}`),
-        ),
-      ),
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
-  };
-}
+import { createLoopbackServer, type LoopbackHandler } from './helpers/loopback';
 
 describe('OpenAPIToolGenerator', () => {
   const simpleOpenAPI: OpenAPIDocument = {

@@ -1,6 +1,6 @@
 import * as httpMod from 'node:http';
 import * as httpsMod from 'node:https';
-import type { AddressInfo } from 'node:net';
+import { createLoopbackServer, type LoopbackHandler } from './helpers/loopback';
 import {
   assertUrlSafe,
   safeFetch,
@@ -40,29 +40,24 @@ const mockResponse = (r: MockRes) =>
   }) as unknown as Response;
 
 // A shared real HTTP server on loopback, used by the connection-pinning tests.
-let server: httpMod.Server;
 let serverPort: number;
-let serverReceived: httpMod.IncomingMessage[] = [];
-let serverHandler: (req: httpMod.IncomingMessage, res: httpMod.ServerResponse) => void = (_req, res) => {
+let serverHandler: LoopbackHandler = (_req, res) => {
   res.writeHead(200);
   res.end('default');
 };
+const loopback = createLoopbackServer(() => serverHandler);
 
 beforeAll(async () => {
-  server = httpMod.createServer((req, res) => {
-    serverReceived.push(req);
-    serverHandler(req, res);
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-  serverPort = (server.address() as AddressInfo).port;
+  const baseUrl = await loopback.listen();
+  serverPort = Number(new URL(baseUrl).port);
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await loopback.close();
 });
 
 beforeEach(() => {
-  serverReceived = [];
+  loopback.reset();
 });
 
 describe('ssrf: isBlockedAddress (IP literal ranges)', () => {
@@ -418,8 +413,8 @@ describe('ssrf: nodePinnedTransport (real server, connection pinning)', () => {
     expect(res.status).toBe(200);
     const body = JSON.parse(await res.text());
     expect(body.host).toBe(`internal.pinned.invalid:${serverPort}`);
-    expect(serverReceived[0].url).toBe('/spec');
-    expect(serverReceived[0].headers['x-test']).toBe('yes');
+    expect(loopback.requests[0].url).toBe('/spec');
+    expect(loopback.requests[0].headers['x-test']).toBe('yes');
   });
 
   it('connects directly (no pin) to a literal-IP URL', async () => {
