@@ -140,7 +140,7 @@ const tools = await generator.generateTools();
 
 for (const tool of tools) {
   if (tool.metadata.frontmcp) {
-    const { annotations, cache, codecall, tags, hideFromDiscovery, examples } = tool.metadata.frontmcp;
+    const { annotations, cache, codecall, tags, hideFromDiscovery, examples, meta, icons } = tool.metadata.frontmcp;
 
     if (annotations?.readOnlyHint) {
       // Safe to cache or retry
@@ -153,6 +153,9 @@ for (const tool of tools) {
     if (hideFromDiscovery) {
       // Skip in tool listings
     }
+
+    // meta and icons also surface on the tool itself (tool._meta / tool.icons)
+    // after sanitization — see Modern MCP Fields.
   }
 }
 ```
