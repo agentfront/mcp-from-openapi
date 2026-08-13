@@ -20,7 +20,7 @@ yarn build && yarn test:e2e
 
 ## Layout
 
-```
+```text
 examples/<name>/
   README.md        # what it demonstrates and how it works
   example.ts       # the example — exported functions, consumer-style imports

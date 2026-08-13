@@ -62,17 +62,32 @@ export async function createMcpServer(options: QuickstartOptions): Promise<{ ser
 
     const url = new URL(built.url);
     for (const [key, value] of Object.entries(security.query)) url.searchParams.append(key, value);
-    const response = await fetch(url, {
-      method: built.method,
-      headers: { ...built.headers, ...security.headers },
-      body: built.body as never,
-    });
+    const headers: Record<string, string> = { ...built.headers, ...security.headers };
+    const securityCookies = Object.entries(security.cookies);
+    if (securityCookies.length > 0) {
+      const extra = securityCookies.map(([name, value]) => `${name}=${value}`).join('; ');
+      headers['Cookie'] = headers['Cookie'] ? `${headers['Cookie']}; ${extra}` : extra;
+    }
+    const response = await fetch(url, { method: built.method, headers, body: built.body as never });
 
-    const payload = (await response.json()) as Record<string, unknown>;
+    // Read the body ONCE and tolerate empty/text/HTML responses — real APIs
+    // return 204s and error pages, and a JSON parse crash here would surface
+    // as a protocol error instead of a tool result
+    const text = await response.text();
+    let payload: unknown;
+    try {
+      payload = text === '' ? undefined : JSON.parse(text);
+    } catch {
+      payload = undefined;
+    }
+    const structured =
+      response.ok && payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>)
+        : undefined;
     return {
-      content: [{ type: 'text', text: JSON.stringify(payload) }],
-      // structuredContent describes SUCCESS shapes — error payloads stay in content
-      ...(response.ok && { structuredContent: payload }),
+      content: [{ type: 'text', text: payload !== undefined ? JSON.stringify(payload) : text }],
+      // structuredContent describes SUCCESS object shapes — everything else stays in content
+      ...(structured && { structuredContent: structured }),
       isError: !response.ok,
     };
   });

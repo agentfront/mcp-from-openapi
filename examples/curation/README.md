@@ -16,6 +16,6 @@ Model accuracy measurably degrades past ~30–40 tools, and raw tool definitions
 yarn build && yarn test:e2e
 ```
 
-[example.e2e.ts](./example.e2e.ts) runs against the vendored real spec at [`e2e/fixtures/github-trimmed-3.0.json`](https://github.com/agentfront/mcp-from-openapi/blob/main/e2e/fixtures/README.md) and asserts the overlay patch appears verbatim on the generated tool.
+[example.e2e.ts](./example.e2e.ts) runs against the vendored real spec at [`e2e/fixtures/github-trimmed-3.0.json`](https://github.com/agentfront/mcp-from-openapi/blob/main/e2e/fixtures/github-trimmed-3.0.json) and asserts the overlay patch appears verbatim on the generated tool.
 
 Related docs: [Curation](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/curation.md) · [Configuration](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/configuration.md)

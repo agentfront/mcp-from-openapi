@@ -88,7 +88,11 @@ export async function runWorkflow(
     if (step.requestBody?.payload !== undefined) {
       const payload = JSON.parse(JSON.stringify(step.requestBody.payload)) as Record<string, unknown>;
       for (const expression of step.requestBody.payloadExpressions ?? []) {
-        const segments = expression.pointer.slice(1).split('/');
+        // RFC 6901: decode ~1 -> / and ~0 -> ~ (in that order) per segment
+        const segments = expression.pointer
+          .slice(1)
+          .split('/')
+          .map((segment) => segment.replace(/~1/g, '/').replace(/~0/g, '~'));
         let node: Record<string, unknown> = payload;
         for (const segment of segments.slice(0, -1)) node = node[segment] as Record<string, unknown>;
         node[segments[segments.length - 1]] = materialize(expression.value, { inputs, steps });

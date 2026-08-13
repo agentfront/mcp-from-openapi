@@ -38,9 +38,18 @@ export async function callTool(
   const url = new URL(built.url);
   for (const [key, value] of Object.entries(security.query)) url.searchParams.append(key, value);
 
+  // Fold cookie-based credentials into the Cookie header, preserving any
+  // cookie parameters buildHttpRequest already composed
+  const headers: Record<string, string> = { ...built.headers, ...security.headers };
+  const securityCookies = Object.entries(security.cookies);
+  if (securityCookies.length > 0) {
+    const extra = securityCookies.map(([name, value]) => `${name}=${value}`).join('; ');
+    headers['Cookie'] = headers['Cookie'] ? `${headers['Cookie']}; ${extra}` : extra;
+  }
+
   const response = await fetch(url, {
     method: built.method,
-    headers: { ...built.headers, ...security.headers },
+    headers,
     body: built.body as never,
   });
   return { status: response.status, body: await response.json().catch(() => undefined) };
