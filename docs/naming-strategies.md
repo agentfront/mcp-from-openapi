@@ -37,8 +37,8 @@ Only conflicted names are renamed. Unique parameter names are kept as-is.
 
 ```typescript
 interface NamingStrategy {
-  conflictResolver: (paramName: string, location: ParameterLocation, index: number) => string;
-  toolNameGenerator?: (path: string, method: HTTPMethod, operationId?: string) => string;
+  conflictResolver?: (paramName: string, location: ParameterLocation, index: number) => string;
+  toolNameGenerator?: (path: string, method: HTTPMethod, operationId?: string, operation?: OperationObject) => string;
 }
 ```
 

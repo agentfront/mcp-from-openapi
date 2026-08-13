@@ -28,7 +28,7 @@ import { isReferenceObject } from './types';
 import { ParameterResolver } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
 import { SchemaBuilder } from './schema-builder';
-import { extractExtensionOverrides, inferAnnotationsFromMethod, resolveExtensionEnabled } from './annotations';
+import { extractExtensionOverrides, inferAnnotationsFromMethod, isAllowedIconSrc, resolveExtensionEnabled } from './annotations';
 import { applyClientTarget } from './client-targets';
 import { applyOverlay } from './overlay';
 import { lintDocument, PAGINATION_PARAM, type LintResult } from './lint';
@@ -252,9 +252,8 @@ function iconsFromInfoLogo(info: unknown): ToolIcon[] | undefined {
     }
   }
   // Same scheme contract as extension icons (https:/data: only)
-  const lower = src?.toLowerCase();
-  if (lower !== undefined && (lower.startsWith('https:') || lower.startsWith('data:'))) {
-    return [{ src: src as string }];
+  if (src !== undefined && isAllowedIconSrc(src)) {
+    return [{ src }];
   }
   return undefined;
 }

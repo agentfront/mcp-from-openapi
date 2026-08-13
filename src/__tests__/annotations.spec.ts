@@ -275,10 +275,12 @@ describe('meta and icons extension extraction', () => {
   });
 
   it('cleanses meta arrays and scalars in place', () => {
-    const overrides = extractExtensionOverrides({
-      'x-mcp': { meta: { list: [1, { '__proto__': 1, a: 2 }, 'x'] } },
-    } as any);
+    // JSON.parse creates __proto__ as a real own key (an object literal would
+    // invoke the prototype setter instead and never produce an own property)
+    const meta = JSON.parse('{"list": [1, {"__proto__": {"polluted": true}, "a": 2}, "x"]}');
+    const overrides = extractExtensionOverrides({ 'x-mcp': { meta } } as any);
     expect(overrides.meta).toEqual({ list: [1, { a: 2 }, 'x'] });
+    expect(Object.getOwnPropertyNames((overrides.meta!['list'] as any[])[1])).toEqual(['a']);
   });
 
   it('returns undefined icons when nothing well-formed remains', () => {

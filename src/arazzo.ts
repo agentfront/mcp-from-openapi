@@ -376,6 +376,17 @@ function validateDocument(doc: ArazzoDocument): void {
 // Components resolution
 // ---------------------------------------------------------------------------
 
+/** Own-key component lookup: inherited members (`toString`, `constructor`,
+ * ...) and non-object values never resolve — document-supplied names must not
+ * reach prototype members or leak primitives where component objects belong. */
+function ownComponent(group: Record<string, unknown> | undefined, name: string): object | undefined {
+  if (!group || !Object.prototype.hasOwnProperty.call(group, name)) {
+    return undefined;
+  }
+  const value = group[name];
+  return value !== null && typeof value === 'object' ? (value as object) : undefined;
+}
+
 function resolveReusable<T>(
   entry: T | ArazzoReusableObject,
   components: ArazzoComponents | undefined,
@@ -395,7 +406,7 @@ function resolveReusable<T>(
   }
   // Component names may legally contain dots (`my.org.petId`) — re-join
   const name = ast.path.slice(1).join('.');
-  const target = components?.[expectedGroup]?.[name];
+  const target = ownComponent(components?.[expectedGroup], name);
   if (!target) {
     err(`Unknown reference "$components.${expectedGroup}.${name}"`, path);
   }
@@ -422,7 +433,7 @@ function resolveInputRefs(node: unknown, components: ArazzoComponents | undefine
       err(`Unsupported $ref "${ref}" in workflow inputs (only ${prefix}<name> is resolvable)`, path);
     }
     const name = ref.slice(prefix.length);
-    const target = components?.inputs?.[name];
+    const target = ownComponent(components?.inputs, name);
     if (!target) {
       err(`Unknown workflow inputs reference "${ref}"`, path);
     }

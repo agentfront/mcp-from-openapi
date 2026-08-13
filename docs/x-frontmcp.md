@@ -185,6 +185,8 @@ interface FrontMcpExtensionData {
     input: Record<string, unknown>;
     output?: unknown;
   }>;
+  meta?: Record<string, unknown>;
+  icons?: ToolIcon[];
 }
 ```
 

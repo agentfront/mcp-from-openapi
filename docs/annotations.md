@@ -78,7 +78,7 @@ x-mcp:
 
 ### 3. `x-frontmcp` (canonical, highest precedence)
 
-Only its `annotations` block participates here (including `annotations.title`); the rest of the extension (cache, codecall, tags, examples, ...) flows through `tool.metadata.frontmcp` untouched — see [x-frontmcp Extension](./x-frontmcp.md).
+Its `annotations` block (including `annotations.title`, which also becomes the tool title), `meta`, and `icons` map onto tool overrides; the rest of the extension (cache, codecall, tags, examples, ...) flows through `tool.metadata.frontmcp` untouched — see [x-frontmcp Extension](./x-frontmcp.md).
 
 ```yaml
 x-frontmcp:
@@ -117,7 +117,7 @@ inferAnnotationsFromMethod('delete');
 // { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
 
 extractExtensionOverrides(operation);
-// { disabled?, name?, title?, description?, annotations? }
+// { disabled?, name?, title?, description?, annotations?, meta?, icons? }
 ```
 
 ---

@@ -573,6 +573,46 @@ describe('fromArazzo components resolution', () => {
     await expectArazzoError(fromArazzo(nonString, { sources: sources() }), /"reference" must be a string/);
   });
 
+  it('never resolves inherited or non-object component members', async () => {
+    // Without the own-key guard, `$components.parameters.toString` resolves
+    // Object.prototype.toString and crashes in the JSON round-trip
+    const inherited = arazzoWith(
+      [
+        simpleWorkflow({
+          outputs: undefined,
+          steps: [{ stepId: 'f', operationId: 'getPet', parameters: [{ reference: '$components.parameters.toString' }] }],
+        }),
+      ],
+      { components: { parameters: {} } },
+    );
+    await expectArazzoError(fromArazzo(inherited, { sources: sources() }), /Unknown reference/);
+
+    const nullish = arazzoWith(
+      [
+        simpleWorkflow({
+          outputs: undefined,
+          steps: [{ stepId: 'f', operationId: 'getPet', parameters: [{ reference: '$components.parameters.gone' }] }],
+        }),
+      ],
+      { components: { parameters: { gone: null } } },
+    );
+    await expectArazzoError(fromArazzo(nullish, { sources: sources() }), /Unknown reference/);
+
+    // `#/components/inputs/constructor` would resolve the inherited Function
+    const inputsRef = (name: string, components: any) =>
+      arazzoWith([simpleWorkflow({ inputs: { $ref: `#/components/inputs/${name}` }, outputs: undefined })], {
+        components,
+      });
+    await expectArazzoError(
+      fromArazzo(inputsRef('constructor', { inputs: {} }), { sources: sources() }),
+      /Unknown workflow inputs reference/,
+    );
+    await expectArazzoError(
+      fromArazzo(inputsRef('prim', { inputs: { prim: 'not-a-schema' } }), { sources: sources() }),
+      /Unknown workflow inputs reference/,
+    );
+  });
+
   it('re-validates action types resolved from components', async () => {
     const doc = arazzoWith(
       [

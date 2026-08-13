@@ -135,8 +135,12 @@ function sanitizeMeta(value: unknown): Record<string, unknown> | undefined {
   return undefined;
 }
 
-/** Icon URI schemes matching the documented `ToolIcon.src` contract. */
-function isAllowedIconSrc(src: string): boolean {
+/**
+ * Whether an icon source URI matches the documented `ToolIcon.src` scheme
+ * contract (`https:` or `data:` only, case-insensitive). Shared by extension
+ * icon sanitization and the generator's `info['x-logo']` inheritance.
+ */
+export function isAllowedIconSrc(src: string): boolean {
   const lower = src.toLowerCase();
   return lower.startsWith('https:') || lower.startsWith('data:');
 }

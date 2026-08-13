@@ -7,11 +7,6 @@ import type { JsonSchema } from '../types';
 const sig = (input: any, output?: any, options?: any): string =>
   emitToolTypeScript('t', undefined, input as JsonSchema, output as JsonSchema | undefined, options).signature;
 
-const inputType = (input: any, options?: any): string => {
-  const m = sig(input, undefined, options).match(/^\((?:input\??: )?(.*?)\) => /);
-  return m ? (m[1] ?? '') : '';
-};
-
 const outputType = (output: any, options?: any): string =>
   sig({ type: 'object', properties: { a: { type: 'string' } } }, output, options).replace(/^.* => Promise<(.*)>$/s, '$1');
 
@@ -372,6 +367,18 @@ describe('emitToolTypeScript assembly', () => {
       type: 'object',
       additionalProperties: { type: 'string' },
     } as JsonSchema, undefined);
+    expect(declaration).toContain('declare function t(input: TInput): Promise<TOutput>;');
+  });
+
+  it('keeps input for composed roots without properties', () => {
+    const a = { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] };
+    const b = { type: 'object', properties: { b: { type: 'number' } }, required: ['b'] };
+    expect(sig({ oneOf: [a, b] })).toBe('(input: { a: string } | { b: number }) => Promise<unknown>');
+    expect(sig({ allOf: [a] })).toBe('(input: { a: string }) => Promise<unknown>');
+    expect(sig({ anyOf: [{ type: 'string' }, { type: 'number' }] })).toBe('(input: string | number) => Promise<unknown>');
+    expect(sig({ enum: ['a', 'b'] })).toBe('(input: "a" | "b") => Promise<unknown>');
+    expect(sig({ const: 'fixed' })).toBe('(input: "fixed") => Promise<unknown>');
+    const { declaration } = emitToolTypeScript('t', undefined, { oneOf: [a, b] } as JsonSchema, undefined);
     expect(declaration).toContain('declare function t(input: TInput): Promise<TOutput>;');
   });
 

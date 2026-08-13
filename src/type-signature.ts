@@ -368,9 +368,17 @@ function paramList(inputSchema: unknown, typeText: string): string {
     const ap = inputSchema['additionalProperties'];
     const hasExtra = ap === true || isSchemaRecord(ap) || isSchemaRecord(inputSchema['patternProperties']);
     const objectish = inputSchema['type'] === 'object' || inputSchema['type'] === undefined;
+    // Composed roots (oneOf/anyOf/allOf/enum/const) type real data even
+    // though they declare no properties of their own.
+    const composed =
+      Array.isArray(inputSchema['allOf']) ||
+      Array.isArray(inputSchema['oneOf']) ||
+      Array.isArray(inputSchema['anyOf']) ||
+      Array.isArray(inputSchema['enum']) ||
+      'const' in inputSchema;
     // A closed, empty object root truly takes no input; anything else
-    // (typed additionalProperties, non-object roots) still carries data.
-    return objectish && !hasExtra ? '()' : `(input: ${typeText})`;
+    // (typed additionalProperties, composed or non-object roots) carries data.
+    return objectish && !hasExtra && !composed ? '()' : `(input: ${typeText})`;
   }
   const required = new Set(Array.isArray(inputSchema['required']) ? (inputSchema['required'] as unknown[]) : []);
   const allOptional = keys.every((k) => !required.has(k));
