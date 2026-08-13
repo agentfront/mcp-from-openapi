@@ -86,6 +86,7 @@ yarn clean             # Remove dist/ and coverage/
 - **Unit tests**: `src/__tests__/*.spec.ts` (one per module)
 - **Integration tests**: `src/__tests__/integration.spec.ts` (full pipeline, imports from entrypoint only)
 - **E2E stories**: `e2e/*.e2e.ts` under `jest.e2e.config.js` (the `.e2e.ts` suffix + separate `roots` keep the suites structurally separate). Real loopback HTTP, the real MCP SDK over `InMemoryTransport`, vendored real-world specs, dist packaging, and tsc-compiled emitted declarations. `@modelcontextprotocol/sdk` and `ajv` are dev-only and must never be imported from `src/`.
+- **Tested examples**: `examples/<name>/` pairs consumer-style code (`example.ts`, importing `mcp-from-openapi` — the e2e runner maps the bare specifier onto `src/index.ts`) with a colocated `example.e2e.ts` executed by `yarn test:e2e`. Each folder has a README; the index at `examples/README.md` and `docs/examples.md` point to them. New examples must follow this shape — an untested example is a doc bug.
 - **Coverage exclusion**: `src/index.ts` (barrel file)
 
 ### Testing Patterns
