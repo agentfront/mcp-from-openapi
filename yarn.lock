@@ -6,14 +6,14 @@ __metadata:
   cacheKey: 10c0
 
 "@apidevtools/json-schema-ref-parser@npm:^15.5.1":
-  version: 15.5.1
-  resolution: "@apidevtools/json-schema-ref-parser@npm:15.5.1"
+  version: 15.5.2
+  resolution: "@apidevtools/json-schema-ref-parser@npm:15.5.2"
   dependencies:
     js-yaml: "npm:^5.2.2"
     undici: "npm:^6.28.0"
   peerDependencies:
     "@types/json-schema": ^7.0.15
-  checksum: 10c0/f61d6d9864af2b91a592a83b868cfdf3c65e0a4c6a2acfe138deb3108560ba1d9d422c2ea0858345ae828a585f29c3c9998ba731b25de1a9ad460550c3fc92b6
+  checksum: 10c0/bf37d0c4f922a099232475c2b45cb18e1450751e1cea17744d6f36007796e527e79dc69a2ff4d2de377a7503a22457b7afd0fdcea6ae7d0b0bc771753c00a1c1
   languageName: node
   linkType: hard
 
