@@ -5,15 +5,15 @@ __metadata:
   version: 9
   cacheKey: 10c0
 
-"@apidevtools/json-schema-ref-parser@npm:^15.5.1":
-  version: 15.5.1
-  resolution: "@apidevtools/json-schema-ref-parser@npm:15.5.1"
+"@apidevtools/json-schema-ref-parser@npm:^16.0.2":
+  version: 16.0.2
+  resolution: "@apidevtools/json-schema-ref-parser@npm:16.0.2"
   dependencies:
-    js-yaml: "npm:^5.2.2"
-    undici: "npm:^6.28.0"
+    js-yaml: "npm:^5.4.1"
+    undici: "npm:^8.10.2"
   peerDependencies:
     "@types/json-schema": ^7.0.15
-  checksum: 10c0/f61d6d9864af2b91a592a83b868cfdf3c65e0a4c6a2acfe138deb3108560ba1d9d422c2ea0858345ae828a585f29c3c9998ba731b25de1a9ad460550c3fc92b6
+  checksum: 10c0/7c8aff95410a78fcdfdd722b6b449a566489c9b12c6a98422fe27f2bb38afdb49c3a2caca6c5a8887b0fa66aa0f3643858331ea87c3dbde12d5760d399e0f002
   languageName: node
   linkType: hard
 
@@ -3086,14 +3086,14 @@ __metadata:
   languageName: node
   linkType: hard
 
-"js-yaml@npm:^5.2.2":
-  version: 5.2.3
-  resolution: "js-yaml@npm:5.2.3"
+"js-yaml@npm:^5.4.1":
+  version: 5.4.1
+  resolution: "js-yaml@npm:5.4.1"
   dependencies:
     argparse: "npm:^2.0.1"
   bin:
     js-yaml: bin/js-yaml.mjs
-  checksum: 10c0/55cd6310c8eee88d432ae038d451ac9d6aa0eb9e5d38a94df3d6c4a4015d08c9dad7c18669e0e8854e4173a615d6b6b7448bd0aac408773f8a46122ffd863c69
+  checksum: 10c0/efe9dfaf222809694d375ad5ecca825561d2432eb55bc0f628911c0dfa4dbce98a71dcbc3252f630208bbdf5f4e9ac363847e4a7f49845b577ae2548b8fcf147
   languageName: node
   linkType: hard
 
@@ -3211,7 +3211,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "mcp-from-openapi@workspace:."
   dependencies:
-    "@apidevtools/json-schema-ref-parser": "npm:^15.5.1"
+    "@apidevtools/json-schema-ref-parser": "npm:^16.0.2"
     "@modelcontextprotocol/sdk": "npm:^1.30.0"
     "@swc/core": "npm:~1.5.7"
     "@swc/helpers": "npm:^0.5.18"
@@ -4117,10 +4117,17 @@ __metadata:
   languageName: node
   linkType: hard
 
-"undici@npm:^6.25.0, undici@npm:^6.28.0":
+"undici@npm:^6.25.0":
   version: 6.28.0
   resolution: "undici@npm:6.28.0"
   checksum: 10c0/3029a70df06b38b5b2f30732932a1e92544c753cd82c8abdf0d35afad48e0ba91612e79fe3a442dbbb9434d6a9eba2b714d5ea28984c903dda2b5d5444f38354
+  languageName: node
+  linkType: hard
+
+"undici@npm:^8.10.2":
+  version: 8.10.2
+  resolution: "undici@npm:8.10.2"
+  checksum: 10c0/66d7fc69149207cab570d6abbc9e965b6afe1ae889a7d46945b431165c973d6a56f3dd8b70a856e7ae1e550b6366a1cde6f06e68640587f0dadca38de72995ee
   languageName: node
   linkType: hard
 
