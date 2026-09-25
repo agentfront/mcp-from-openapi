@@ -80,7 +80,7 @@ yarn clean             # Remove dist/ and coverage/
 
 ## Testing
 
-- **Framework**: Jest 29 with SWC transformer (`@swc/jest`)
+- **Framework**: Jest 30 with SWC transformer (`@swc/jest`)
 - **Coverage provider**: V8 (`coverageProvider: 'v8'` in jest.config.js)
 - **Coverage target**: 100% statements, branches, functions, lines — a UNIT-suite contract; the e2e suite never runs under `test:coverage`
 - **Unit tests**: `src/__tests__/*.spec.ts` (one per module)
