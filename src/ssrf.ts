@@ -26,7 +26,8 @@
  *     guard and the socket share one DNS resolution. This closes the
  *     DNS-rebinding TOCTOU where the client would otherwise re-resolve the
  *     hostname at connect time and reach a different (internal) address. The
- *     original hostname is preserved for the `Host` header and TLS SNI;
+ *     original hostname is preserved for the `Host` header and TLS SNI, and
+ *     every request opens a fresh socket (never a pooled keep-alive one);
  *   - re-validates every redirect hop ({@link safeFetch}) instead of letting the
  *     HTTP client follow 3xx blindly.
  *
@@ -390,8 +391,9 @@ const NULL_BODY_STATUS: ReadonlySet<number> = new Set([101, 103, 204, 205, 304])
 /**
  * Node transport that pins the connection to the validated address(es) via a
  * custom `lookup`, preserving the original hostname for the `Host` header and
- * TLS SNI. Manual redirects only (no `lookup` re-resolution between hops).
- * Exported for tests.
+ * TLS SNI. Each request uses a one-off agent so a shared keep-alive pool can't
+ * hand it a socket connected elsewhere. Manual redirects only (no `lookup`
+ * re-resolution between hops). Exported for tests.
  */
 export function nodePinnedTransport(modules: NodeHttpModules): SsrfTransport {
   return (url, { headers, signal, pinned, maxBytes }) =>
@@ -401,6 +403,8 @@ export function nodePinnedTransport(modules: NodeHttpModules): SsrfTransport {
       const requestOptions: Record<string, unknown> = {
         method: 'GET',
         signal,
+        // A pooled keep-alive socket is keyed by host:port only and would skip the pinned lookup.
+        agent: false,
         headers: { ...headers, 'accept-encoding': 'identity' },
       };
       if (pinned.length > 0) {

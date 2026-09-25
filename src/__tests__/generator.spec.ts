@@ -5,6 +5,8 @@ import { ResponseBuilder } from '../response-builder';
 import { ParseError, LoadError } from '../errors';
 import type { OpenAPIDocument } from '../types';
 import { createLoopbackServer, type LoopbackHandler } from './helpers/loopback';
+import { makePinnedLookup } from '../ssrf';
+import dns from 'node:dns';
 
 describe('OpenAPIToolGenerator', () => {
   const simpleOpenAPI: OpenAPIDocument = {
@@ -2523,6 +2525,63 @@ describe('External $ref resolution over the SSRF-safe pinned transport', () => {
       validate: false,
     });
     await expect(generator.generateTools()).rejects.toThrow(/dereference/i);
+  });
+});
+
+describe('DNS rebinding against spec and external $ref fetches', () => {
+  const loopback = createLoopbackServer(() => (_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ type: 'string' }));
+  });
+  let reboundOrigin: string;
+
+  beforeAll(async () => {
+    const port = new URL(await loopback.listen()).port;
+    reboundOrigin = `http://rebind.attacker.invalid:${port}`;
+  });
+
+  afterAll(async () => {
+    await loopback.close();
+  });
+
+  beforeEach(() => {
+    jest.spyOn(dns.promises, 'lookup').mockResolvedValue([{ address: '203.0.113.7', family: 4 }] as never);
+    jest
+      .spyOn(dns, 'lookup')
+      .mockImplementation(makePinnedLookup([{ address: '127.0.0.1', family: 4 }]) as unknown as typeof dns.lookup);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    loopback.reset();
+  });
+
+  it('fromURL never reaches the address a connect-time lookup would return', async () => {
+    await expect(OpenAPIToolGenerator.fromURL(`${reboundOrigin}/openapi.json`, { timeout: 300 })).rejects.toThrow(
+      LoadError,
+    );
+    expect(loopback.requests).toHaveLength(0);
+  });
+
+  it('external $ref resolution never reaches the address a connect-time lookup would return', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      {
+        openapi: '3.0.0',
+        info: { title: 'Rebind API', version: '1.0.0' },
+        paths: {
+          '/thing': {
+            get: {
+              operationId: 'getThing',
+              parameters: [{ name: 'q', in: 'query', schema: { $ref: `${reboundOrigin}/schema.json` } }],
+              responses: { '200': { description: 'OK' } },
+            },
+          },
+        },
+      },
+      { timeout: 300, validate: false },
+    );
+    await expect(generator.generateTools()).rejects.toThrow();
+    expect(loopback.requests).toHaveLength(0);
   });
 });
 

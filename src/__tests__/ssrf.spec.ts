@@ -1,3 +1,4 @@
+import dns from 'node:dns';
 import * as httpMod from 'node:http';
 import * as httpsMod from 'node:https';
 import { createLoopbackServer, type LoopbackHandler } from './helpers/loopback';
@@ -469,6 +470,30 @@ describe('ssrf: nodePinnedTransport (real server, connection pinning)', () => {
       transport(`http://127.0.0.1:${serverPort}/big`, { signal: freshSignal(), pinned: [], maxBytes: 100 }),
     ).rejects.toThrow(SsrfError);
   });
+
+  it('never reuses a pooled keep-alive socket that was connected to another address', async () => {
+    serverHandler = (_req, res) => {
+      res.writeHead(200);
+      res.end('internal');
+    };
+    const pooledOrigin = `http://pooled.pinned.invalid:${serverPort}`;
+    await new Promise<void>((resolve, reject) => {
+      httpMod
+        .get(`${pooledOrigin}/warm`, { lookup: makePinnedLookup([{ address: '127.0.0.1', family: 4 }]) }, (res) => {
+          res.resume();
+          res.on('end', () => resolve());
+        })
+        .on('error', reject);
+    });
+
+    await expect(
+      transport(`${pooledOrigin}/spec`, {
+        signal: AbortSignal.timeout(300),
+        pinned: [{ address: '203.0.113.7', family: 4 }],
+      }),
+    ).rejects.toBeDefined();
+    expect(loopback.requests.map((request) => request.url)).toEqual(['/warm']);
+  });
 });
 
 describe('ssrf: safeFetch over the Node transport (real server)', () => {
@@ -487,6 +512,25 @@ describe('ssrf: safeFetch over the Node transport (real server)', () => {
       expect(await res.text()).toBe('{"ok":true}');
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('dials the validated address instead of re-resolving the host at connect time (DNS rebinding)', async () => {
+    const connectTimeLookup = jest
+      .spyOn(dns, 'lookup')
+      .mockImplementation(makePinnedLookup([{ address: '127.0.0.1', family: 4 }]) as unknown as typeof dns.lookup);
+    try {
+      await expect(
+        safeFetch(`http://rebind.attacker.invalid:${serverPort}/openapi.json`, {
+          ssrf: OPEN,
+          lookup: lookupTo('203.0.113.7'),
+          timeoutMs: 300,
+        }),
+      ).rejects.toBeDefined();
+      expect(connectTimeLookup).not.toHaveBeenCalled();
+      expect(loopback.requests).toHaveLength(0);
+    } finally {
+      connectTimeLookup.mockRestore();
     }
   });
 });

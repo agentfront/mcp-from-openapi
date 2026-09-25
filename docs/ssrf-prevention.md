@@ -133,6 +133,15 @@ The library configures `@apidevtools/json-schema-ref-parser` with a custom `canR
 
 This happens transparently during the dereference step when loading a spec.
 
+Every network fetch -- the spec URL in `fromURL` and each external `$ref` -- then goes through `safeFetch`, which:
+
+1. Resolves the hostname and rejects it if **any** resolved address is internal (this closes the `127.0.0.1.nip.io` class of bypass)
+2. Pins the connection to the exact address it just validated, so the socket never looks the name up again (this closes DNS rebinding), while keeping the original hostname for the `Host` header and TLS SNI
+3. Opens a fresh socket for every request, so a pooled keep-alive socket that was connected elsewhere is never reused
+4. Re-validates every redirect hop before following it (`$ref` fetches refuse redirects entirely)
+
+Connection pinning needs Node's `node:http`/`node:https`. On runtimes without them (Web/edge), and whenever you pass a custom `fetchImpl` to `safeFetch`, only the pre-fetch checks apply. For untrusted input there, combine `allowedHosts` with network egress controls.
+
 ---
 
 **Related:** [Security](./security.md) | [Configuration](./configuration.md) | [Getting Started](./getting-started.md)
