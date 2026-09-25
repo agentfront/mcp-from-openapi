@@ -109,7 +109,7 @@ yarn clean             # Remove dist/ and coverage/
 
 ### ESM Dependency Handling
 
-`@apidevtools/json-schema-ref-parser` v15 is ESM-only. The project uses dynamic `import()` in `generator.ts` so it works from both CJS and ESM contexts. Jest transforms the package via `transformIgnorePatterns` in `jest.config.js`.
+`@apidevtools/json-schema-ref-parser` v16 is ESM-only. The project uses dynamic `import()` in `generator.ts` so it works from both CJS and ESM contexts. Jest transforms the package via `transformIgnorePatterns` in `jest.config.js`.
 
 ## Options Flow
 
