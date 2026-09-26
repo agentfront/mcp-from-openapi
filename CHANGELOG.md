@@ -1,5 +1,18 @@
 ## [2.8.0] - 2026-09-26
 
+### Added
+- Improved HTTP Request handling for Blobs.
+
+### Changed
+- Node version requirement updated to >= 22.19.
+- Updated `@apidevtools/json-schema-ref-parser` to v16.0.2.
+
+### Security
+- Prevent SSRF by ensuring each HTTP request opens a fresh socket.
+
+### Fixed
+- Never reuse pooled keep-alive sockets in the pinned transport.
+
 ## [2.5.0] - 2026-06-21
 
 ### Security (SSRF hardening — GHSA-65h7-9wrw-629c)
