@@ -80,7 +80,7 @@ yarn clean             # Remove dist/ and coverage/
 
 ## Testing
 
-- **Framework**: Jest 29 with SWC transformer (`@swc/jest`)
+- **Framework**: Jest 30 with SWC transformer (`@swc/jest`)
 - **Coverage provider**: V8 (`coverageProvider: 'v8'` in jest.config.js)
 - **Coverage target**: 100% statements, branches, functions, lines — a UNIT-suite contract; the e2e suite never runs under `test:coverage`
 - **Unit tests**: `src/__tests__/*.spec.ts` (one per module)
@@ -109,7 +109,7 @@ yarn clean             # Remove dist/ and coverage/
 
 ### ESM Dependency Handling
 
-`@apidevtools/json-schema-ref-parser` v15 is ESM-only. The project uses dynamic `import()` in `generator.ts` so it works from both CJS and ESM contexts. Jest transforms the package via `transformIgnorePatterns` in `jest.config.js`.
+`@apidevtools/json-schema-ref-parser` v16 is ESM-only. The project uses dynamic `import()` in `generator.ts` so it works from both CJS and ESM contexts. Jest transforms the package via `transformIgnorePatterns` in `jest.config.js`.
 
 ## Options Flow
 

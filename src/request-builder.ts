@@ -457,7 +457,7 @@ export function buildHttpRequest(
         if (typeof Blob !== 'undefined' && v instanceof Blob) {
           form.append(k, v);
         } else if (v instanceof Uint8Array) {
-          form.append(k, new Blob([v]));
+          form.append(k, new Blob([new Uint8Array(v)]));
         } else if (isPlainObject(v) || Array.isArray(v)) {
           form.append(k, JSON.stringify(v));
         } else {
