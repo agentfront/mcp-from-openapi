@@ -123,6 +123,14 @@ describe('ssrf: isBlockedAddress (IP literal ranges)', () => {
     expect(isBlockedAddress(ip)).toBe(true);
   });
 
+  it.each([
+    'fd00::ffff:808:808', // ULA
+    'fe80::ffff:808:808', // link-local
+    '2002:a00:1::ffff:808:808', // 6to4 → 10.0.0.1
+  ])('blocks %s even though its ::ffff: tail spells a public IPv4', (ip) => {
+    expect(isBlockedAddress(ip)).toBe(true);
+  });
+
   it.each(['64:ff9b::808:808', '2002:808:808::1', '::ffff:0:808:808', '[64:ff9b::1.1.1.1]'])(
     'allows IPv6 transition form %s that embeds a public IPv4',
     (ip) => {
@@ -199,6 +207,8 @@ describe('ssrf: normalizeHostname / hostListIncludes', () => {
     [' api.example.com ', 'api.example.com'],
     ['[::1]', '::1'],
     ['[2001:DB8::1]', '2001:db8::1'],
+    ['a..b', 'a..b'],
+    ['...', ''],
   ])('normalizes %j to %j', (input, expected) => {
     expect(normalizeHostname(input)).toBe(expected);
   });
@@ -330,6 +340,8 @@ describe('ssrf: assertUrlSafe', () => {
     await expect(assertUrlSafe('http://[64:ff9b::169.254.169.254]/x', OPEN, lookup)).rejects.toThrow(SsrfError);
     await expect(assertUrlSafe('http://[2002:a00:1::1]/x', OPEN, lookup)).rejects.toThrow(SsrfError);
     await expect(assertUrlSafe('http://[::127.0.0.1]/x', OPEN, lookup)).rejects.toThrow(SsrfError);
+    await expect(assertUrlSafe('http://[fd00::ffff:8.8.8.8]/x', OPEN, lookup)).rejects.toThrow(SsrfError);
+    await expect(assertUrlSafe('http://[2002:a00:1::ffff:808:808]/x', OPEN, lookup)).rejects.toThrow(SsrfError);
     expect(lookup).not.toHaveBeenCalled();
   });
 

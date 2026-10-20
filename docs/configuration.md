@@ -44,9 +44,9 @@ Controls how external `$ref` pointers are resolved during dereferencing. See [SS
 | `allowedProtocols` | `string[]` | `['http', 'https']` | Protocols allowed for external refs |
 | `allowedHosts`     | `string[]` | `[]` (all allowed)  | Whitelist specific hostnames        |
 | `blockedHosts`     | `string[]` | `[]`                | Additional hostnames to block       |
+| `allowInternalIPs` | `boolean`  | `false`             | Disable built-in SSRF protection    |
 
 Host entries match case-insensitively and ignore trailing root dots and IPv6 brackets: `['internal.corp']` also blocks `internal.corp.` and `INTERNAL.CORP`.
-| `allowInternalIPs` | `boolean`  | `false`             | Disable built-in SSRF protection    |
 
 ---
 

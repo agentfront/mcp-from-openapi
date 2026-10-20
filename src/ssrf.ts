@@ -100,7 +100,10 @@ export function normalizeSsrfOptions(refResolution?: RefResolutionOptions): Reso
 export function normalizeHostname(hostname: string): string {
   let h = hostname.trim().toLowerCase();
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
-  return h.replace(/\.+$/, '');
+  // A loop, not /\.+$/: that regex rescans from every dot, quadratic on `a....b`.
+  let end = h.length;
+  while (end > 0 && h[end - 1] === '.') end--;
+  return h.slice(0, end);
 }
 
 /** Does `list` contain `hostname`? Both sides are compared in {@link normalizeHostname} form. */
@@ -234,11 +237,13 @@ export function isBlockedAddress(host: string): boolean {
   let h = host;
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
 
-  // IPv4-mapped IPv6 → re-check as the embedded IPv4.
+  // IPv4-mapped IPv6 → re-check as the embedded IPv4. Block-only: the decoder
+  // finds `::ffff:` anywhere (e.g. `fd00::ffff:808:808`), so a public result
+  // must still fall through to the IPv6 prefix and embedded-IPv4 checks.
   const mapped = decodeIpv4MappedIpv6(host);
   if (mapped) {
     const o = parseIpv4(mapped);
-    if (o) return isBlockedIpv4(o);
+    if (o && isBlockedIpv4(o)) return true;
   }
 
   const v4 = parseIpv4(h);
