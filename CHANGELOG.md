@@ -1,3 +1,8 @@
+## [2.9.1] - 2026-10-20
+
+### Security
+- Resolved security alerts related to `@istanbuljs/load-nyc-config/js-yaml`.
+
 ## [2.9.0] - 2026-10-20
 
 ### Changed
