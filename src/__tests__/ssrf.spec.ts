@@ -9,6 +9,8 @@ import {
   isBlockedHostname,
   decodeIpv4MappedIpv6,
   normalizeSsrfOptions,
+  normalizeHostname,
+  hostListIncludes,
   defaultLookup,
   makePinnedLookup,
   pickHttpModule,
@@ -103,6 +105,46 @@ describe('ssrf: isBlockedAddress (IP literal ranges)', () => {
     expect(isBlockedAddress('[::ffff:a9fe:a9fe]')).toBe(true); // hex form of 169.254.169.254
   });
 
+  it.each([
+    '::127.0.0.1', // IPv4-compatible (deprecated)
+    '[::7f00:1]', // IPv4-compatible, as new URL() spells it
+    '::ffff:0:127.0.0.1', // IPv4-translated (SIIT)
+    '::ffff:0:a00:1',
+    '64:ff9b::127.0.0.1', // NAT64 well-known prefix (RFC 6052)
+    '[64:ff9b::a9fe:a9fe]', // NAT64 → 169.254.169.254
+    '64:ff9b::a00:1', // NAT64 → 10.0.0.1
+    '64:ff9b:1::808:808', // local-use NAT64 prefix (RFC 8215): never global
+    '2002:7f00:1::1', // 6to4 → 127.0.0.1
+    '2002:a9fe:a9fe::', // 6to4 → 169.254.169.254
+    '2002:c0a8:101::1', // 6to4 → 192.168.1.1
+    '0:0:0:0:0:0:0:1', // uncompressed loopback
+    '0:0:0:0:0:ffff:7f00:1', // uncompressed IPv4-mapped loopback
+  ])('blocks IPv6 transition form %s that embeds a non-public IPv4', (ip) => {
+    expect(isBlockedAddress(ip)).toBe(true);
+  });
+
+  it.each([
+    'fd00::ffff:808:808', // ULA
+    'fe80::ffff:808:808', // link-local
+    '2002:a00:1::ffff:808:808', // 6to4 → 10.0.0.1
+  ])('blocks %s even though its ::ffff: tail spells a public IPv4', (ip) => {
+    expect(isBlockedAddress(ip)).toBe(true);
+  });
+
+  it.each(['64:ff9b::808:808', '2002:808:808::1', '::ffff:0:808:808', '[64:ff9b::1.1.1.1]'])(
+    'allows IPv6 transition form %s that embeds a public IPv4',
+    (ip) => {
+      expect(isBlockedAddress(ip)).toBe(false);
+    },
+  );
+
+  it.each(['1::2::3', '1:2:3', '1:2:3:4:5:6:7:8::', 'g::1', '::ffff:999.1.1.1'])(
+    'returns false for malformed IPv6 %s',
+    (ip) => {
+      expect(isBlockedAddress(ip)).toBe(false);
+    },
+  );
+
   it('returns false for non-IP hostnames', () => {
     expect(isBlockedAddress('example.com')).toBe(false);
     expect(isBlockedAddress('127.0.0.1.nip.io')).toBe(false); // string is not an IP literal
@@ -138,6 +180,45 @@ describe('ssrf: isBlockedHostname', () => {
     // allowInternalIPs disables built-in ranges but still honors explicit blockedHosts
     expect(isBlockedHostname('127.0.0.1', { ...OPEN, allowInternalIPs: true })).toBe(false);
     expect(isBlockedHostname('127.0.0.1', { ...OPEN, allowInternalIPs: true, blockedHosts: ['127.0.0.1'] })).toBe(true);
+  });
+  it.each([false, true])(
+    'matches blockedHosts regardless of case, trailing root dots, or IPv6 brackets (allowInternalIPs=%s)',
+    (allowInternalIPs) => {
+      const cfg: ResolvedSsrfOptions = { ...OPEN, allowInternalIPs, blockedHosts: ['Internal.Corp.', '2001:db8::1'] };
+      expect(isBlockedHostname('internal.corp', cfg)).toBe(true);
+      expect(isBlockedHostname('internal.corp.', cfg)).toBe(true);
+      expect(isBlockedHostname('INTERNAL.CORP..', cfg)).toBe(true);
+      expect(isBlockedHostname('[2001:db8::1]', cfg)).toBe(true);
+      expect(isBlockedHostname('public.example', cfg)).toBe(false);
+    },
+  );
+  it('blocks the fully-qualified (trailing-dot) form of built-in internal names', () => {
+    expect(isBlockedHostname('localhost.', OPEN)).toBe(true);
+    expect(isBlockedHostname('metadata.google.internal.', OPEN)).toBe(true);
+    expect(isBlockedHostname('[::1]', OPEN)).toBe(true);
+  });
+});
+
+describe('ssrf: normalizeHostname / hostListIncludes', () => {
+  it.each([
+    ['Example.COM', 'example.com'],
+    ['example.com.', 'example.com'],
+    ['example.com..', 'example.com'],
+    [' api.example.com ', 'api.example.com'],
+    ['[::1]', '::1'],
+    ['[2001:DB8::1]', '2001:db8::1'],
+    ['a..b', 'a..b'],
+    ['...', ''],
+  ])('normalizes %j to %j', (input, expected) => {
+    expect(normalizeHostname(input)).toBe(expected);
+  });
+
+  it('compares the hostname and every entry in normalized form', () => {
+    expect(hostListIncludes(['API.Example.com.'], 'api.example.com')).toBe(true);
+    expect(hostListIncludes(['api.example.com'], 'api.example.com.')).toBe(true);
+    expect(hostListIncludes(['::1'], '[::1]')).toBe(true);
+    expect(hostListIncludes(['api.example.com'], 'api.example.org')).toBe(false);
+    expect(hostListIncludes([], 'api.example.com')).toBe(false);
   });
 });
 
@@ -223,6 +304,50 @@ describe('ssrf: assertUrlSafe', () => {
   it('allowInternalIPs still honors explicit blockedHosts', async () => {
     const cfg: ResolvedSsrfOptions = { ...OPEN, allowInternalIPs: true, blockedHosts: ['blocked.internal'] };
     await expect(assertUrlSafe('http://blocked.internal/x', cfg, lookupTo())).rejects.toThrow(SsrfError);
+  });
+
+  it.each([false, true])(
+    'blockedHosts also blocks the trailing-dot (FQDN) form of the host (allowInternalIPs=%s)',
+    async (allowInternalIPs) => {
+      const cfg: ResolvedSsrfOptions = { ...OPEN, allowInternalIPs, blockedHosts: ['api.example.com'] };
+      const lookup = lookupTo('93.184.216.34');
+      await expect(assertUrlSafe('https://api.example.com./x', cfg, lookup)).rejects.toThrow(/blocked/);
+      await expect(assertUrlSafe('https://API.example.com../x', cfg, lookup)).rejects.toThrow(/blocked/);
+      expect(lookup).not.toHaveBeenCalled();
+    },
+  );
+
+  it('matches allowedHosts / blockedHosts entries regardless of case or trailing dots', async () => {
+    const lookup = lookupTo('93.184.216.34');
+    const allow: ResolvedSsrfOptions = { ...OPEN, allowedHosts: ['API.Example.com.'] };
+    await expect(assertUrlSafe('https://api.example.com/x', allow, lookup)).resolves.toHaveLength(1);
+    await expect(assertUrlSafe('https://api.example.com./x', allow, lookup)).resolves.toHaveLength(1);
+    await expect(assertUrlSafe('https://api.example.org/x', allow, lookup)).rejects.toThrow(/allowed-hosts/);
+
+    const block: ResolvedSsrfOptions = { ...OPEN, allowInternalIPs: true, blockedHosts: ['Blocked.Internal.'] };
+    await expect(assertUrlSafe('http://blocked.internal/x', block, lookup)).rejects.toThrow(/blocked/);
+  });
+
+  it('rejects the trailing-dot form of a built-in internal name before resolving it', async () => {
+    const lookup = lookupTo('93.184.216.34'); // even if DNS lied, the name list decides first
+    await expect(assertUrlSafe('http://localhost./x', OPEN, lookup)).rejects.toThrow(SsrfError);
+    await expect(assertUrlSafe('http://metadata.google.internal./x', OPEN, lookup)).rejects.toThrow(SsrfError);
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('rejects IPv6 literals that embed an internal IPv4 (NAT64 / 6to4 / IPv4-compatible)', async () => {
+    const lookup = lookupTo('93.184.216.34');
+    await expect(assertUrlSafe('http://[64:ff9b::169.254.169.254]/x', OPEN, lookup)).rejects.toThrow(SsrfError);
+    await expect(assertUrlSafe('http://[2002:a00:1::1]/x', OPEN, lookup)).rejects.toThrow(SsrfError);
+    await expect(assertUrlSafe('http://[::127.0.0.1]/x', OPEN, lookup)).rejects.toThrow(SsrfError);
+    await expect(assertUrlSafe('http://[fd00::ffff:8.8.8.8]/x', OPEN, lookup)).rejects.toThrow(SsrfError);
+    await expect(assertUrlSafe('http://[2002:a00:1::ffff:808:808]/x', OPEN, lookup)).rejects.toThrow(SsrfError);
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('rejects DNS names that resolve to a NAT64 address embedding an internal IPv4', async () => {
+    const lookup = lookupTo('64:ff9b::a00:5');
+    await expect(assertUrlSafe('https://nat64.attacker.example/x', OPEN, lookup)).rejects.toThrow(/64:ff9b::a00:5/);
   });
 
   it('fails CLOSED when the resolver errors (no silent fail-open)', async () => {
@@ -337,6 +462,59 @@ describe('ssrf: safeFetch (fetch-transport path via injected fetchImpl)', () => 
       lookup: lookupTo('93.184.216.34'),
     });
     expect(await res.text()).toBe('ok');
+  });
+
+  describe('caller headers across redirects', () => {
+    const AUTH = { Authorization: 'Bearer SECRET-TOKEN', 'X-API-Key': 'SECRET-KEY' };
+    const sentHeaders = (fetchImpl: jest.Mock) =>
+      fetchImpl.mock.calls.map(([, init]: [string, RequestInit]) => init.headers);
+
+    it('keeps caller headers on same-origin redirect hops', async () => {
+      const fetchImpl = jest
+        .fn()
+        .mockResolvedValueOnce(mockResponse({ status: 302, location: '/v2/openapi.json' }))
+        .mockResolvedValueOnce(mockResponse({ status: 200, body: '{}' }));
+      await safeFetch('https://api.example.com/openapi.json', {
+        ssrf: OPEN,
+        headers: AUTH,
+        fetchImpl,
+        lookup: lookupTo('93.184.216.34'),
+      });
+      expect(sentHeaders(fetchImpl)).toEqual([AUTH, AUTH]);
+    });
+
+    it.each([
+      ['another host', 'https://cdn.example.com/spec.json'],
+      ['another port', 'https://api.example.com:8443/spec.json'],
+      ['a scheme downgrade', 'http://api.example.com/openapi.json'],
+    ])('drops caller headers when a redirect leaves the origin (%s)', async (_label, location) => {
+      const fetchImpl = jest
+        .fn()
+        .mockResolvedValueOnce(mockResponse({ status: 302, location }))
+        .mockResolvedValueOnce(mockResponse({ status: 200, body: '{}' }));
+      await safeFetch('https://api.example.com/openapi.json', {
+        ssrf: OPEN,
+        headers: AUTH,
+        fetchImpl,
+        lookup: lookupTo('93.184.216.34'),
+      });
+      expect(sentHeaders(fetchImpl)).toEqual([AUTH, undefined]);
+    });
+
+    it('never restores caller headers once the chain has left the origin', async () => {
+      const fetchImpl = jest
+        .fn()
+        .mockResolvedValueOnce(mockResponse({ status: 302, location: 'https://cdn.example.com/spec.json' }))
+        .mockResolvedValueOnce(mockResponse({ status: 302, location: 'https://api.example.com/openapi.json?again' }))
+        .mockResolvedValueOnce(mockResponse({ status: 200, body: '{}' }));
+      await safeFetch('https://api.example.com/openapi.json', {
+        ssrf: OPEN,
+        headers: AUTH,
+        fetchImpl,
+        lookup: lookupTo('93.184.216.34'),
+      });
+      expect(sentHeaders(fetchImpl)).toEqual([AUTH, undefined, undefined]);
+    });
   });
 
   it('throws on redirect loops exceeding maxRedirects', async () => {
@@ -512,6 +690,31 @@ describe('ssrf: safeFetch over the Node transport (real server)', () => {
       expect(await res.text()).toBe('{"ok":true}');
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('sends caller headers to the spec origin but not to a cross-origin redirect target', async () => {
+    const other = createLoopbackServer(() => (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    const otherBase = await other.listen();
+    serverHandler = (_req, res) => {
+      res.writeHead(302, { location: `${otherBase}/spec.json` });
+      res.end();
+    };
+    try {
+      const res = await safeFetch(`http://127.0.0.1:${serverPort}/spec.json`, {
+        ssrf: { ...OPEN, allowInternalIPs: true },
+        headers: { Authorization: 'Bearer SECRET-TOKEN', 'X-API-Key': 'SECRET-KEY' },
+      });
+      expect(res.status).toBe(200);
+      expect(loopback.requests[0].headers.authorization).toBe('Bearer SECRET-TOKEN');
+      expect(other.requests).toHaveLength(1);
+      expect(other.requests[0].headers.authorization).toBeUndefined();
+      expect(other.requests[0].headers['x-api-key']).toBeUndefined();
+    } finally {
+      await other.close();
     }
   });
 

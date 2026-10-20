@@ -15,7 +15,11 @@
  *
  * This module validates the **resolved IP**, not just the hostname string:
  *   - parses/normalizes IPv4 (incl. numeric/hex/octal forms canonicalized by
- *     `new URL()`) and IPv4-mapped IPv6 before range checks;
+ *     `new URL()`), IPv4-mapped IPv6, and the IPv6 transition forms that embed
+ *     an IPv4 (NAT64, 6to4, IPv4-compatible/translated) before range checks;
+ *   - matches `allowedHosts` / `blockedHosts` (and the built-in internal names)
+ *     on a normalized hostname — lowercase, trailing root dot(s) and IPv6
+ *     brackets removed — so `host.` can't dodge an entry for `host`;
  *   - blocks loopback / private (RFC 1918) / CGNAT (RFC 6598) / link-local /
  *     multicast / unspecified / reserved ranges and cloud-metadata endpoints;
  *   - resolves the hostname (Node, via `node:dns`) and rejects if **any**
@@ -29,7 +33,8 @@
  *     original hostname is preserved for the `Host` header and TLS SNI, and
  *     every request opens a fresh socket (never a pooled keep-alive one);
  *   - re-validates every redirect hop ({@link safeFetch}) instead of letting the
- *     HTTP client follow 3xx blindly.
+ *     HTTP client follow 3xx blindly, and stops sending the caller's headers
+ *     (spec-host credentials) once a redirect leaves the original origin.
  *
  * Node-aware: DNS resolution lazily imports `node:dns` and IP pinning lazily
  * imports `node:http`/`node:https`. On runtimes without them (Web/edge) the
@@ -86,6 +91,28 @@ export function normalizeSsrfOptions(refResolution?: RefResolutionOptions): Reso
 }
 
 /**
+ * Canonical form of a hostname for allow/deny-list matching: trimmed,
+ * lowercase, IPv6 brackets removed, and trailing root dot(s) dropped.
+ * `API.example.com.` and `api.example.com` name the same DNS host, as do
+ * `[::1]` and `::1`, so an exact string match would let one spelling dodge a
+ * list entry written in the other.
+ */
+export function normalizeHostname(hostname: string): string {
+  let h = hostname.trim().toLowerCase();
+  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
+  // A loop, not /\.+$/: that regex rescans from every dot, quadratic on `a....b`.
+  let end = h.length;
+  while (end > 0 && h[end - 1] === '.') end--;
+  return h.slice(0, end);
+}
+
+/** Does `list` contain `hostname`? Both sides are compared in {@link normalizeHostname} form. */
+export function hostListIncludes(list: readonly string[], hostname: string): boolean {
+  const host = normalizeHostname(hostname);
+  return list.some((entry) => normalizeHostname(entry) === host);
+}
+
+/**
  * Decode an IPv4-mapped IPv6 host (`::ffff:169.254.169.254` or its hex form
  * `::ffff:a9fe:a9fe`, optionally bracketed) to its embedded dotted-quad IPv4, or
  * `null` if the host isn't IPv4-mapped. `new URL().hostname` normalizes
@@ -136,6 +163,49 @@ function isBlockedIpv4(octets: [number, number, number, number]): boolean {
   return false;
 }
 
+/**
+ * Expand an IPv6 address (no brackets or zone) into its eight 16-bit groups,
+ * or `null` if it is malformed. Accepts `::` compression and a trailing
+ * dotted-quad (`::ffff:1.2.3.4`).
+ */
+function parseIpv6(host: string): number[] | null {
+  let h = host;
+  const dotted = /^(.*:)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
+  if (dotted) {
+    const v4 = parseIpv4(dotted[2]);
+    if (!v4) return null;
+    h = `${dotted[1]}${((v4[0] << 8) | v4[1]).toString(16)}:${((v4[2] << 8) | v4[3]).toString(16)}`;
+  }
+  const halves = h.split('::');
+  if (halves.length > 2) return null;
+  const split = (part: string) => (part === '' ? [] : part.split(':'));
+  const head = split(halves[0]);
+  const tail = halves.length === 2 ? split(halves[1]) : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+  const groups = [...head, ...new Array<string>(halves.length === 2 ? missing : 0).fill('0'), ...tail];
+  if (!groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  return groups.map((g) => parseInt(g, 16));
+}
+
+/**
+ * The IPv4 address embedded in an IPv6 transition form, or `null`. A host or
+ * network translator (NAT64 gateway, 6to4 relay, dual-stack kernel) may carry
+ * such an address to its IPv4 target, so a public-looking IPv6 address can
+ * still reach an internal IPv4 one.
+ */
+function embeddedIpv4(groups: number[]): [number, number, number, number] | null {
+  const [g0, g1, g2, g3, g4, g5, g6, g7] = groups;
+  const octets = (hi: number, lo: number): [number, number, number, number] => [hi >> 8, hi & 0xff, lo >> 8, lo & 0xff];
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0) {
+    if (g4 === 0 && (g5 === 0 || g5 === 0xffff)) return octets(g6, g7); // ::a.b.c.d compatible, ::ffff:a.b.c.d mapped
+    if (g4 === 0xffff && g5 === 0) return octets(g6, g7); // ::ffff:0:a.b.c.d translated (SIIT)
+  }
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) return octets(g6, g7); // 64:ff9b::/96 NAT64
+  if (g0 === 0x2002) return octets(g1, g2); // 2002::/16 6to4
+  return null;
+}
+
 /** Is this IPv6 host (bracketed or not, possibly zoned) in a blocked range? */
 function isBlockedIpv6(host: string): boolean {
   let h = host;
@@ -149,23 +219,31 @@ function isBlockedIpv6(host: string): boolean {
   if (/^f[cd]/.test(lower)) return true; // fc00::/7 ULA (fc/fd)
   if (/^fe[89a-f]/.test(lower)) return true; // fe80::/10 link-local + fec0::/10 site-local
   if (/^ff/.test(lower)) return true; // ff00::/8 multicast
-  return false;
+
+  const groups = parseIpv6(lower);
+  if (!groups) return false;
+  if (groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 1) return true; // 64:ff9b:1::/48 local-use NAT64
+  const v4 = embeddedIpv4(groups);
+  return v4 !== null && isBlockedIpv4(v4);
 }
 
 /**
  * Predicate: is `host` (an IP literal — dotted-quad IPv4, bracketed/zoned IPv6,
- * or IPv4-mapped IPv6) in a blocked, non-public range? Returns `false` for
- * non-IP-literal hostnames (use DNS resolution for those).
+ * or an IPv6 form embedding an IPv4: mapped, NAT64, 6to4, compatible) in a
+ * blocked, non-public range? Returns `false` for non-IP-literal hostnames (use
+ * DNS resolution for those).
  */
 export function isBlockedAddress(host: string): boolean {
   let h = host;
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
 
-  // IPv4-mapped IPv6 → re-check as the embedded IPv4.
+  // IPv4-mapped IPv6 → re-check as the embedded IPv4. Block-only: the decoder
+  // finds `::ffff:` anywhere (e.g. `fd00::ffff:808:808`), so a public result
+  // must still fall through to the IPv6 prefix and embedded-IPv4 checks.
   const mapped = decodeIpv4MappedIpv6(host);
   if (mapped) {
     const o = parseIpv4(mapped);
-    if (o) return isBlockedIpv4(o);
+    if (o && isBlockedIpv4(o)) return true;
   }
 
   const v4 = parseIpv4(h);
@@ -189,16 +267,13 @@ function isIpLiteral(hostname: string): boolean {
  * internal addresses are caught later, asynchronously, in {@link safeFetch}.
  */
 export function isBlockedHostname(hostname: string, ssrf: ResolvedSsrfOptions): boolean {
-  if (ssrf.allowInternalIPs) {
-    return ssrf.blockedHosts.includes(hostname);
-  }
-  if (ssrf.blockedHosts.includes(hostname)) return true;
+  if (hostListIncludes(ssrf.blockedHosts, hostname)) return true;
+  if (ssrf.allowInternalIPs) return false;
 
-  const lower = hostname.toLowerCase();
-  const stripped = lower.startsWith('[') && lower.endsWith(']') ? lower.slice(1, -1) : lower;
-  if (BLOCKED_HOSTNAMES.has(lower) || BLOCKED_HOSTNAMES.has(stripped)) return true;
+  const host = normalizeHostname(hostname);
+  if (BLOCKED_HOSTNAMES.has(host)) return true;
 
-  return isBlockedAddress(hostname);
+  return isBlockedAddress(host);
 }
 
 /**
@@ -256,12 +331,12 @@ export async function assertUrlSafe(
   }
 
   const hostname = parsed.hostname;
-  if (ssrf.allowedHosts.length > 0 && !ssrf.allowedHosts.includes(hostname)) {
+  if (ssrf.allowedHosts.length > 0 && !hostListIncludes(ssrf.allowedHosts, hostname)) {
     throw new SsrfError(`Host "${hostname}" is not in the allowed-hosts list`, { url });
   }
 
   if (ssrf.allowInternalIPs) {
-    if (ssrf.blockedHosts.includes(hostname)) {
+    if (hostListIncludes(ssrf.blockedHosts, hostname)) {
       throw new SsrfError(`Host "${hostname}" is blocked`, { url });
     }
     return [];
@@ -306,6 +381,11 @@ export async function assertUrlSafe(
 
 /** Options for {@link safeFetch}. */
 export interface SafeFetchOptions {
+  /**
+   * Request headers (e.g. the spec host's `Authorization`). Sent only while the
+   * request stays on the origin of `url`: once a redirect leaves that origin
+   * (scheme, host, or port), they are dropped for every remaining hop.
+   */
   headers?: Record<string, string>;
   timeoutMs?: number;
   /** Follow 3xx redirects (re-validating each hop). @default true */
@@ -472,14 +552,16 @@ async function selectTransport(opts: SafeFetchOptions, url: string): Promise<Ssr
  * {@link assertUrlSafe} before issuing the request, then **pins** the connection
  * to the validated IP (on Node) so the socket can't be rebound to an internal
  * address. Uses manual redirect handling so a 3xx to an internal target can't be
- * followed without re-validation. Returns the final {@link Response} (the caller
- * checks `response.ok` / reads the body).
+ * followed without re-validation, and so the caller's `headers` never follow a
+ * redirect off the original origin. Returns the final {@link Response} (the
+ * caller checks `response.ok` / reads the body).
  */
 export async function safeFetch(url: string, opts: SafeFetchOptions): Promise<Response> {
   const { headers, timeoutMs = 30000, followRedirects = true, maxRedirects = 5, ssrf, lookup } = opts;
   const transport = await selectTransport(opts, url);
 
   let current = url;
+  let hopHeaders = headers;
   for (let hop = 0; hop <= maxRedirects; hop++) {
     const pinned = await assertUrlSafe(current, ssrf, lookup);
 
@@ -487,7 +569,12 @@ export async function safeFetch(url: string, opts: SafeFetchOptions): Promise<Re
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response: Response;
     try {
-      response = await transport(current, { headers, signal: controller.signal, pinned, maxBytes: opts.maxResponseBytes });
+      response = await transport(current, {
+        headers: hopHeaders,
+        signal: controller.signal,
+        pinned,
+        maxBytes: opts.maxResponseBytes,
+      });
     } finally {
       clearTimeout(timer);
     }
@@ -502,7 +589,15 @@ export async function safeFetch(url: string, opts: SafeFetchOptions): Promise<Re
     if (!location) {
       return response; // malformed redirect — let the caller treat it as non-ok
     }
-    current = new URL(location, current).toString();
+    const next = new URL(location, current);
+    // The caller's headers authenticate to the origin it asked for. Like fetch
+    // does for Authorization, drop them once a hop leaves that origin (another
+    // host, port, or an https→http downgrade), and never restore them later in
+    // the chain — an open redirect must not harvest the spec host's token.
+    if (next.origin !== new URL(current).origin) {
+      hopHeaders = undefined;
+    }
+    current = next.toString();
     // Loop re-validates + re-pins `current` via assertUrlSafe before the next fetch.
   }
 

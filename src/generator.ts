@@ -36,7 +36,7 @@ import { Validator } from './validator';
 import { GenerationError, LoadError, OverlayError, ParseError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { emitToolTypeScript } from './type-signature';
-import { isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
+import { hostListIncludes, isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
 
 /** MCP hard limit for tool name length (spec revision 2025-11-25, SEP-986) */
 const MCP_MAX_TOOL_NAME_LENGTH = 128;
@@ -527,7 +527,6 @@ export class OpenAPIToolGenerator {
     // Configure HTTP/HTTPS resolver with security filtering
     if (hasNetworkProtocol) {
       const hasHostAllowlist = refOpts.allowedHosts.length > 0;
-      const hostAllowSet = new Set(refOpts.allowedHosts);
 
       resolveConfig['http'] = {
         // SECURITY: never auto-follow HTTP redirects when resolving external
@@ -552,8 +551,8 @@ export class OpenAPIToolGenerator {
               return false;
             }
 
-            // Check host allowlist (if configured)
-            if (hasHostAllowlist && !hostAllowSet.has(parsed.hostname)) {
+            // Check host allowlist (if configured), case- and trailing-dot-insensitively
+            if (hasHostAllowlist && !hostListIncludes(refOpts.allowedHosts, parsed.hostname)) {
               return false;
             }
 

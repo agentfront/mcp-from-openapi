@@ -46,8 +46,23 @@ Out of the box, the following are blocked:
 | `::1` | IPv6 loopback |
 | `fd00::/8` | IPv6 Unique Local Address |
 | `fe80::/10` | IPv6 link-local |
+| `64:ff9b:1::/48` | Local-use NAT64 prefix (never globally routable) |
 
 Bracketed IPv6 forms (`[::1]`, `[fd00:...]`, `[fe80:...]`) are also blocked.
+
+IPv6 addresses that embed an IPv4 address are checked against the IPv4 ranges above, because a NAT64 gateway, 6to4 relay, or dual-stack host may carry them to that IPv4 target:
+
+| Form | Example | Embedded IPv4 |
+|------|---------|---------------|
+| IPv4-mapped (`::ffff:0:0/96`) | `::ffff:7f00:1` | `127.0.0.1` |
+| IPv4-translated (`::ffff:0:0:0/96`) | `::ffff:0:a00:1` | `10.0.0.1` |
+| IPv4-compatible (`::/96`, deprecated) | `::7f00:1` | `127.0.0.1` |
+| NAT64 well-known prefix (`64:ff9b::/96`) | `64:ff9b::a9fe:a9fe` | `169.254.169.254` |
+| 6to4 (`2002::/16`) | `2002:c0a8:101::1` | `192.168.1.1` |
+
+### Hostname Matching
+
+Hostnames are compared in a normalized form: lowercase, with trailing root dots and IPv6 brackets removed. This applies to the built-in names above and to every `allowedHosts` / `blockedHosts` entry, on both sides of the comparison. `localhost.`, `LOCALHOST`, and `localhost` are the same host, so a `blockedHosts: ['internal.corp']` entry also blocks `http://internal.corp./`.
 
 ---
 
@@ -139,6 +154,12 @@ Every network fetch -- the spec URL in `fromURL` and each external `$ref` -- the
 2. Pins the connection to the exact address it just validated, so the socket never looks the name up again (this closes DNS rebinding), while keeping the original hostname for the `Host` header and TLS SNI
 3. Opens a fresh socket for every request, so a pooled keep-alive socket that was connected elsewhere is never reused
 4. Re-validates every redirect hop before following it (`$ref` fetches refuse redirects entirely)
+
+### Headers and Redirects
+
+`LoadOptions.headers` (typically the spec host's `Authorization` or API key) is sent only while the request stays on the origin of the URL passed to `fromURL`. If a redirect leaves that origin (another host, another port, or an `https` → `http` downgrade), **all** caller headers are dropped for that hop and for every later hop, even if the chain later returns to the original origin. An open redirect on the spec host therefore cannot pass your credentials to a third party. External `$ref` fetches never send `headers`.
+
+If your spec host redirects to a different origin that also needs credentials, load the final URL directly, or pass `followRedirects: false` to stop at the redirect.
 
 Connection pinning needs Node's `node:http`/`node:https`. On runtimes without them (Web/edge), and whenever you pass a custom `fetchImpl` to `safeFetch`, only the pre-fetch checks apply. For untrusted input there, combine `allowedHosts` with network egress controls.
 
