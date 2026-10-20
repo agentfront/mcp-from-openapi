@@ -1,5 +1,17 @@
 ## [2.9.0] - 2026-10-20
 
+### Changed
+- Improved hostname normalization for $ref resolution.
+- Updated internal IP blocking for IPv6 flows.
+
+### Fixed
+- Fixed SSRF vulnerability by adjusting IPv6 prefix blocking.
+- Ensured spec credentials retain original origin during redirects.
+
+### Security
+- Enhanced SSRF protection in hostname handling.
+- Adjusted SSRF prevention mechanisms to handle spec credentials more securely.
+
 ## [2.5.0] - 2026-06-21
 
 ### Security (SSRF hardening — GHSA-65h7-9wrw-629c)
