@@ -257,6 +257,49 @@ paths:
       expect(receivedAuth).toBe('value');
     });
 
+    it('should not forward caller headers to a cross-origin redirect target', async () => {
+      const cdn = createLoopbackServer(() => (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(specJson('Redirected'));
+      });
+      const cdnBase = await cdn.listen();
+      loopback.reset();
+      handler = (_req, res) => {
+        res.writeHead(302, { location: `${cdnBase}/spec.json` });
+        res.end();
+      };
+      try {
+        const generator = await OpenAPIToolGenerator.fromURL(
+          `${baseUrl}/api.json`,
+          internal({ headers: { Authorization: 'Bearer SECRET-TOKEN', 'X-API-Key': 'SECRET-KEY' } }),
+        );
+        expect(generator.getDocument().info.title).toBe('Redirected');
+        expect(loopback.requests[0].headers.authorization).toBe('Bearer SECRET-TOKEN');
+        expect(cdn.requests).toHaveLength(1);
+        expect(cdn.requests[0].headers.authorization).toBeUndefined();
+        expect(cdn.requests[0].headers['x-api-key']).toBeUndefined();
+      } finally {
+        await cdn.close();
+      }
+    });
+
+    it('should apply blockedHosts to the trailing-dot form of the spec host', async () => {
+      loopback.reset();
+      handler = (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(specJson('Blocked'));
+      };
+      const port = new URL(baseUrl).port;
+      for (const host of ['localhost', 'localhost.', 'LOCALHOST.']) {
+        await expect(
+          OpenAPIToolGenerator.fromURL(`http://${host}:${port}/api.json`, {
+            refResolution: { allowInternalIPs: true, blockedHosts: ['localhost'] },
+          }),
+        ).rejects.toThrow(/blocked/);
+      }
+      expect(loopback.requests).toHaveLength(0);
+    });
+
     it('should not follow redirects when followRedirects is false', async () => {
       handler = (_req, res) => {
         res.writeHead(302, { location: `${baseUrl}/elsewhere` });
@@ -2125,6 +2168,27 @@ describe('SSRF Prevention - $ref resolution security', () => {
     const canRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
     expect(canRead({ url: 'https://schemas.example.com/user.json' })).toBe(true);
     expect(canRead({ url: 'https://evil.com/schema.json' })).toBe(false);
+  });
+
+  it('should match allowedHosts / blockedHosts regardless of case and trailing root dots', async () => {
+    const allowGen = await OpenAPIToolGenerator.fromJSON(minimalSpec, {
+      refResolution: { allowedHosts: ['Schemas.Example.com.'] },
+    });
+    await allowGen.generateTools();
+    const allowCanRead = derefSpy.mock.calls[0][1]?.resolve?.http?.canRead;
+    expect(allowCanRead({ url: 'https://schemas.example.com/user.json' })).toBe(true);
+    expect(allowCanRead({ url: 'https://schemas.example.com./user.json' })).toBe(true);
+    expect(allowCanRead({ url: 'https://schemas.example.org/user.json' })).toBe(false);
+
+    const blockGen = await OpenAPIToolGenerator.fromJSON(minimalSpec, {
+      refResolution: { blockedHosts: ['Evil.com'] },
+    });
+    await blockGen.generateTools();
+    const blockCanRead = derefSpy.mock.calls[1][1]?.resolve?.http?.canRead;
+    expect(blockCanRead({ url: 'https://evil.com/schema.json' })).toBe(false);
+    expect(blockCanRead({ url: 'https://evil.com./schema.json' })).toBe(false);
+    expect(blockCanRead({ url: 'https://EVIL.COM../schema.json' })).toBe(false);
+    expect(blockCanRead({ url: 'https://good.com/schema.json' })).toBe(true);
   });
 
   it('should support exotic protocols in allowedProtocols', async () => {

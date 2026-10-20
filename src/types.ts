@@ -766,12 +766,15 @@ export interface RefResolutionOptions {
    * Hostnames allowed for external $ref resolution (network protocols only).
    * When set, only refs pointing to these hosts are resolved.
    * When not set, all hosts are allowed except blocked internal ranges.
+   * Matched case-insensitively, ignoring trailing root dots and IPv6 brackets.
    */
   allowedHosts?: string[];
 
   /**
    * Additional hostnames/IPs to block. Applied on top of the built-in
    * internal IP block list (localhost, 169.254.x.x, 10.x.x.x, etc.).
+   * Matched case-insensitively, ignoring trailing root dots and IPv6 brackets,
+   * so `internal.corp` also blocks `internal.corp.`.
    */
   blockedHosts?: string[];
 
@@ -801,7 +804,10 @@ export interface LoadOptions {
   baseUrl?: string;
 
   /**
-   * Custom HTTP headers for loading from URL
+   * Custom HTTP headers for loading from URL (e.g. the spec host's
+   * `Authorization`). Sent only to the spec URL's origin: if a redirect leaves
+   * that origin (host, port, or scheme), they are dropped for every remaining
+   * hop. Never sent to external `$ref` hosts.
    */
   headers?: Record<string, string>;
 

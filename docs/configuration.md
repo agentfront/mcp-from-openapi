@@ -27,7 +27,7 @@ const generator = await OpenAPIToolGenerator.fromURL(url, {
 | ----------------- | -------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `dereference`     | `boolean`                              | `true`  | Resolve all `$ref` pointers in the spec                                                                                                                                                             |
 | `baseUrl`         | `string`                               | `''`    | Override server URLs from the spec                                                                                                                                                                  |
-| `headers`         | `Record<string, string>`               | `{}`    | Custom HTTP headers for URL loading                                                                                                                                                                 |
+| `headers`         | `Record<string, string>`               | `{}`    | Custom HTTP headers for URL loading. Sent only to the spec URL's origin: dropped once a redirect leaves it, and never sent to external `$ref` hosts                                                 |
 | `timeout`         | `number`                               | `30000` | HTTP request timeout in milliseconds                                                                                                                                                                |
 | `validate`        | `boolean`                              | `true`  | Validate the OpenAPI document on load                                                                                                                                                               |
 | `followRedirects` | `boolean`                              | `true`  | Follow HTTP redirects when loading from URL                                                                                                                                                         |
@@ -44,6 +44,8 @@ Controls how external `$ref` pointers are resolved during dereferencing. See [SS
 | `allowedProtocols` | `string[]` | `['http', 'https']` | Protocols allowed for external refs |
 | `allowedHosts`     | `string[]` | `[]` (all allowed)  | Whitelist specific hostnames        |
 | `blockedHosts`     | `string[]` | `[]`                | Additional hostnames to block       |
+
+Host entries match case-insensitively and ignore trailing root dots and IPv6 brackets: `['internal.corp']` also blocks `internal.corp.` and `INTERNAL.CORP`.
 | `allowInternalIPs` | `boolean`  | `false`             | Disable built-in SSRF protection    |
 
 ---
