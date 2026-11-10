@@ -10,6 +10,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-yellow.svg)](https://opensource.org/license/apache-2-0)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 [![node](https://img.shields.io/node/v/mcp-from-openapi.svg)](https://nodejs.org/)
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/frontegg-david/badge.svg)](https://hub.xerj.org/contributors/frontegg-david)
 
 ## What This Solves
 
