@@ -17,6 +17,7 @@ import type {
   AuthType,
   OperationObject,
   OperationWithContext,
+  ParameterMapper,
   ToolMetadata,
   ServerObject,
   PathItemObject,
@@ -1048,6 +1049,17 @@ export class OpenAPIToolGenerator {
     };
     const copyValue = <T>(value: T, label: string, omitPrototypeKeys = false): T =>
       copyJsonValue(value, valueBudget, { label, omitPrototypeKeys }) as T;
+    // The mapper has an entry per parameter, built here: only the objects in
+    // it (serialization, encodings, security) can hold values from the spec,
+    // so only they count — a wide body must not exhaust the budget
+    const copyEntry = (entry: ParameterMapper): ParameterMapper => {
+      const copy = { ...entry } as Record<string, unknown>;
+      for (const key of Object.keys(copy)) {
+        const value = copy[key];
+        if (value !== null && typeof value === 'object') copy[key] = copyValue(value, 'A parameter mapper entry');
+      }
+      return copy as unknown as ParameterMapper;
+    };
 
     // MCP `_meta`: generated operation entry (opt-in) + extension pass-through (always)
     let toolMeta: Record<string, unknown> | undefined;
@@ -1097,7 +1109,7 @@ export class OpenAPIToolGenerator {
       ...(icons && { icons }),
       inputSchema: resolvedInputSchema,
       outputSchema: resolvedOutputSchema,
-      mapper: copyValue(mapper, 'The parameter mapper'),
+      mapper: mapper.map(copyEntry),
       metadata: copyValue(metadata, 'The tool metadata'),
     };
   }

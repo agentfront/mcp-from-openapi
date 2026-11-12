@@ -5161,6 +5161,49 @@ describe('Deeply nested schemas (issue #50)', () => {
     expect(tool.inputSchema.required).toEqual(['id']);
   });
 
+  it('flattens a 20000-link allOf request body that adds a property per link, in linear time', async () => {
+    // Merging a full property map per link took quadratic time and memory:
+    // 5000 links took 2.8 s; this would take minutes. The mapper's 20000
+    // entries must not exhaust the node budget either.
+    const schemas: Record<string, unknown> = {};
+    for (let i = 0; i < 20000; i++) {
+      const own = { type: 'object', properties: { [`p${i}`]: { type: 'string' }, shared: { description: `link ${i}` } } };
+      schemas[`S${i}`] = i < 19999 ? { allOf: [{ $ref: `#/components/schemas/S${i + 1}` }, own] } : own;
+    }
+    const spec = specWithChain('allOf', 1);
+    Object.assign(spec.components.schemas, schemas);
+    spec.paths['/item'].post.requestBody.content['application/json'].schema = { $ref: '#/components/schemas/S0' };
+
+    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'post');
+
+    // Keys in the order they are first assigned — the deepest link first — and
+    // each with the value assigned last, by the shallowest link
+    const keys = Object.keys(tool.inputSchema.properties!);
+    expect(keys).toHaveLength(20001);
+    expect(keys.slice(0, 3)).toEqual(['p19999', 'shared', 'p19998']);
+    expect(keys[keys.length - 1]).toBe('p0');
+    expect((tool.inputSchema.properties as any).shared).toMatchObject({ description: 'link 0' });
+    expect(tool.mapper).toHaveLength(20001);
+  });
+
+  it('merges a member repeated in an allOf list as assigning its properties again would', async () => {
+    const spec = specWithChain('allOf', 1);
+    spec.components.schemas.A = { type: 'object', properties: { a: { type: 'string' }, both: { description: 'A' } } };
+    spec.components.schemas.B = { type: 'object', properties: { both: { description: 'B' }, b: { type: 'string' } } };
+    spec.paths['/item'].post.requestBody.content['application/json'].schema = {
+      allOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }, { $ref: '#/components/schemas/A' }],
+    };
+
+    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'post');
+
+    expect(tool.inputSchema.properties).toMatchObject({
+      a: { type: 'string' },
+      both: { description: 'A' },
+      b: { type: 'string' },
+    });
+    expect(Object.keys(tool.inputSchema.properties!)).toEqual(['a', 'both', 'b']);
+  });
+
   it('lints a chain 5000 $refs long', async () => {
     const { findings } = await (await OpenAPIToolGenerator.fromJSON(specWithChain('mixed', 5000))).lint();
     const deep = findings.filter((finding) => finding.code === 'deep-schema');
@@ -5354,6 +5397,17 @@ describe('Values copied from the spec into a tool (issue #50)', () => {
     expect(JSON.stringify((tool.inputSchema.properties!.a as any).default)).toBe(
       '{"type":"object","properties":{}}',
     );
+  });
+
+  it('drops the reference back in x-frontmcp data that $refs a recursive schema, as metadata.frontmcp', async () => {
+    const spec = specWithSharedValue('x-frontmcp', 0);
+    spec.components.schemas.Tree = { type: 'object', properties: { child: { $ref: '#/components/schemas/Tree' } } };
+    spec.paths['/item'].post['x-frontmcp'] = { meta: { 'acme/tree': { $ref: '#/components/schemas/Tree' } } };
+    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'post');
+
+    const tree = '{"acme/tree":{"type":"object","properties":{}}}';
+    expect(JSON.stringify((tool.metadata.frontmcp as any).meta)).toBe(tree);
+    expect(JSON.stringify(tool._meta)).toBe(tree);
   });
 
   it('shares no object with the document, so changing one tool cannot change the next', async () => {
