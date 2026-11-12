@@ -1,6 +1,7 @@
 // Main exports
 export { OpenAPIToolGenerator } from './generator';
 export { SchemaBuilder } from './schema-builder';
+export type { TruncateDepthOptions } from './schema-builder';
 export { ParameterResolver } from './parameter-resolver';
 export { ResponseBuilder } from './response-builder';
 export { Validator } from './validator';
@@ -123,6 +124,7 @@ export type {
   RefResolutionOptions,
   LoadOptions,
   GenerateOptions,
+  SchemaConversionOptions,
   FormatResolver,
   JsonSchema,
   NamingStrategy,

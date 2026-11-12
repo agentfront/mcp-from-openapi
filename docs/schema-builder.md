@@ -200,11 +200,14 @@ SchemaBuilder.flatten(schema, 5); // Custom max depth (default: 10)
 
 Bound a schema tree to a maximum nesting depth. Nodes at the limit keep scalar keywords but lose child schemas (`properties`, `items`, `additionalProperties`, compositions, `not`) and gain a `[Truncated: nested schema exceeds maxSchemaDepth]` description note. Non-mutating and safe on circular schema graphs.
 
+The result is always a fresh tree: a subschema that appears several times in the input (for example, one object shared by several parents) comes out as independent copies, so mutating one occurrence never changes another. `maxNodes` caps the size of that tree and throws a `SchemaError` as soon as it would be exceeded. Shared subschemas are expanded once per occurrence, so a small input can describe a very large tree.
+
 ```typescript
 SchemaBuilder.truncateDepth(schema, 5);
+SchemaBuilder.truncateDepth(schema, 5, { maxNodes: 10_000 }); // throws SchemaError past 10k nodes
 ```
 
-This powers the `maxSchemaDepth` generate option (default `10`).
+This powers the `maxSchemaDepth` and `maxSchemaNodes` generate options (defaults `10` and `100000`).
 
 ### simplify
 

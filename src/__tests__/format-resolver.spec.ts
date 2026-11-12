@@ -450,3 +450,38 @@ describe('Format resolution integration', () => {
     expect(idSchema.pattern).toBeUndefined();
   });
 });
+
+describe('resolveSchemaFormats on shared and circular schemas (issue #48)', () => {
+  it('resolves a subschema used in several places once and shares the result', () => {
+    const uuid = jest.fn((schema: JsonSchema) => ({ ...schema, pattern: '^uuid$' }));
+    const shared: JsonSchema = { type: 'string', format: 'uuid' };
+    const result = resolveSchemaFormats(
+      { type: 'object', properties: { a: shared, b: shared, c: { type: 'array', items: shared } } },
+      { uuid },
+    ) as any;
+
+    expect(uuid).toHaveBeenCalledTimes(1);
+    expect(result.properties.a).toEqual({ type: 'string', format: 'uuid', pattern: '^uuid$' });
+    expect(result.properties.a).toBe(result.properties.b);
+    expect(result.properties.c.items).toBe(result.properties.a);
+  });
+
+  it('resolves a deep chain of doubly-referenced schemas in linear time', () => {
+    const uuid = jest.fn((schema: JsonSchema) => ({ ...schema, pattern: '^uuid$' }));
+    let level: JsonSchema = { type: 'string', format: 'uuid' };
+    for (let i = 0; i < 40; i++) level = { type: 'object', properties: { left: level, right: level } };
+    resolveSchemaFormats(level, { uuid });
+
+    expect(uuid).toHaveBeenCalledTimes(1);
+  });
+
+  it('terminates on circular schemas, producing an equally circular result', () => {
+    const node: any = { type: 'object', format: 'uuid', properties: {} };
+    node.properties.self = node;
+    const result = resolveSchemaFormats(node, { uuid: (schema) => ({ ...schema, description: 'resolved' }) }) as any;
+
+    expect(result.description).toBe('resolved');
+    expect(result.properties.self).toBe(result);
+    expect(node.description).toBeUndefined();
+  });
+});

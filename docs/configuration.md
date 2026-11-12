@@ -77,6 +77,7 @@ const tools = await generator.generateTools({
 | `includeDeprecated`                 | `boolean`                                                    | `false`                          | Include deprecated operations                                                              |
 | `includeAllResponses`               | `boolean`                                                    | `true`                           | Include all status codes as oneOf union                                                    |
 | `maxSchemaDepth`                    | `number`                                                     | `10`                             | Maximum schema nesting depth; deeper structures are truncated with a note                  |
+| `maxSchemaNodes`                    | `number`                                                     | `100000`                         | Node budget per generated schema; a tool that exceeds it fails with `SchemaError`          |
 | `includeExamples`                   | `boolean`                                                    | `false`                          | Include parameter/media-type example values in schemas                                     |
 | `includeSecurityInInput`            | `boolean \| string[]`                                        | `false`                          | Add security params to inputSchema; an array selects specific schemes                      |
 | `inferAnnotations`                  | `boolean`                                                    | `true`                           | Infer MCP tool annotations from HTTP method semantics                                      |
@@ -150,6 +151,12 @@ const tools = await generator.generateTools({
 ### maxSchemaDepth
 
 Input and output schemas are bounded to `maxSchemaDepth` levels of nesting (default `10`, minimum `1` — values below 1 are clamped so the root schema always keeps its properties). Nodes at the limit keep their scalar keywords (`type`, `description`, `format`, ...) but have child schemas stripped and `[Truncated: nested schema exceeds maxSchemaDepth]` appended to their description. Truncation covers all JSON Schema 2020-12 structural keywords (`properties`, `patternProperties`, `$defs`, `prefixItems`, `if`/`then`/`else`, `dependentSchemas`, compositions, ...). This keeps pathological or deeply recursive schemas from flooding an agent's context window.
+
+The bound is applied while schemas are converted, not only afterwards: conversion stops descending once it is past `maxSchemaDepth`, and a schema reused through `$ref` (a pagination envelope, a money or address type) is converted once and reused for its other occurrences. Generation cost therefore follows the size of the output, not the number of paths through the spec — a few-KB spec whose schemas each reference the same child twice, chained dozens of levels deep, generates in milliseconds instead of minutes.
+
+### maxSchemaNodes
+
+The emitted schemas still spell every occurrence of a shared schema out, so a small spec can describe an enormous tree — for example, five properties per level that all reference the next level keep 5^10 nodes after depth truncation. `maxSchemaNodes` (default `100000`) caps each generated input/output schema, and the conversion work for each parameter, request body, and emitted response (with `includeAllResponses: false`, the responses left out are never converted). Past the budget, generating that tool fails with a `SchemaError` that names the option; `generateTools()` skips the tool with a warning, like any other per-tool failure. For scale: the largest schemas in the vendored GitHub and Discord specs have about 5,000 nodes (~440 KB of JSON) at the default depth, and no single conversion in them visits more than ~1,200 nodes. Lower `maxSchemaDepth` to shrink such tools, raise `maxSchemaNodes` to allow them, or pass `Infinity` to disable the budget.
 
 ### includeExamples
 
