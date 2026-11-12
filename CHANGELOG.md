@@ -1,3 +1,11 @@
+## [2.9.3] - 2026-11-12
+
+### Fixed
+- Addressed stack overflow risks when processing `$ref` chains of any length.
+- Implemented stricter prototype key checks to prevent pollution.
+- Improved schema node budget counting for inlining and mapper value calculations.
+- Resolved schema handling to avoid circular references causing application crashes.
+
 ## [2.9.2] - 2026-11-12
 
 ### Fixed
