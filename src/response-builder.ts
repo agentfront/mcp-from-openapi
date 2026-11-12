@@ -35,34 +35,36 @@ export class ResponseBuilder {
       return undefined;
     }
 
-    const schemas = this.extractResponseSchemas(responses);
+    // Decide which responses are emitted before converting any schema, so a
+    // response that is left out costs no conversion work — and cannot exceed
+    // the conversion budget on behalf of the ones that are kept
+    const candidates = this.collectResponses(responses);
 
-    if (schemas.length === 0) {
+    if (candidates.length === 0) {
       return undefined;
     }
 
-    if (schemas.length === 1) {
-      return schemas[0].schema;
+    if (candidates.length === 1) {
+      return this.extractResponseSchema(candidates[0]);
     }
 
     if (this.includeAllResponses) {
       // Return union of all response schemas
       return {
-        oneOf: schemas.map((s) => s.schema),
+        oneOf: candidates.map((candidate) => this.extractResponseSchema(candidate)),
         description: 'Response can be one of multiple status codes',
       };
     } else {
       // Return only the preferred status code
-      const preferred = this.selectPreferredSchema(schemas);
-      return preferred.schema;
+      return this.extractResponseSchema(this.selectPreferredResponse(candidates));
     }
   }
 
   /**
-   * Extract schemas from all responses
+   * Collect the responses that yield an output schema (without converting it)
    */
-  private extractResponseSchemas(responses: ResponsesObject): ResponseSchema[] {
-    const schemas: ResponseSchema[] = [];
+  private collectResponses(responses: ResponsesObject): ResponseCandidate[] {
+    const candidates: ResponseCandidate[] = [];
 
     for (const [statusCode, response] of Object.entries(responses)) {
       // Skip if it's a reference object
@@ -74,51 +76,49 @@ export class ResponseBuilder {
       const code = parseInt(statusCode, 10);
       if (isNaN(code)) continue;
 
-      const schema = this.extractResponseSchema(response, code);
-      if (schema) {
-        schemas.push(schema);
+      if (this.yieldsSchema(response)) {
+        candidates.push({ statusCode: code, response });
       }
     }
 
     // Handle default response if no other schemas found
-    if (schemas.length === 0 && responses['default']) {
+    if (candidates.length === 0 && responses['default']) {
       const defaultResponse = responses['default'];
-      if (!isReferenceObject(defaultResponse)) {
-        const schema = this.extractResponseSchema(defaultResponse, 0);
-        if (schema) {
-          schemas.push(schema);
-        }
+      if (!isReferenceObject(defaultResponse) && this.yieldsSchema(defaultResponse)) {
+        candidates.push({ statusCode: 0, response: defaultResponse });
       }
     }
 
-    return schemas;
+    return candidates;
   }
 
   /**
-   * Extract schema from a single response
+   * Whether a response yields an output schema: one without content yields a
+   * `null` schema; one with content needs a schema for its selected media type
    */
-  private extractResponseSchema(response: ResponseObject, statusCode: number): ResponseSchema | null {
+  private yieldsSchema(response: ResponseObject): boolean {
+    return !response.content || Boolean(response.content[this.selectContentType(response.content)]?.schema);
+  }
+
+  /**
+   * Build the output schema of a single response
+   */
+  private extractResponseSchema({ statusCode, response }: ResponseCandidate): JsonSchema {
     if (!response.content) {
       // Response with no content (e.g., 204 No Content)
       return {
-        statusCode,
-        schema: {
-          type: 'null',
-          description: response.description,
-          'x-status-code': statusCode,
-        } as JsonSchema,
-      };
+        type: 'null',
+        description: response.description,
+        'x-status-code': statusCode,
+      } as JsonSchema;
     }
 
     const contentType = this.selectContentType(response.content);
     const mediaType = response.content[contentType];
 
-    if (!mediaType?.schema) {
-      return null;
-    }
-
     const schema: JsonSchema & { 'x-status-code'?: number } = {
-      ...toJsonSchema(mediaType.schema, this.schemaConversion),
+      // collectResponses only keeps responses whose media type has a schema
+      ...toJsonSchema(mediaType.schema!, this.schemaConversion),
       'x-status-code': statusCode,
     };
 
@@ -139,7 +139,7 @@ export class ResponseBuilder {
     // Add content type metadata
     (schema as any)['x-content-type'] = contentType;
 
-    return { statusCode, schema };
+    return schema;
   }
 
   /**
@@ -165,32 +165,33 @@ export class ResponseBuilder {
   }
 
   /**
-   * Select the preferred schema based on status code preferences
+   * Select the preferred response based on status code preferences
    */
-  private selectPreferredSchema(schemas: ResponseSchema[]): ResponseSchema {
+  private selectPreferredResponse(candidates: ResponseCandidate[]): ResponseCandidate {
     // First, try to find exact match in preferred list
     for (const preferredCode of this.preferredStatusCodes) {
-      const found = schemas.find((s) => s.statusCode === preferredCode);
+      const found = candidates.find((c) => c.statusCode === preferredCode);
       if (found) return found;
     }
 
     // Next, try to find any 2xx response
-    const success = schemas.find((s) => s.statusCode >= 200 && s.statusCode < 300);
+    const success = candidates.find((c) => c.statusCode >= 200 && c.statusCode < 300);
     if (success) return success;
 
     // Next, try to find any 3xx response
-    const redirect = schemas.find((s) => s.statusCode >= 300 && s.statusCode < 400);
+    const redirect = candidates.find((c) => c.statusCode >= 300 && c.statusCode < 400);
     if (redirect) return redirect;
 
     // Fallback to first available
-    return schemas[0];
+    return candidates[0];
   }
 }
 
 /**
- * Internal response schema structure
+ * A response that yields an output schema, with its numeric status code
+ * (0 for `default`)
  */
-interface ResponseSchema {
+interface ResponseCandidate {
   statusCode: number;
-  schema: JsonSchema;
+  response: ResponseObject;
 }

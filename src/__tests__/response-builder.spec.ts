@@ -561,6 +561,21 @@ describe('ResponseBuilder schemaConversion limits', () => {
     expect(schema.properties.a.properties.b).toEqual({ type: 'string' });
   });
 
+  it('converts only the response it emits when includeAllResponses is false', () => {
+    const wide: Record<string, unknown> = {};
+    for (let i = 0; i < 10; i++) wide[`f${i}`] = { type: 'string' };
+    const withError: any = {
+      ...responses,
+      400: { description: 'bad', content: { 'application/json': { schema: { type: 'object', properties: wide } } } },
+    };
+
+    const preferred: any = new ResponseBuilder({ includeAllResponses: false }, { maxNodes: 5 }).build(withError);
+    expect(preferred['x-status-code']).toBe(200);
+    expect(() => new ResponseBuilder({ includeAllResponses: true }, { maxNodes: 5 }).build(withError)).toThrow(
+      /maxSchemaNodes/,
+    );
+  });
+
   it('applies maxDepth and maxNodes when given', () => {
     const schema: any = new ResponseBuilder({}, { maxDepth: 1 }).build(responses);
     expect(schema.properties.a.properties.b).toEqual({});

@@ -403,8 +403,10 @@ describe('fromArazzo schema node budget', () => {
     // The step's own schemas fit the budget — only the wide workflow input exceeds it
     const small = arazzoWith([simpleWorkflow()]);
     await expect(fromArazzo(small, { sources: sources(), generateOptions: { maxSchemaNodes: 40 } })).resolves.toHaveLength(1);
-    await expect(fromArazzo(doc, { sources: sources(), generateOptions: { maxSchemaNodes: 40 } })).rejects.toThrow(
-      /node budget of 40 \(maxSchemaNodes\)/,
+    await expectArazzoError(
+      fromArazzo(doc, { sources: sources(), generateOptions: { maxSchemaNodes: 40 } }),
+      /^Failed to build workflow "getPetFlow": .*node budget of 40 \(maxSchemaNodes\)/,
+      '/workflows/0',
     );
   });
 });

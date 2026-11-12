@@ -121,13 +121,15 @@ export function toJsonSchema(
   options: SchemaConversionOptions = {},
 ): JsonSchema {
   const state: ConversionState = {
+    root: schema,
     maxDepth: normalizeConversionLimit(options.maxDepth, 0),
     maxNodes: normalizeConversionLimit(options.maxNodes, 1),
     converted: 0,
-    stack: new Set(),
+    stack: new Map(),
     cache: new Map(),
-    cyclic: findCyclicNodes(schema),
+    cyclic: undefined,
     cut: false,
+    lowWater: Infinity,
   };
   return convertSchema(schema, 0, state);
 }
@@ -138,18 +140,26 @@ function normalizeConversionLimit(value: number | undefined, min: number): numbe
 }
 
 interface ConversionState {
+  readonly root: unknown;
   readonly maxDepth: number;
   readonly maxNodes: number;
   /** Nodes converted so far (cache hits and placeholders are free). */
   converted: number;
-  /** Ancestors on the current path: a revisit is a cycle, cut with `{}`. */
-  readonly stack: Set<object>;
-  /** Results for acyclic nodes, keyed by source node. */
+  /** Ancestors on the current path, with their stack index: a revisit is a cycle, cut with `{}`. */
+  readonly stack: Map<object, number>;
+  /** The latest result for every converted node; reused only when it is valid anywhere. */
   readonly cache: Map<object, CachedConversion>;
-  /** Nodes on a reference cycle — their result depends on the path, so they are never cached. */
-  readonly cyclic: Set<object>;
+  /**
+   * Nodes on a cycle conversion can walk — their result depends on the path,
+   * so it is never reused. Computed only when a result that is not
+   * `selfContained` is revisited (`undefined` until then); `null` when the
+   * analysis was abandoned at the node budget.
+   */
+  cyclic: Set<object> | null | undefined;
   /** Whether the subtree being converted was cut at `maxDepth`. */
   cut: boolean;
+  /** Lowest stack index a cycle cut in the subtree being converted pointed at. */
+  lowWater: number;
 }
 
 interface CachedConversion {
@@ -157,6 +167,12 @@ interface CachedConversion {
   /** Depth the result was converted at; -1 when nothing below it was cut (valid at any depth). */
   depth: number;
   cut: boolean;
+  /**
+   * The conversion explored everything below the node — nothing was cut at
+   * `maxDepth` and no path led back to the node or above it — so the node is
+   * on no cycle and the result is valid anywhere, without a cycle analysis.
+   */
+  selfContained: boolean;
 }
 
 /**
@@ -187,11 +203,13 @@ function convertSchema(schema: SchemaObject | ReferenceObject, depth: number, st
   const isNode = node !== null && typeof node === 'object';
   if (isNode) {
     const cached = state.cache.get(node);
-    if (cached && cached.depth <= depth) {
+    if (cached && cached.depth <= depth && (cached.selfContained || isReusable(node, state))) {
       state.cut ||= cached.cut;
       return cached.result;
     }
-    if (state.stack.has(node)) {
+    const onStack = state.stack.get(node);
+    if (onStack !== undefined) {
+      state.lowWater = Math.min(state.lowWater, onStack);
       return {} as JsonSchema;
     }
   }
@@ -208,57 +226,124 @@ function convertSchema(schema: SchemaObject | ReferenceObject, depth: number, st
   }
 
   const outerCut = state.cut;
+  const outerLowWater = state.lowWater;
+  const index = state.stack.size;
   state.cut = false;
-  state.stack.add(node);
+  state.lowWater = Infinity;
+  state.stack.set(node, index);
   try {
     const result = convertSchemaInner(schema, depth, state);
-    if (!state.cyclic.has(node)) {
-      state.cache.set(node, { result, depth: state.cut ? depth : -1, cut: state.cut });
-    }
+    state.cache.set(node, {
+      result,
+      depth: state.cut ? depth : -1,
+      cut: state.cut,
+      selfContained: !state.cut && state.lowWater > index,
+    });
     return result;
   } finally {
     state.stack.delete(node);
     state.cut ||= outerCut;
+    state.lowWater = Math.min(state.lowWater, outerLowWater);
   }
 }
 
 /**
- * The object-valued child schemas `convertSchemaInner` recurses into — the
- * edges of the schema graph. Reference objects are leaves (never followed).
+ * Whether a stored result for `node` that is not `selfContained` (its
+ * conversion was cut at `maxDepth`, or cycled) is still valid wherever it
+ * appears: true unless `node` lies on a cycle conversion can walk. The cycle
+ * analysis runs at most once per conversion, and only when such a result is
+ * revisited — most conversions never need it.
  */
-function childSchemas(node: Record<string, unknown>): object[] {
-  const children: unknown[] = [];
-  const properties = node['properties'];
-  if (properties && typeof properties === 'object') children.push(...Object.values(properties));
-  const items = node['items'];
-  if (items) children.push(...(Array.isArray(items) ? items : [items]));
-  const additionalProperties = node['additionalProperties'];
-  if (additionalProperties && typeof additionalProperties === 'object') children.push(additionalProperties);
+function isReusable(node: object, state: ConversionState): boolean {
+  if (state.cyclic === undefined) {
+    // A revisit implies the root is an object schema
+    state.cyclic = findCyclicNodes(state.root as object, state.maxDepth, state.maxNodes);
+  }
+  return state.cyclic !== null && !state.cyclic.has(node);
+}
+
+/**
+ * Visit the object-valued child schemas `convertSchemaInner` recurses into —
+ * the edges of the schema graph — with the depth each one adds (`allOf`
+ * members add none, as in conversion). Reference objects are leaves.
+ */
+function forEachChildSchema(node: object, visit: (child: object, weight: 0 | 1) => void): void {
+  const record = node as Record<string, unknown>;
+  const edge = (child: unknown, weight: 0 | 1): void => {
+    if (child !== null && typeof child === 'object' && !isReferenceObject(child)) visit(child, weight);
+  };
+  const properties = record['properties'];
+  if (properties && typeof properties === 'object') {
+    for (const child of Object.values(properties)) edge(child, 1);
+  }
+  const items = record['items'];
+  if (Array.isArray(items)) {
+    for (const child of items) edge(child, 1);
+  } else {
+    edge(items, 1);
+  }
+  edge(record['additionalProperties'], 1);
   for (const key of ['allOf', 'anyOf', 'oneOf', 'prefixItems'] as const) {
-    const members = node[key];
-    if (Array.isArray(members)) children.push(...members);
+    const members = record[key];
+    if (Array.isArray(members)) {
+      for (const child of members) edge(child, key === 'allOf' ? 0 : 1);
+    }
   }
-  children.push(node['not']);
+  edge(record['not'], 1);
   for (const key of SCHEMA_MAP_KEYWORDS) {
-    const value = node[key];
-    if (value && typeof value === 'object' && !Array.isArray(value)) children.push(...Object.values(value));
+    const value = record[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const child of Object.values(value)) edge(child, 1);
+    }
   }
-  for (const key of SCHEMA_SINGLE_KEYWORDS) children.push(node[key]);
-  return children.filter(
-    (child): child is object => child !== null && typeof child === 'object' && !isReferenceObject(child),
-  );
+  for (const key of SCHEMA_SINGLE_KEYWORDS) edge(record[key], 1);
 }
 
 /**
- * Nodes that lie on a cycle of the schema graph reachable from `root`
- * (Tarjan's strongly-connected-components algorithm, iterative so deep specs
- * cannot overflow the call stack). Only these convert differently depending
- * on the path that reaches them.
+ * The shallowest depth at which conversion can reach each node from `root`,
+ * for the nodes within `maxDepth` (depth counted exactly as conversion counts
+ * it). `null` once that region holds more than `maxNodes` nodes — conversion
+ * would exceed the budget anyway.
  */
-function findCyclicNodes(root: unknown): Set<object> {
-  const cyclic = new Set<object>();
-  if (root === null || typeof root !== 'object' || isReferenceObject(root)) return cyclic;
+function reachableRegion(root: object, maxDepth: number, maxNodes: number): Map<object, number> | null {
+  const depthOf = new Map<object, number>([[root, 0]]);
+  let level: object[] = [root];
+  for (let depth = 0; level.length > 0; depth++) {
+    const next: object[] = [];
+    // allOf members join the level being walked, so it grows while iterating
+    for (let i = 0; i < level.length; i++) {
+      const node = level[i];
+      // Queued for this level, then reached through allOf at a shallower one
+      if (depthOf.get(node) !== depth) continue;
+      forEachChildSchema(node, (child, weight) => {
+        const childDepth = depth + weight;
+        const known = depthOf.get(child);
+        if (childDepth > maxDepth || (known !== undefined && known <= childDepth)) return;
+        depthOf.set(child, childDepth);
+        (weight === 0 ? level : next).push(child);
+      });
+      if (depthOf.size > maxNodes) return null;
+    }
+    level = next;
+  }
+  return depthOf;
+}
 
+/**
+ * Nodes on a cycle that conversion can walk (Tarjan's strongly-connected-
+ * components algorithm, iterative so deep specs cannot overflow the call
+ * stack). Only these convert differently depending on the path that reaches
+ * them. A cycle is walkable only if each of its edges can be followed within
+ * `maxDepth` — i.e. from its source's shallowest depth — so the analysis
+ * stays inside that region, and a large subgraph past `maxDepth` costs
+ * nothing. `null` when the region exceeds `maxNodes`: then no result is
+ * reused, which is always correct, and the budget still bounds the work.
+ */
+function findCyclicNodes(root: object, maxDepth: number, maxNodes: number): Set<object> | null {
+  const region = reachableRegion(root, maxDepth, maxNodes);
+  if (!region) return null;
+
+  const cyclic = new Set<object>();
   const index = new Map<object, number>();
   const low = new Map<object, number>();
   const open: object[] = [];
@@ -269,7 +354,12 @@ function findCyclicNodes(root: unknown): Set<object> {
     low.set(node, index.size - 1);
     open.push(node);
     onOpen.add(node);
-    frames.push({ node, children: childSchemas(node as Record<string, unknown>), next: 0 });
+    const children: object[] = [];
+    const nodeDepth = region.get(node)!;
+    forEachChildSchema(node, (child, weight) => {
+      if (nodeDepth + weight <= maxDepth) children.push(child);
+    });
+    frames.push({ node, children, next: 0 });
   };
 
   enter(root);

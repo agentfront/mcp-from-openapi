@@ -1154,7 +1154,16 @@ export async function fromArazzo(document: ArazzoDocument | string, options: Fro
     for (let sIndex = 0; sIndex < workflow.steps.length; sIndex++) {
       stepIRs.push(await buildStepIR(workflow.steps[sIndex], ctx, `${wPath}/steps/${sIndex}`));
     }
-    let tool = buildWorkflowTool(workflow, stepIRs, ctx, wPath);
+    let tool: McpOpenAPITool;
+    try {
+      tool = buildWorkflowTool(workflow, stepIRs, ctx, wPath);
+    } catch (error: unknown) {
+      // Schema failures (e.g. maxSchemaNodes) surface as ArazzoError, like step failures
+      if (error instanceof ArazzoError) throw error;
+      /* c8 ignore next -- workflow assembly only throws Error instances */
+      const message = error instanceof Error ? error.message : String(error);
+      throw new ArazzoError(`Failed to build workflow "${workflow.workflowId}": ${message}`, { path: wPath });
+    }
     // Distinct workflowIds can still normalize to the same name (`_flow` and
     // `flow` both become `flow`) — dedupe with the generator's hash pattern.
     if (usedNames.has(tool.name)) {

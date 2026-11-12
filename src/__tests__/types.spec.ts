@@ -658,6 +658,15 @@ describe('toJsonSchema cycle safety', () => {
 describe('toJsonSchema shared references and limits (issue #48)', () => {
   const { toJsonSchema } = require('../types');
   const { SchemaError } = require('../errors');
+  const { SchemaBuilder } = require('../schema-builder');
+
+  /**
+   * What the pipeline emits: conversion bounded at maxDepth, then truncation
+   * at the same depth (which discards everything conversion left past it —
+   * placeholders, or deeper levels of a result reused from a shallower depth)
+   */
+  const convertAndTruncate = (schema: unknown, maxDepth: number): unknown =>
+    SchemaBuilder.truncateDepth(toJsonSchema(schema, { maxDepth }), maxDepth);
 
   /** Each level has two properties that both reference the next level */
   function chain(levels: number, closeCycle = false): any {
@@ -752,13 +761,94 @@ describe('toJsonSchema shared references and limits (issue #48)', () => {
     expect(result.properties.c).toBe(result.properties.b.properties.c);
   });
 
-  it('bounds a cycle of shared references by maxDepth instead of expanding every path', () => {
-    // 40 levels closing back on the first: 2^40 paths before any revisit
-    const result: any = toJsonSchema(chain(40, true), { maxDepth: 10, maxNodes: 5000 });
+  it('bounds a walkable cycle of shared references by maxDepth, converting it per path', () => {
+    // Every level references the next twice and the root once: one strongly
+    // connected component, so nothing is reused — but each path stops at maxDepth
+    const nodes: any[] = Array.from({ length: 40 }, () => ({ type: 'object', properties: {} }));
+    nodes.forEach((node, i) => {
+      node.properties.left = nodes[(i + 1) % 40];
+      node.properties.right = nodes[(i + 1) % 40];
+      node.properties.back = nodes[0];
+    });
+    const result: any = toJsonSchema(nodes[0], { maxDepth: 10, maxNodes: 5000 });
 
     let node = result;
     for (let i = 0; i < 10; i++) node = node.properties.left;
     expect(node.properties.left).toEqual({});
+    expect(result.properties.left).not.toBe(result.properties.right);
+    expect(result.properties.left.properties.back).toEqual({});
+    // 2^20 paths within depth 20 exceed the budget
+    expect(() => toJsonSchema(nodes[0], { maxDepth: 20, maxNodes: 5000 })).toThrow(SchemaError);
+  });
+
+  it('reuses nodes on a cycle too long to walk within maxDepth', () => {
+    // The closing edge lies past maxDepth, so conversion never walks the cycle:
+    // 11 conversions instead of 2^11
+    const result: any = toJsonSchema(chain(40, true), { maxDepth: 10, maxNodes: 50 });
+
+    let node = result;
+    for (let i = 0; i < 10; i++) {
+      expect(node.properties.left).toBe(node.properties.right);
+      node = node.properties.left;
+    }
+    expect(node.properties.left).toEqual({});
+  });
+
+  it('confines the cycle analysis to the region within maxDepth, abandoning it past the node budget', () => {
+    // `shared` is cut at maxDepth, so its revisit needs the cycle analysis; the
+    // 50 siblings put the region (53 nodes) over a 40-node budget
+    const shared = { type: 'object', properties: { y: { type: 'object', properties: { z: { type: 'string' } } } } };
+    const properties: Record<string, unknown> = { a: shared, b: shared };
+    for (let i = 0; i < 50; i++) properties[`w${i}`] = { type: 'string' };
+    const root = { type: 'object', properties };
+
+    const result: any = toJsonSchema(root, { maxDepth: 2, maxNodes: 53 });
+    expect(result.properties.a).toBe(result.properties.b);
+    expect(result.properties.a.properties.y.properties.z).toEqual({});
+    // Past the budget nothing is reused (always correct), and conversion fails on its own budget
+    expect(() => toJsonSchema(root, { maxDepth: 2, maxNodes: 40 })).toThrow(/node budget of 40 /);
+  });
+
+  it('emits shared, depth-cut schemas exactly like their fully expanded tree, across every keyword', () => {
+    const deep = { type: 'object', properties: { x: { type: 'object', properties: { y: { type: 'string' } } } } };
+    const sink = {
+      type: 'object',
+      properties: { a: deep, b: deep, flag: true, odd: { properties: 'invalid', $defs: [], items: true } },
+      items: [deep, { type: 'string', nullable: true }],
+      prefixItems: [deep],
+      additionalProperties: { type: 'string' },
+      allOf: [{ properties: { c: deep } }, deep],
+      anyOf: [deep],
+      oneOf: [{ type: 'null' }],
+      not: { type: 'integer' },
+      patternProperties: { '^x-': deep },
+      $defs: { D: deep },
+      definitions: { E: { type: 'string' } },
+      dependentSchemas: { a: { required: ['b'] } },
+      contains: deep,
+      propertyNames: { pattern: '^[a-z]+$' },
+      if: { properties: { a: { const: 1 } } },
+      then: deep,
+      else: { type: 'object', example: { a: 1 } },
+      contentSchema: deep,
+      unevaluatedItems: false,
+      unevaluatedProperties: { type: 'string' },
+    };
+    const shared = { type: 'array', items: sink };
+    const expanded = JSON.parse(JSON.stringify(shared)); // same schema, no shared objects
+
+    for (const maxDepth of [1, 2, 3]) {
+      expect(convertAndTruncate(shared, maxDepth)).toEqual(convertAndTruncate(expanded, maxDepth));
+    }
+  });
+
+  it('walks a node reached through allOf at a shallower depth than first queued', () => {
+    // `shared` is queued at depth 1 (properties) and then reached at depth 0 (allOf)
+    const shared = { type: 'object', properties: { x: { type: 'object', properties: { y: { type: 'string' } } } } };
+    const root = { type: 'object', properties: { a: shared, b: shared }, allOf: [shared] };
+    const expanded = JSON.parse(JSON.stringify(root));
+
+    expect(convertAndTruncate(root, 2)).toEqual(convertAndTruncate(expanded, 2));
   });
 
   it('analyzes cycles iteratively, so very deep schemas do not overflow the stack', () => {

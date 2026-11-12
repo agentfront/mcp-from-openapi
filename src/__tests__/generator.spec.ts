@@ -4945,10 +4945,46 @@ describe('Shared $ref expansion stays bounded (issue #48)', () => {
   });
 
   it('stops converting a cycle of wide shared references at the node budget', async () => {
-    const generator = await OpenAPIToolGenerator.fromJSON(specWithChain(12, { width: 5, closeCycle: true }));
+    // A 10-schema cycle closes within the default depth, so conversion walks it
+    // per path (5^9 paths) and stops at the budget
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithChain(10, { width: 5, closeCycle: true }));
 
     await expect(generator.generateTool('/item', 'get')).rejects.toThrow(
       /Schema conversion exceeded the node budget of 100000 \(maxSchemaNodes\)/,
+    );
+  });
+
+  it('generates a cycle that closes past maxSchemaDepth exactly like the open chain', async () => {
+    const options = { maxSchemaNodes: 5000 };
+    const cyclic = await (await OpenAPIToolGenerator.fromJSON(specWithChain(40, { closeCycle: true }))).generateTools(options);
+    const open = await (await OpenAPIToolGenerator.fromJSON(specWithChain(40))).generateTools(options);
+
+    expect(JSON.stringify(cyclic)).toBe(JSON.stringify(open));
+  });
+
+  it('converts only the preferred response when includeAllResponses is false', async () => {
+    const wide: Record<string, unknown> = {};
+    for (let i = 0; i < 41; i++) wide[`field${i}`] = { type: 'string' };
+    const generator = await OpenAPIToolGenerator.fromJSON({
+      openapi: '3.0.3',
+      info: { title: 'errors', version: '1.0.0' },
+      paths: {
+        '/x': {
+          get: {
+            responses: {
+              200: { description: 'ok', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } },
+              400: { description: 'bad', content: { 'application/json': { schema: { type: 'object', properties: wide } } } },
+            },
+          },
+        },
+      },
+    } as any);
+
+    // The 400 schema alone exceeds the budget, but it is never emitted
+    const tool = await generator.generateTool('/x', 'get', { includeAllResponses: false, maxSchemaNodes: 40 });
+    expect((tool.outputSchema as any)['x-status-code']).toBe(200);
+    await expect(generator.generateTool('/x', 'get', { includeAllResponses: true, maxSchemaNodes: 40 })).rejects.toThrow(
+      /maxSchemaNodes/,
     );
   });
 
