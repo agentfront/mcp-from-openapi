@@ -2,7 +2,7 @@ import { OpenAPIToolGenerator } from '../generator';
 import { toPascalIdentifier } from '../type-signature';
 import { ParameterResolver } from '../parameter-resolver';
 import { ResponseBuilder } from '../response-builder';
-import { ParseError, LoadError } from '../errors';
+import { ParseError, LoadError, SchemaError } from '../errors';
 import type { OpenAPIDocument } from '../types';
 import { createLoopbackServer, type LoopbackHandler } from './helpers/loopback';
 import { makePinnedLookup } from '../ssrf';
@@ -5091,5 +5091,126 @@ describe('ParameterResolver schemaConversion option', () => {
     expect(() => new ParameterResolver(undefined, { schemaConversion: { maxNodes: 2 } }).resolve(operation)).toThrow(
       /maxSchemaNodes/,
     );
+  });
+});
+
+describe('Deeply nested schemas (issue #50)', () => {
+  const LINKS = ['allOf', 'properties', 'items', 'anyOf', 'additionalProperties', 'not'] as const;
+  type Kind = (typeof LINKS)[number] | 'mixed';
+
+  /** One schema per level, each linking to the next by `kind` (`mixed` cycles through every link) */
+  const specWithChain = (kind: Kind, levels: number): any => {
+    const schemas: Record<string, unknown> = {};
+    for (let i = 0; i < levels; i++) {
+      const next =
+        i + 1 < levels
+          ? { $ref: `#/components/schemas/S${i + 1}` }
+          : { type: 'object', properties: { id: { type: 'string', format: 'uuid' } }, required: ['id'] };
+      const link = kind === 'mixed' ? LINKS[i % LINKS.length] : kind;
+      schemas[`S${i}`] = {
+        allOf: { allOf: [next], description: `level ${i}` },
+        properties: { type: 'object', properties: { next, [`p${i}`]: { type: 'string', example: 'x' } } },
+        items: { type: 'array', items: next },
+        anyOf: { anyOf: [next, { type: 'null' }] },
+        additionalProperties: { type: 'object', additionalProperties: next },
+        not: { not: next },
+      }[link];
+    }
+    const ref = { $ref: '#/components/schemas/S0' };
+    return {
+      openapi: '3.0.3',
+      info: { title: 'chain', version: '1.0.0' },
+      paths: {
+        '/item': {
+          get: {
+            operationId: 'getItem',
+            responses: { 200: { description: 'ok', content: { 'application/json': { schema: ref } } } },
+          },
+          post: {
+            operationId: 'putItem',
+            requestBody: { required: true, content: { 'application/json': { schema: ref } } },
+            responses: { 204: { description: 'done' } },
+          },
+        },
+      },
+      components: { schemas },
+    };
+  };
+
+  it.each<Kind>([...LINKS, 'mixed'])(
+    'generates a %s chain 5000 $refs long, identical to one just past maxSchemaDepth',
+    async (kind) => {
+      // Each link used to cost several stack frames when dereferencing, and an
+      // allOf link (which doesn't consume depth) more again in conversion,
+      // body flattening, and format resolution — v2.9.2 overflowed the call
+      // stack below 1100 links
+      const options = { resolveFormats: true, includeExamples: true };
+      const long = await (await OpenAPIToolGenerator.fromJSON(specWithChain(kind, 5000))).generateTools(options);
+      const short = await (await OpenAPIToolGenerator.fromJSON(specWithChain(kind, 40))).generateTools(options);
+
+      expect(long.map((tool) => tool.name)).toEqual(['getItem', 'putItem']);
+      expect(JSON.stringify(long)).toBe(JSON.stringify(short));
+    },
+  );
+
+  it('hoists the properties at the end of a 5000-link allOf request body', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithChain('allOf', 5000));
+    const tool = await generator.generateTool('/item', 'post');
+
+    expect(Object.keys(tool.inputSchema.properties!)).toEqual(['id']);
+    expect(tool.inputSchema.required).toEqual(['id']);
+  });
+
+  it('lints a chain 5000 $refs long', async () => {
+    const { findings } = await (await OpenAPIToolGenerator.fromJSON(specWithChain('mixed', 5000))).lint();
+    const deep = findings.filter((finding) => finding.code === 'deep-schema');
+
+    expect(deep.map((finding) => finding.path)).toEqual(['GET /item', 'POST /item']);
+    // 5000 linked schemas, then the leaf object and its `id` property
+    expect(deep[0].message).toContain('depth 5002');
+  });
+
+  it('fails with a SchemaError, not a stack overflow, when maxSchemaDepth keeps too much nesting', async () => {
+    // Steps after depth truncation recurse once per level of the truncated
+    // schema; the default depth (10) keeps them shallow
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithChain('properties', 20000));
+    const options = { maxSchemaDepth: 100000, maxSchemaNodes: Infinity };
+
+    const failure = generator.generateTool('/item', 'get', options);
+    await expect(failure).rejects.toThrow(SchemaError);
+    await expect(failure).rejects.toThrow(
+      'Schemas of GET /item are nested too deeply to process at maxSchemaDepth 100000 (maximum call stack size ' +
+        'exceeded); lower maxSchemaDepth.',
+    );
+
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(await generator.generateTools(options)).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(
+        'Failed to generate tool for POST /item:',
+        expect.stringContaining('nested too deeply to process at maxSchemaDepth 100000'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('passes x-mcp meta through from a $ref chain 5000 levels long', async () => {
+    const spec = specWithChain('properties', 5000);
+    spec.paths['/item'].get['x-mcp'] = { meta: { 'acme/schema': { $ref: '#/components/schemas/S0' } } };
+    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'get');
+
+    let node: any = tool._meta!['acme/schema'];
+    for (let i = 0; i < 5000; i++) node = node.properties.next;
+    expect(node).toEqual({ type: 'object', properties: { id: { type: 'string', format: 'uuid' } }, required: ['id'] });
+  });
+
+  it('drops the reference back to an ancestor when x-mcp meta $refs a recursive schema', async () => {
+    const spec = specWithChain('properties', 1);
+    spec.components.schemas.Tree = { type: 'object', properties: { child: { $ref: '#/components/schemas/Tree' } } };
+    spec.paths['/item'].get['x-mcp'] = { meta: { 'acme/tree': { $ref: '#/components/schemas/Tree' } } };
+    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'get');
+
+    expect(JSON.stringify(tool._meta)).toBe('{"acme/tree":{"type":"object","properties":{}}}');
   });
 });

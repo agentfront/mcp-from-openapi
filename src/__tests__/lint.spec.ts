@@ -540,3 +540,29 @@ describe('generator.lint()', () => {
     expect(result.findings).toEqual([]);
   });
 });
+
+describe('lintDocument on deeply nested schemas (issue #50)', () => {
+  it('measures a schema 20000 levels deep and finds an example at its bottom', () => {
+    let schema: any = { type: 'string', example: 'x' };
+    for (let i = 0; i < 20000; i++) schema = { type: 'object', properties: { next: schema } };
+    const doc: any = {
+      openapi: '3.0.0',
+      info: { title: 'T', version: '1' },
+      paths: {
+        '/deep': {
+          post: {
+            operationId: 'postDeep',
+            summary: 'A perfectly reasonable summary.',
+            requestBody: { content: { 'application/json': { schema } } },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+
+    const findings = lintDocument(doc).findings;
+
+    expect(findings.find((f) => f.code === 'deep-schema')?.message).toContain('depth 20001');
+    expect(findings.map((f) => f.code)).not.toContain('missing-request-example');
+  });
+});

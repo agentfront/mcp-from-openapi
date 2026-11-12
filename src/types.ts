@@ -178,7 +178,35 @@ interface CachedConversion {
 }
 
 /**
- * Recursive core of `toJsonSchema`.
+ * A schema whose conversion is in progress: its result, built before its
+ * children are converted, and the slots their results fill.
+ */
+interface ConversionFrame {
+  /** The source schema; `null` for a non-object one, which needs no cycle or sharing bookkeeping */
+  node: object | null;
+  depth: number;
+  result: Record<string, unknown>;
+  /** Wrap the finished result in `anyOf: [result, {type: 'null'}]` (a type-less `nullable`) */
+  wrapNullable: boolean;
+  /**
+   * The children to convert, in order, four entries each: the container and
+   * key their result is stored at, the child schema, and its depth
+   */
+  slots: unknown[];
+  /** Index (into `slots`) of the next child; the one before it is being converted */
+  next: number;
+  /** `state.cut` / `state.lowWater` of the enclosing subtree, restored when this one finishes */
+  outerCut: boolean;
+  outerLowWater: number;
+  /** Position on `state.stack` */
+  index: number;
+}
+
+/** Returned for a child whose conversion was pushed as a frame: its slot is filled when that frame finishes. */
+const PENDING: unique symbol = Symbol('pending');
+
+/**
+ * Core of `toJsonSchema`.
  *
  * - Cycles: dereferenced real-world specs can be cyclic (self-referential
  *   schemas); a revisit within the same path breaks the cycle with an
@@ -192,8 +220,52 @@ interface CachedConversion {
  *   that depth or deeper (where it is at least as deep as needed).
  * - Cyclic nodes are converted afresh on every visit; `maxDepth` bounds that
  *   walk and `maxNodes` stops pathological ones with a clear error.
+ * - Nesting: the walk keeps its own stack of frames instead of recursing, so
+ *   no schema is nested too deeply to convert. `allOf` members don't consume
+ *   depth, so `maxDepth` doesn't bound an `allOf` chain; a call per level
+ *   would overflow the call stack after about a thousand levels (issue #50).
+ *   Children are converted depth-first in a fixed order, so the visits and
+ *   the cache evolve as a recursive walk's would.
  */
 function convertSchema(schema: SchemaObject | ReferenceObject, depth: number, state: ConversionState): JsonSchema {
+  const frames: ConversionFrame[] = [];
+  const root = visitSchema(schema, depth, state, frames);
+  if (root !== PENDING) return root;
+  for (;;) {
+    const frame = frames[frames.length - 1];
+    const slots = frame.slots;
+    if (frame.next < slots.length) {
+      const at = frame.next;
+      frame.next = at + 4;
+      const value = visitSchema(
+        slots[at + 2] as SchemaObject | ReferenceObject,
+        slots[at + 3] as number,
+        state,
+        frames,
+      );
+      if (value !== PENDING) (slots[at] as Record<string, unknown>)[slots[at + 1] as string] = value;
+      continue;
+    }
+    frames.pop();
+    const result = finishSchema(frame, state);
+    const parent = frames[frames.length - 1];
+    if (!parent) return result;
+    const at = parent.next - 4;
+    (parent.slots[at] as Record<string, unknown>)[parent.slots[at + 1] as string] = result;
+  }
+}
+
+/**
+ * Visit one schema: its converted result when it is known right away — a
+ * `$ref` leaf, a depth or cycle placeholder, a reused result, or a schema
+ * without children — or `PENDING` once a frame converting it is pushed.
+ */
+function visitSchema(
+  schema: SchemaObject | ReferenceObject,
+  depth: number,
+  state: ConversionState,
+  frames: ConversionFrame[],
+): JsonSchema | typeof PENDING {
   // Charge every visit, not just conversions: a reused result or a `{}`
   // placeholder still fills a slot in the parent being built, and a node on a
   // cycle can be rebuilt once per path — so only counting every visit bounds
@@ -213,44 +285,56 @@ function convertSchema(schema: SchemaObject | ReferenceObject, depth: number, st
     return {} as JsonSchema;
   }
   const node: unknown = schema;
-  const isNode = node !== null && typeof node === 'object';
-  if (isNode) {
-    const cached = state.cache.get(node);
-    if (cached && cached.depth <= depth && (cached.selfContained || isReusable(node, state))) {
-      state.cut ||= cached.cut;
-      return cached.result;
-    }
-    const onStack = state.stack.get(node);
-    if (onStack !== undefined) {
-      state.lowWater = Math.min(state.lowWater, onStack);
-      return {} as JsonSchema;
-    }
-  }
-  if (!isNode) {
+  if (node === null || typeof node !== 'object') {
     // Boolean/degenerate schemas have no children to share or cycle through
-    return convertSchemaInner(schema, depth, state);
+    return enterSchema(schema, depth, null, state, frames);
   }
+  const cached = state.cache.get(node);
+  if (cached && cached.depth <= depth && (cached.selfContained || isReusable(node, state))) {
+    state.cut ||= cached.cut;
+    return cached.result;
+  }
+  const onStack = state.stack.get(node);
+  if (onStack !== undefined) {
+    state.lowWater = Math.min(state.lowWater, onStack);
+    return {} as JsonSchema;
+  }
+  return enterSchema(schema, depth, node, state, frames);
+}
 
-  const outerCut = state.cut;
-  const outerLowWater = state.lowWater;
-  const index = state.stack.size;
-  state.cut = false;
-  state.lowWater = Infinity;
-  state.stack.set(node, index);
-  try {
-    const result = convertSchemaInner(schema, depth, state);
+/**
+ * Finish a frame once its children are converted: wrap a type-less nullable
+ * result, store the result for reuse, and pop the node off the path.
+ */
+function finishSchema(frame: ConversionFrame, state: ConversionState): JsonSchema {
+  let result = frame.result as JsonSchema;
+  if (frame.wrapNullable) {
+    // Hoist pure annotation keywords onto the wrapper so descriptions and
+    // examples stay visible at the top level instead of buried in anyOf[0].
+    const inner = frame.result;
+    const wrapper: Record<string, unknown> = {};
+    for (const key of ['title', 'description', 'deprecated', 'examples'] as const) {
+      if (inner[key] !== undefined) {
+        wrapper[key] = inner[key];
+        delete inner[key];
+      }
+    }
+    wrapper['anyOf'] = [inner, { type: 'null' }];
+    result = wrapper as JsonSchema;
+  }
+  const node = frame.node;
+  if (node) {
     state.cache.set(node, {
       result,
-      depth: state.cut ? depth : -1,
+      depth: state.cut ? frame.depth : -1,
       cut: state.cut,
-      selfContained: !state.cut && state.lowWater > index,
+      selfContained: !state.cut && state.lowWater > frame.index,
     });
-    return result;
-  } finally {
     state.stack.delete(node);
-    state.cut ||= outerCut;
-    state.lowWater = Math.min(state.lowWater, outerLowWater);
+    state.cut ||= frame.outerCut;
+    state.lowWater = Math.min(state.lowWater, frame.outerLowWater);
   }
+  return result;
 }
 
 /**
@@ -269,7 +353,7 @@ function isReusable(node: object, state: ConversionState): boolean {
 }
 
 /**
- * Visit the object-valued child schemas `convertSchemaInner` recurses into —
+ * Visit the object-valued child schemas `enterSchema` converts —
  * the edges of the schema graph — with the depth each one adds (`allOf`
  * members add none, as in conversion). Reference objects are leaves.
  */
@@ -400,12 +484,37 @@ function findCyclicNodes(root: object, maxDepth: number, maxNodes: number): Set<
   return cyclic;
 }
 
-function convertSchemaInner(schema: SchemaObject, depth: number, state: ConversionState): JsonSchema {
-  // Children are converted with direct calls and plain loops — no closures or
-  // `.map` callbacks — so each nesting level costs two stack frames. allOf
-  // chains are walked to their end (they don't consume depth), so this keeps
-  // the nesting a conversion can handle at least as deep as dereferencing's.
+/**
+ * Start converting a schema: build its result without the children, and list
+ * the children to convert — returning the finished result right away when
+ * there are none, or `PENDING` with the frame pushed.
+ */
+function enterSchema(
+  schema: SchemaObject,
+  depth: number,
+  node: object | null,
+  state: ConversionState,
+  frames: ConversionFrame[],
+): JsonSchema | typeof PENDING {
+  const frame: ConversionFrame = {
+    node,
+    depth,
+    result: {},
+    wrapNullable: false,
+    slots: [],
+    next: 0,
+    outerCut: state.cut,
+    outerLowWater: state.lowWater,
+    index: state.stack.size,
+  };
+  if (node) {
+    // The subtree below this node tracks its own depth cuts and cycle targets
+    state.cut = false;
+    state.lowWater = Infinity;
+    state.stack.set(node, frame.index);
+  }
   const childDepth = depth + 1;
+  const slots = frame.slots;
 
   // Handle OpenAPI 3.0 boolean exclusiveMaximum/exclusiveMinimum
   // by converting them to JSON Schema Draft 7 numeric format
@@ -420,16 +529,16 @@ function convertSchemaInner(schema: SchemaObject, depth: number, state: Conversi
 
   const result: Record<string, unknown> = { ...cleanRest };
   delete result['xml'];
+  frame.result = result;
 
   // OpenAPI 3.0 `nullable: true` -> JSON Schema type union with 'null'.
   // Type-less nullable schemas (compositions, enum-only) can't take a type
   // union — they are wrapped in `anyOf: [<schema>, { type: 'null' }]` at the
   // end of processing instead, so nullability is never silently lost.
-  let wrapNullable = false;
   if (nullable === true) {
     const type = result['type'];
     if (type === undefined) {
-      wrapNullable = true;
+      frame.wrapNullable = true;
     } else if (Array.isArray(type)) {
       if (!type.includes('null')) {
         result['type'] = [...type, 'null'];
@@ -487,11 +596,12 @@ function convertSchemaInner(schema: SchemaObject, depth: number, state: Conversi
     result['minimum'] = minimum;
   }
 
-  // Recursively convert nested schemas to ensure all nested schemas are valid JsonSchema
+  // Nested schemas are converted too, so all of them are valid JSON Schema.
+  // Their containers are built now; each slot is filled as its child finishes.
   if (result['properties'] && typeof result['properties'] === 'object') {
     const props: Record<string, JsonSchema> = {};
     for (const [key, value] of Object.entries(result['properties'] as Record<string, SchemaObject | ReferenceObject>)) {
-      props[key] = convertSchema(value, childDepth, state);
+      slots.push(props, key, value, childDepth);
     }
     result['properties'] = props;
   }
@@ -502,20 +612,16 @@ function convertSchemaInner(schema: SchemaObject, depth: number, state: Conversi
       // Holes stay holes, as with `.map`
       const converted: JsonSchema[] = new Array(items.length);
       for (let i = 0; i < items.length; i++) {
-        if (i in items) converted[i] = convertSchema(items[i], childDepth, state);
+        if (i in items) slots.push(converted, i, items[i], childDepth);
       }
       result['items'] = converted;
     } else {
-      result['items'] = convertSchema(items as SchemaObject | ReferenceObject, childDepth, state);
+      slots.push(result, 'items', items, childDepth);
     }
   }
 
   if (result['additionalProperties'] && typeof result['additionalProperties'] === 'object') {
-    result['additionalProperties'] = convertSchema(
-      result['additionalProperties'] as SchemaObject | ReferenceObject,
-      childDepth,
-      state,
-    );
+    slots.push(result, 'additionalProperties', result['additionalProperties'], childDepth);
   }
 
   for (const key of ['allOf', 'anyOf', 'oneOf'] as const) {
@@ -526,14 +632,14 @@ function convertSchemaInner(schema: SchemaObject, depth: number, state: Conversi
       const memberDepth = key === 'allOf' ? depth : childDepth;
       const converted: JsonSchema[] = new Array(members.length);
       for (let i = 0; i < members.length; i++) {
-        if (i in members) converted[i] = convertSchema(members[i], memberDepth, state);
+        if (i in members) slots.push(converted, i, members[i], memberDepth);
       }
       result[key] = converted;
     }
   }
 
   if (result['not']) {
-    result['not'] = convertSchema(result['not'] as SchemaObject | ReferenceObject, childDepth, state);
+    slots.push(result, 'not', result['not'], childDepth);
   }
 
   // Remaining JSON Schema 2020-12 structural keywords, so nested `nullable`/
@@ -544,7 +650,7 @@ function convertSchemaInner(schema: SchemaObject, depth: number, state: Conversi
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       const mapped: Record<string, JsonSchema> = {};
       for (const [name, sub] of Object.entries(value as Record<string, SchemaObject | ReferenceObject>)) {
-        mapped[name] = convertSchema(sub, childDepth, state);
+        slots.push(mapped, name, sub, childDepth);
       }
       result[key] = mapped;
     }
@@ -553,7 +659,7 @@ function convertSchemaInner(schema: SchemaObject, depth: number, state: Conversi
   for (const key of SCHEMA_SINGLE_KEYWORDS) {
     const value = result[key];
     if (value && typeof value === 'object') {
-      result[key] = convertSchema(value as SchemaObject | ReferenceObject, childDepth, state);
+      slots.push(result, key, value, childDepth);
     }
   }
   // Array-of-schemas keyword:
@@ -561,26 +667,14 @@ function convertSchemaInner(schema: SchemaObject, depth: number, state: Conversi
   if (Array.isArray(prefixItems)) {
     const converted: JsonSchema[] = new Array(prefixItems.length);
     for (let i = 0; i < prefixItems.length; i++) {
-      if (i in prefixItems) converted[i] = convertSchema(prefixItems[i], childDepth, state);
+      if (i in prefixItems) slots.push(converted, i, prefixItems[i], childDepth);
     }
     result['prefixItems'] = converted;
   }
 
-  if (wrapNullable) {
-    // Hoist pure annotation keywords onto the wrapper so descriptions and
-    // examples stay visible at the top level instead of buried in anyOf[0].
-    const wrapper: Record<string, unknown> = {};
-    for (const key of ['title', 'description', 'deprecated', 'examples'] as const) {
-      if (result[key] !== undefined) {
-        wrapper[key] = result[key];
-        delete result[key];
-      }
-    }
-    wrapper['anyOf'] = [result, { type: 'null' }];
-    return wrapper as JsonSchema;
-  }
-
-  return result as JsonSchema;
+  if (slots.length === 0) return finishSchema(frame, state);
+  frames.push(frame);
+  return PENDING;
 }
 
 /**

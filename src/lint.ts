@@ -40,72 +40,104 @@ interface SchemaShape {
 }
 
 /**
+ * The child schemas the lint walks visit, in order: property VALUES (a
+ * property merely NAMED 'example' is not one), single or tuple schemas, and
+ * composition members. Holes are skipped, as with `forEach`.
+ */
+function schemaChildren(record: Record<string, unknown>): unknown[] {
+  const children: unknown[] = [];
+  const properties = record['properties'];
+  if (properties && typeof properties === 'object') {
+    for (const child of Object.values(properties)) children.push(child);
+  }
+  for (const key of ['items', 'additionalProperties', 'not', 'contentSchema']) {
+    const value = record[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) children.push(value);
+    if (Array.isArray(value)) value.forEach((item) => children.push(item));
+  }
+  for (const key of ['allOf', 'anyOf', 'oneOf', 'prefixItems']) {
+    const value = record[key];
+    if (Array.isArray(value)) value.forEach((member) => children.push(member));
+  }
+  return children;
+}
+
+/** A schema being measured: its own counts, then each child's merged in as it finishes. */
+interface MeasureFrame {
+  node: object;
+  children: unknown[];
+  next: number;
+  childDepth: number;
+  widestObject: number;
+  hasArray: boolean;
+}
+
+/**
  * Measure a schema's nesting depth and widest object — cycle-safe AND
  * shared-node-correct: dereferenced documents reuse ONE object per component,
  * so repeat visits return the memoized shape instead of zeros (only a true
- * cycle — an in-progress ancestor — measures as empty).
+ * cycle — an in-progress ancestor — measures as empty). Walks with an explicit
+ * stack, depth-first, so a schema of any depth can be measured (issue #50).
  */
-function measureSchema(node: unknown, seen = new Map<unknown, SchemaShape | null>()): SchemaShape {
-  if (node === null || typeof node !== 'object') {
-    return { depth: 0, widestObject: 0, hasArray: false };
-  }
-  if (seen.has(node)) {
-    // null marks an in-progress ancestor (a real cycle); a value is a memo hit
-    return seen.get(node) ?? { depth: 0, widestObject: 0, hasArray: false };
-  }
-  seen.set(node, null);
-  const record = node as Record<string, unknown>;
-  let childDepth = 0;
-  let widestObject = 0;
-  let hasArray = record['type'] === 'array' || (Array.isArray(record['type']) && record['type'].includes('array'));
-
-  const visit = (child: unknown): void => {
-    const shape = measureSchema(child, seen);
-    childDepth = Math.max(childDepth, shape.depth);
-    widestObject = Math.max(widestObject, shape.widestObject);
-    hasArray = hasArray || shape.hasArray;
+function measureSchema(root: unknown): SchemaShape {
+  const seen = new Map<unknown, SchemaShape | null>();
+  const frames: MeasureFrame[] = [];
+  // A node's shape when known right away, else `undefined` with a frame pushed
+  const enter = (node: unknown): SchemaShape | undefined => {
+    if (node === null || typeof node !== 'object') {
+      return { depth: 0, widestObject: 0, hasArray: false };
+    }
+    if (seen.has(node)) {
+      // null marks an in-progress ancestor (a real cycle); a value is a memo hit
+      return seen.get(node) ?? { depth: 0, widestObject: 0, hasArray: false };
+    }
+    seen.set(node, null);
+    const record = node as Record<string, unknown>;
+    const properties = record['properties'];
+    frames.push({
+      node,
+      children: schemaChildren(record),
+      next: 0,
+      childDepth: 0,
+      widestObject: properties && typeof properties === 'object' ? Object.keys(properties).length : 0,
+      hasArray: record['type'] === 'array' || (Array.isArray(record['type']) && record['type'].includes('array')),
+    });
+    return undefined;
   };
 
-  const properties = record['properties'];
-  if (properties && typeof properties === 'object') {
-    widestObject = Math.max(widestObject, Object.keys(properties).length);
-    for (const child of Object.values(properties)) visit(child);
+  let shape = enter(root);
+  while (frames.length > 0) {
+    const frame = frames[frames.length - 1];
+    if (shape) {
+      // The child before `next` is measured
+      frame.childDepth = Math.max(frame.childDepth, shape.depth);
+      frame.widestObject = Math.max(frame.widestObject, shape.widestObject);
+      frame.hasArray = frame.hasArray || shape.hasArray;
+    }
+    if (frame.next < frame.children.length) {
+      shape = enter(frame.children[frame.next++]);
+      continue;
+    }
+    frames.pop();
+    shape = { depth: frame.childDepth + 1, widestObject: frame.widestObject, hasArray: frame.hasArray };
+    seen.set(frame.node, shape);
   }
-  for (const key of ['items', 'additionalProperties', 'not', 'contentSchema']) {
-    const value = record[key];
-    if (value && typeof value === 'object' && !Array.isArray(value)) visit(value);
-    if (Array.isArray(value)) value.forEach(visit);
-  }
-  for (const key of ['allOf', 'anyOf', 'oneOf', 'prefixItems']) {
-    const value = record[key];
-    if (Array.isArray(value)) value.forEach(visit);
-  }
-
-  const shape = { depth: childDepth + 1, widestObject, hasArray };
-  seen.set(node, shape);
-  return shape;
+  return shape!;
 }
 
-/** Does a schema tree carry an `example`/`examples` keyword anywhere? Cycle-safe. */
-function schemaHasExample(node: unknown, seen = new Set<unknown>()): boolean {
-  if (node === null || typeof node !== 'object' || seen.has(node)) return false;
-  seen.add(node);
-  const record = node as Record<string, unknown>;
-  if (record['example'] !== undefined || record['examples'] !== undefined) return true;
-
-  const properties = record['properties'];
-  if (properties && typeof properties === 'object') {
-    // walk property VALUES only — a property merely NAMED 'example' is not one
-    if (Object.values(properties).some((child) => schemaHasExample(child, seen))) return true;
-  }
-  for (const key of ['items', 'additionalProperties', 'not', 'contentSchema']) {
-    const value = record[key];
-    if (value && typeof value === 'object' && !Array.isArray(value) && schemaHasExample(value, seen)) return true;
-    if (Array.isArray(value) && value.some((item) => schemaHasExample(item, seen))) return true;
-  }
-  for (const key of ['allOf', 'anyOf', 'oneOf', 'prefixItems']) {
-    const value = record[key];
-    if (Array.isArray(value) && value.some((member) => schemaHasExample(member, seen))) return true;
+/** Does a schema tree carry an `example`/`examples` keyword anywhere? Cycle-safe, any depth. */
+function schemaHasExample(root: unknown): boolean {
+  const seen = new Set<unknown>();
+  const pending: unknown[] = [root];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (node === null || typeof node !== 'object' || seen.has(node)) continue;
+    seen.add(node);
+    const record = node as Record<string, unknown>;
+    if (record['example'] !== undefined || record['examples'] !== undefined) return true;
+    // Reversed, so children are searched in order
+    const children = schemaChildren(record);
+    for (let i = children.length - 1; i >= 0; i--) pending.push(children[i]);
   }
   return false;
 }

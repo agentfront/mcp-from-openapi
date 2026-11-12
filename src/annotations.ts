@@ -97,32 +97,62 @@ function mergeOverrides(base: ExtensionToolOverrides, layer: ExtensionToolOverri
   };
 }
 
+/** A meta object or array being rebuilt: its kept keys (`null` for an array) and their values. */
+interface CleanseFrame {
+  node: object;
+  keys: string[] | null;
+  values: unknown[];
+  next: number;
+  out: Record<string, unknown> | unknown[];
+}
+
 /** Rebuild a `_meta` contribution with pollution-gadget keys removed at every
  * level — untrusted specs cross a trust boundary here, and JSON/YAML parsing
- * creates `__proto__` as an own key that downstream deep-merges would follow. */
-function cleanseMeta(node: unknown, seen: Set<object>): unknown {
-  if (!node || typeof node !== 'object') {
-    return node;
-  }
-  /* c8 ignore next 3 -- extension objects come from JSON/YAML and cannot be cyclic */
-  if (seen.has(node)) {
-    return undefined;
-  }
-  seen.add(node);
-  try {
+ * creates `__proto__` as an own key that downstream deep-merges would follow.
+ * Dereferencing resolves `$ref`s inside extensions too, so the value can be
+ * deeply nested (walked with an explicit stack — issue #50) or circular (a
+ * reference back to an ancestor is dropped). */
+function cleanseMeta(root: object): unknown {
+  // Objects on the path from the root to the node being rebuilt
+  const path = new Set<object>();
+  const frames: CleanseFrame[] = [];
+  const pending = {};
+  // A node's rebuilt value — or `pending`, with a frame pushed to rebuild it
+  const enter = (node: unknown): unknown => {
+    if (!node || typeof node !== 'object') return node;
+    if (path.has(node)) return undefined;
+    path.add(node);
     if (Array.isArray(node)) {
-      return node.map((item) => cleanseMeta(item, seen));
+      // JSON-cloned, so never sparse
+      frames.push({ node, keys: null, values: node, next: 0, out: new Array<unknown>(node.length) });
+      return pending;
     }
-    const out: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(node)) {
-      // Literal comparisons (not a shared Set) so static analysis recognizes
-      // the prototype-pollution sanitizer
-      if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
-      out[key] = cleanseMeta(value, seen);
+    // Literal comparisons (not a shared Set) so static analysis recognizes
+    // the prototype-pollution sanitizer
+    const keys = Object.keys(node).filter((key) => key !== '__proto__' && key !== 'constructor' && key !== 'prototype');
+    const record = node as Record<string, unknown>;
+    frames.push({ node, keys, values: keys.map((key) => record[key]), next: 0, out: {} });
+    return pending;
+  };
+  const store = (frame: CleanseFrame, index: number, value: unknown): void => {
+    if (frame.keys) (frame.out as Record<string, unknown>)[frame.keys[index]] = value;
+    else (frame.out as unknown[])[index] = value;
+  };
+
+  enter(root);
+  for (;;) {
+    const frame = frames[frames.length - 1];
+    if (frame.next < frame.values.length) {
+      const index = frame.next++;
+      const value = enter(frame.values[index]);
+      if (value !== pending) store(frame, index, value);
+      continue;
     }
-    return out;
-  } finally {
-    seen.delete(node);
+    frames.pop();
+    path.delete(frame.node);
+    const parent = frames[frames.length - 1];
+    if (!parent) return frame.out;
+    store(parent, parent.next - 1, frame.out);
   }
 }
 
@@ -130,7 +160,7 @@ function cleanseMeta(node: unknown, seen: Set<object>): unknown {
  * rebuilding it with pollution keys stripped recursively. */
 function sanitizeMeta(value: unknown): Record<string, unknown> | undefined {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
-    return cleanseMeta(value, new Set()) as Record<string, unknown>;
+    return cleanseMeta(value) as Record<string, unknown>;
   }
   return undefined;
 }

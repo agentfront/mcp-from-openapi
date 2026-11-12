@@ -305,3 +305,29 @@ describe('meta and icons extension extraction', () => {
     expect(overrides.meta).toEqual({ m: 1 });
   });
 });
+
+describe('meta extension values of any shape (issue #50)', () => {
+  it('rebuilds meta nested 20000 levels deep', () => {
+    let value: any = { leaf: true };
+    for (let i = 0; i < 20000; i++) value = { next: [value] };
+
+    const overrides = extractExtensionOverrides({ 'x-mcp': { meta: { 'acme/deep': value } } } as any);
+
+    let node: any = overrides.meta!['acme/deep'];
+    for (let i = 0; i < 20000; i++) node = node.next[0];
+    expect(node).toEqual({ leaf: true });
+  });
+
+  it('drops a reference back to an ancestor but copies a value shared by two paths into both', () => {
+    const shared = { kind: 'shared' };
+    const tree: any = { left: shared, right: shared };
+    tree.self = tree;
+
+    const overrides = extractExtensionOverrides({ 'x-mcp': { meta: { 'acme/tree': tree } } } as any);
+
+    expect(overrides.meta).toEqual({
+      'acme/tree': { left: { kind: 'shared' }, right: { kind: 'shared' }, self: undefined },
+    });
+    expect(Object.keys(overrides.meta!['acme/tree'] as object)).toEqual(['left', 'right', 'self']);
+  });
+});

@@ -481,57 +481,99 @@ interface FlattenedObjectBody {
 }
 
 /**
- * Recursively collect the property map and required set of an object schema,
- * merging `allOf` members (in order). Returns 'union' when the schema — or ANY
- * allOf member, at any depth — carries a root `oneOf`/`anyOf`: such bodies
- * cannot be flattened into named properties without deleting the union
- * constraint, so the caller must keep the body whole.
+ * An object schema whose `allOf` members are being collected: the merged
+ * property map and required set so far, and the index of the next member.
+ */
+interface CollectFrame {
+  schema: Exclude<JsonSchema, boolean>;
+  members: unknown[];
+  next: number;
+  properties: Record<string, JsonSchema>;
+  required: Set<string>;
+}
+
+/**
+ * Collect the property map and required set of an object schema, merging
+ * `allOf` members (in order). Returns 'union' when the schema — or ANY allOf
+ * member, at any depth — carries a root `oneOf`/`anyOf`: such bodies cannot
+ * be flattened into named properties without deleting the union constraint,
+ * so the caller must keep the body whole.
+ *
+ * Members are walked with an explicit stack, so an `allOf` chain of any
+ * length can be collected (issue #50). The schema is a `toJsonSchema` result,
+ * which is acyclic.
  */
 function collectObjectMembers(
   schema: JsonSchema,
   collected: Map<object, FlattenedObjectBody | 'union'>,
 ): FlattenedObjectBody | 'union' {
+  const frames: CollectFrame[] = [];
+  let value = enterMembers(schema, collected, frames);
+  while (frames.length > 0) {
+    const frame = frames[frames.length - 1];
+    if (value !== undefined) {
+      // The member before `next` was collected
+      if (value === 'union') {
+        // A union anywhere below makes every enclosing schema a union
+        frames.pop();
+        collected.set(frame.schema, 'union');
+        continue;
+      }
+      Object.assign(frame.properties, value.properties);
+      value.required.forEach((field) => frame.required.add(field));
+    }
+    if (frame.next < frame.members.length) {
+      value = enterMembers(frame.members[frame.next++] as JsonSchema, collected, frames);
+      continue;
+    }
+    // Direct properties/required win last
+    frames.pop();
+    const { schema: own, properties, required } = frame;
+    if (own.properties && typeof own.properties === 'object') {
+      Object.assign(properties, own.properties as Record<string, JsonSchema>);
+    }
+    if (Array.isArray(own.required)) {
+      own.required.forEach((field) => required.add(field));
+    }
+    value = { properties, required };
+    collected.set(own, value);
+  }
+  return value!;
+}
+
+/**
+ * Start collecting one schema: its result when known right away (a non-object,
+ * an already-collected schema, or a union), else `undefined` with a frame
+ * pushed to merge its `allOf` members.
+ */
+function enterMembers(
+  schema: JsonSchema,
+  collected: Map<object, FlattenedObjectBody | 'union'>,
+  frames: CollectFrame[],
+): FlattenedObjectBody | 'union' | undefined {
   /* c8 ignore next -- defensive: toJsonSchema always yields objects, so non-object nodes cannot reach here */
   if (!schema || typeof schema !== 'object') return { properties: {}, required: new Set() };
 
   // A member shared by several allOf lists (one $ref target, converted once)
-  // is collected once — the merge below only reads the result
+  // is collected once — the merge only reads the result
   const known = collected.get(schema);
   if (known) return known;
-  const result = collectOwnMembers(schema, collected);
-  collected.set(schema, result);
-  return result;
-}
-
-function collectOwnMembers(
-  schema: Exclude<JsonSchema, boolean>,
-  collected: Map<object, FlattenedObjectBody | 'union'>,
-): FlattenedObjectBody | 'union' {
-  if (Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf)) return 'union';
-
-  const properties: Record<string, JsonSchema> = {};
-  const required = new Set<string>();
+  if (Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf)) {
+    collected.set(schema, 'union');
+    return 'union';
+  }
 
   // allOf members merge first (in order) — a member with only a `required`
   // list (the common base-$ref + required-tightening pattern) still
-  // contributes its required fields. Direct properties/required win last.
-  if (Array.isArray(schema.allOf)) {
-    for (const member of schema.allOf) {
-      const members = collectObjectMembers(member as JsonSchema, collected);
-      if (members === 'union') return 'union';
-      Object.assign(properties, members.properties);
-      members.required.forEach((field) => required.add(field));
-    }
-  }
-
-  if (schema.properties && typeof schema.properties === 'object') {
-    Object.assign(properties, schema.properties as Record<string, JsonSchema>);
-  }
-  if (Array.isArray(schema.required)) {
-    schema.required.forEach((field) => required.add(field));
-  }
-
-  return { properties, required };
+  // contributes its required fields.
+  frames.push({
+    schema,
+    members: Array.isArray(schema.allOf) ? schema.allOf : [],
+    next: 0,
+    properties: {},
+    required: new Set<string>(),
+  });
+  return undefined;
 }
 
 /**

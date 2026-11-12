@@ -928,3 +928,50 @@ describe('toJsonSchema shared references and limits (issue #48)', () => {
     expect(toJsonSchema({ $ref: '#/components/schemas/Pet' })).toEqual({ $ref: '#/components/schemas/Pet' });
   });
 });
+
+describe('toJsonSchema on deeply nested schemas (issue #50)', () => {
+  /** Follow `step` from `schema` `times` times, without recursing */
+  const descend = (schema: any, times: number, step: (node: any) => any): any => {
+    let node = schema;
+    for (let i = 0; i < times; i++) node = step(node);
+    return node;
+  };
+
+  it('converts an allOf chain of any length — allOf members do not consume maxDepth', () => {
+    let schema: any = { type: 'object', properties: { id: { type: 'string', nullable: true } } };
+    for (let i = 0; i < 20000; i++) schema = { allOf: [schema], description: `level ${i}` };
+
+    const result = toJsonSchema(schema, { maxDepth: 10 });
+
+    const leaf = descend(result, 20000, (node) => node.allOf[0]);
+    expect(leaf).toEqual({ type: 'object', properties: { id: { type: ['string', 'null'] } } });
+  });
+
+  it('converts a schema of any depth when maxDepth is unbounded, normalizing every level', () => {
+    let schema: any = { type: 'integer', example: 7, xml: { name: 'n' } };
+    for (let i = 0; i < 20000; i++) {
+      schema = { type: 'object', nullable: i % 2 === 1, properties: { next: { type: 'array', items: schema } } };
+    }
+
+    const result = toJsonSchema(schema);
+
+    // Odd levels, the outermost among them, are nullable
+    expect(result.type).toEqual(['object', 'null']);
+    expect(result.properties!.next).toMatchObject({ items: { type: 'object' } });
+    const leaf = descend(result, 20000, (node) => node.properties.next.items);
+    expect(leaf).toEqual({ type: 'integer', examples: [7] });
+  });
+
+  it('still cuts a deep chain at maxDepth and reuses a shared subschema below it', () => {
+    const shared = { type: 'object', properties: { a: { type: 'string' } } };
+    let schema: any = shared;
+    for (let i = 0; i < 20000; i++) schema = { allOf: [schema, shared] };
+
+    // The chain is walked to its end, yet `shared` converts once
+    const result = toJsonSchema(schema, { maxDepth: 1, maxNodes: 60005 });
+
+    const leaf = descend(result, 20000, (node) => node.allOf[0]);
+    expect(leaf).toEqual({ type: 'object', properties: { a: { type: 'string' } } });
+    expect(result.allOf![1]).toBe(leaf);
+  });
+});
