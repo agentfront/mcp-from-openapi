@@ -696,6 +696,51 @@ describe('inlineLocalRefs stays bounded (issue #50)', () => {
     );
   });
 
+  it('charges only what the result keeps when $ref siblings overwrite keywords of the definition', () => {
+    const big = Array.from({ length: 30 }, (_, i) => `v${i}`);
+    const schema: any = {
+      $defs: { E: { type: 'string', enum: big } },
+      type: 'object',
+      properties: { a: { $ref: '#/$defs/E', enum: ['x'] }, b: { $ref: '#/$defs/E', enum: ['y'] } },
+    };
+
+    // The root (3), then `a` and `b`: object, `type`, `enum` and its one string (4 each)
+    const result: any = inlineLocalRefs(schema, { maxNodes: 11 });
+    expect(JSON.stringify(result.properties)).toBe(
+      '{"a":{"type":"string","enum":["x"]},"b":{"type":"string","enum":["y"]}}',
+    );
+    expect(() => inlineLocalRefs(schema, { maxNodes: 10 })).toThrow(/node budget of 10 /);
+  });
+
+  it('applies the siblings of chained $refs outermost-last, as before, charging none of what they overwrite', () => {
+    const schema: any = {
+      $defs: {
+        A: { $ref: '#/$defs/B', description: 'inner', title: 'A' },
+        B: { type: 'string', description: 'B', enum: Array.from({ length: 30 }, (_, i) => i) },
+        Loop: { $ref: '#/$defs/Loop', title: 'loop' },
+      },
+      type: 'object',
+      properties: { p: { $ref: '#/$defs/A', description: 'outer', enum: ['x'] }, q: { $ref: '#/$defs/Loop', title: 'q' } },
+    };
+
+    // The root (3); `p`: object, `type`, `description`, `enum` and its string, `title` (6);
+    // `q`: the circular note's object, `description`, and `title` (3)
+    const result: any = inlineLocalRefs(schema, { maxNodes: 12 });
+    expect(result.properties.p).toEqual({ type: 'string', description: 'outer', enum: ['x'], title: 'A' });
+    expect(Object.keys(result.properties.p)).toEqual(['type', 'description', 'enum', 'title']);
+    expect(result.properties.q).toEqual({ description: '[Circular $ref removed for client compatibility]', title: 'q' });
+  });
+
+  it('counts each hole of a schema list, as the null it serializes as', () => {
+    // The root, `allOf`, its hole, and its member with `type`
+    // eslint-disable-next-line no-sparse-arrays
+    const schema: any = { allOf: [, { type: 'string' }] };
+    expect(() => inlineLocalRefs(schema, { maxNodes: 5 })).not.toThrow();
+    expect(() => inlineLocalRefs(schema, { maxNodes: 4 })).toThrow(/node budget of 4 /);
+    // An array longer than the budget left is rejected before it is walked
+    expect(() => inlineLocalRefs({ allOf: new Array(1e9) } as any, { maxNodes: 1000 })).toThrow(/node budget of 1000 /);
+  });
+
   it('copies boolean schemas and tuple-of-tuples items as values', () => {
     const tuple = [{ type: 'string' }];
     const result: any = inlineLocalRefs({ type: 'object', properties: { a: true }, items: [tuple] } as any);

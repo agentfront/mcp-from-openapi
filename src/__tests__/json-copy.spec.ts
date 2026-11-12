@@ -86,6 +86,19 @@ describe('copyJsonValue', () => {
     expect(JSON.stringify(omitted)).toBe('{"ok":3}');
   });
 
+  it('counts each hole of an array as the null it serializes as, rejecting a long array before scanning it', () => {
+    // The array and its five slots
+    expect(copyJsonValue(new Array(5), budgetOf(6), { label: 'Value' })).toHaveLength(5);
+    expect(() => copyJsonValue(new Array(5), budgetOf(5), { label: 'Value' })).toThrow('over 5');
+    // The array, `{ a: 1 }` and its 1, the hole, `{ b: 2 }` and its 2
+    // eslint-disable-next-line no-sparse-arrays
+    const nested = [{ a: 1 }, , { b: 2 }];
+    expect(() => copyJsonValue(nested, budgetOf(6), { label: 'Value' })).not.toThrow();
+    expect(() => copyJsonValue(nested, budgetOf(5), { label: 'Value' })).toThrow('over 5');
+    expect(() => copyJsonValue({ list: new Array(1e9) }, budgetOf(100), { label: 'Value' })).toThrow('over 100');
+    expect(() => copyJsonValue([{ a: 1 }, ...new Array(10)], budgetOf(5), { label: 'Value' })).toThrow('over 5');
+  });
+
   it('keeps the holes of a sparse array', () => {
     // eslint-disable-next-line no-sparse-arrays
     const flat = copyJsonValue([1, , 3], budgetOf(), { label: 'Value' }) as unknown[];

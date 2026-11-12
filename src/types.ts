@@ -310,6 +310,25 @@ function charge(state: ConversionState, cost: number): void {
 }
 
 /**
+ * The array a schema list (`items` tuple, `allOf`/`anyOf`/`oneOf`,
+ * `prefixItems`) converts into, with a slot queued for each member at
+ * `depth`. Holes stay holes, as with `.map`, but each costs a node like a
+ * member — it serializes as `null` — so an array longer than the budget left
+ * is rejected before it is walked.
+ */
+function queueMembers(members: unknown[], depth: number, slots: unknown[], state: ConversionState): JsonSchema[] {
+  if (state.nodes + members.length > state.maxNodes) charge(state, members.length);
+  const converted: JsonSchema[] = new Array(members.length);
+  let holes = 0;
+  for (let i = 0; i < members.length; i++) {
+    if (i in members) slots.push(converted, i, members[i], depth);
+    else holes++;
+  }
+  charge(state, holes);
+  return converted;
+}
+
+/**
  * Finish a frame once its children are converted: wrap a type-less nullable
  * result, store the result for reuse, and pop the node off the path.
  */
@@ -619,12 +638,7 @@ function enterSchema(
   const items = result['items'];
   if (items) {
     if (Array.isArray(items)) {
-      // Holes stay holes, as with `.map`
-      const converted: JsonSchema[] = new Array(items.length);
-      for (let i = 0; i < items.length; i++) {
-        if (i in items) slots.push(converted, i, items[i], childDepth);
-      }
-      result['items'] = converted;
+      result['items'] = queueMembers(items, childDepth, slots, state);
     } else {
       slots.push(result, 'items', items, childDepth);
     }
@@ -639,12 +653,7 @@ function enterSchema(
     if (members && Array.isArray(members)) {
       // allOf members merge into their parent (request-body flattening hoists
       // them), so they don't consume depth — see SchemaConversionOptions.maxDepth
-      const memberDepth = key === 'allOf' ? depth : childDepth;
-      const converted: JsonSchema[] = new Array(members.length);
-      for (let i = 0; i < members.length; i++) {
-        if (i in members) slots.push(converted, i, members[i], memberDepth);
-      }
-      result[key] = converted;
+      result[key] = queueMembers(members, key === 'allOf' ? depth : childDepth, slots, state);
     }
   }
 
@@ -675,11 +684,7 @@ function enterSchema(
   // Array-of-schemas keyword:
   const prefixItems = result['prefixItems'];
   if (Array.isArray(prefixItems)) {
-    const converted: JsonSchema[] = new Array(prefixItems.length);
-    for (let i = 0; i < prefixItems.length; i++) {
-      if (i in prefixItems) slots.push(converted, i, prefixItems[i], childDepth);
-    }
-    result['prefixItems'] = converted;
+    result['prefixItems'] = queueMembers(prefixItems, childDepth, slots, state);
   }
 
   if (slots.length === 0) return finishSchema(frame, state);

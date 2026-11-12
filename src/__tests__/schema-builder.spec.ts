@@ -1005,6 +1005,21 @@ describe('SchemaBuilder.truncateDepth materialization and node budget (issue #48
     expect(result.properties.a.properties).toBeUndefined();
   });
 
+  it('counts each hole of an array as the null it serializes as', () => {
+    // Without that, a million holes passed a budget of 2 — and serialized a million nulls
+    expect(() => SchemaBuilder.truncateDepth({ default: new Array(1_000_000) } as any, 10, { maxNodes: 2 })).toThrow(
+      /node budget of 2 /,
+    );
+    // The root, `allOf`, its hole, and its member with `type`
+    // eslint-disable-next-line no-sparse-arrays
+    const schema = { allOf: [, { type: 'string' }] } as any;
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 5 })).not.toThrow();
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 4 })).toThrow(/node budget of 4 /);
+    expect(() => SchemaBuilder.truncateDepth({ anyOf: new Array(1e9) } as any, 10, { maxNodes: 1000 })).toThrow(
+      /node budget of 1000 /,
+    );
+  });
+
   it('counts a boolean schema as one value', () => {
     // The root, the `properties` map, and `true`
     const schema = { properties: { a: true } } as any;

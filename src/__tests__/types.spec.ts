@@ -988,6 +988,15 @@ describe('toJsonSchema charges every keyword it copies (issue #50)', () => {
     expect(() => toJsonSchema(schema, { maxNodes: 3 })).toThrow(/node budget of 3 /);
   });
 
+  it('charges each hole of a schema list, rejecting a long list before walking it', () => {
+    // The root and its keyword (2), the hole (1), the member and its keyword (2)
+    // eslint-disable-next-line no-sparse-arrays
+    const schema = { allOf: [, { type: 'string' }] } as any;
+    expect(() => toJsonSchema(schema, { maxNodes: 5 })).not.toThrow();
+    expect(() => toJsonSchema(schema, { maxNodes: 4 })).toThrow(/node budget of 4 /);
+    expect(() => toJsonSchema({ items: new Array(1e9) } as any, { maxNodes: 1000 })).toThrow(/node budget of 1000 /);
+  });
+
   it('stops a schema with many keywords that a cycle makes it convert once per path', () => {
     // Seven levels of four properties, then a schema with 500 keywords that
     // leads back to the top: everything is on one cycle, so nothing is

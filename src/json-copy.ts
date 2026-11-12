@@ -17,6 +17,29 @@ export function chargeBudget(budget: CopyBudget, cost = 1): void {
   if ((budget.nodes += cost) > budget.maxNodes) budget.exceeded();
 }
 
+/** Call the budget's owner now if `cost` more nodes cannot fit — without charging them */
+export function ensureBudget(budget: CopyBudget, cost: number): void {
+  if (budget.nodes + cost > budget.maxNodes) budget.exceeded();
+}
+
+/**
+ * Map the members of an array with `fn`, which charges each member, while
+ * charging the array itself and each of its holes: a hole serializes as
+ * `null`, so every slot counts. Holes stay holes, as with `.map`. An array
+ * longer than the budget left is rejected before it is walked.
+ */
+export function mapSlots<T, U>(array: T[], budget: CopyBudget, fn: (member: T) => U): U[] {
+  ensureBudget(budget, 1 + array.length);
+  chargeBudget(budget);
+  let present = 0;
+  const mapped = array.map((member) => {
+    present++;
+    return fn(member);
+  });
+  chargeBudget(budget, array.length - present);
+  return mapped;
+}
+
 /** Options for {@link copyJsonValue} */
 export interface CopyOptions {
   /** What is copied, for the error when it nests too deeply — e.g. "The `default` value of a schema" */
@@ -53,7 +76,8 @@ interface CopyFrame {
  * and extensions too — so the value may share objects, which are copied once
  * per occurrence. A few `$ref`s to values that share a child can therefore
  * expand exponentially: every copied value (object, array, or primitive)
- * counts against `budget`. A reference back to an enclosing value (a cycle)
+ * counts against `budget`, and so does every hole in an array, which
+ * serializes as `null`. A reference back to an enclosing value (a cycle)
  * is dropped, and a value nested more than `MAX_VALUE_DEPTH` levels throws a
  * `SchemaError`. The walk keeps its own stack, so depth costs no call stack.
  */
@@ -72,14 +96,15 @@ export function copyJsonValue(root: unknown, budget: CopyBudget, options: CopyOp
  */
 function copyFlat(node: object, budget: CopyBudget, options: CopyOptions): object | undefined {
   if (Array.isArray(node)) {
-    let present = 0;
+    // Every slot counts, a hole as the `null` it serializes as — so an array
+    // longer than the budget left is rejected before it is scanned
+    ensureBudget(budget, 1 + node.length);
     for (let i = 0; i < node.length; i++) {
       if (!(i in node)) continue;
       const value: unknown = node[i];
       if (value !== null && typeof value === 'object') return undefined;
-      present++;
     }
-    chargeBudget(budget, 1 + present);
+    chargeBudget(budget, 1 + node.length);
     // Holes stay holes
     return node.slice();
   }
@@ -116,6 +141,7 @@ function copyTree(root: object, budget: CopyBudget, options: CopyOptions): unkno
   const frames: CopyFrame[] = [];
   const pending = {};
   const push = (node: object): void => {
+    if (Array.isArray(node)) ensureBudget(budget, 1 + node.length);
     chargeBudget(budget);
     path.add(node);
     if (Array.isArray(node)) {
@@ -162,8 +188,11 @@ function copyTree(root: object, budget: CopyBudget, options: CopyOptions): unkno
   for (;;) {
     const frame = frames[frames.length - 1];
     if (!frame.keys) {
-      // Holes stay holes, as with `.map`
-      while (frame.next < frame.values.length && !(frame.next in frame.values)) frame.next++;
+      // Holes stay holes, as with `.map` — each counts, as the `null` it serializes as
+      while (frame.next < frame.values.length && !(frame.next in frame.values)) {
+        chargeBudget(budget);
+        frame.next++;
+      }
     }
     if (frame.next < frame.values.length) {
       const index = frame.next++;

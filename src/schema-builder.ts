@@ -1,6 +1,6 @@
 import type { JSONSchema } from 'zod/v4/core';
 import { SchemaError } from './errors';
-import { chargeBudget, copyJsonValue, type CopyBudget } from './json-copy';
+import { chargeBudget, copyJsonValue, mapSlots, type CopyBudget } from './json-copy';
 
 /** JSON Schema type from Zod v4 */
 type JsonSchema = JSONSchema.JSONSchema;
@@ -10,9 +10,9 @@ export interface TruncateDepthOptions {
   /**
    * Maximum number of nodes in the truncated tree — every JSON value in it:
    * schema objects, each of their keywords' values, and everything inside
-   * those (`default`, `examples`, `enum`, `required`, `x-*`, ...); a
-   * `SchemaError` is thrown as soon as it would contain more. Unbounded when
-   * omitted.
+   * those (`default`, `examples`, `enum`, `required`, `x-*`, ...), a hole in
+   * an array counting as the `null` it serializes as; a `SchemaError` is
+   * thrown as soon as it would contain more. Unbounded when omitted.
    */
   maxNodes?: number;
 }
@@ -520,8 +520,7 @@ export class SchemaBuilder {
         copyRecord[key] = this.truncateDepthRecursive(value as JsonSchema, childDepth, maxDepth, budget);
       } else if (kind === 'schema' || (kind === 'list' && Array.isArray(value))) {
         // A list of schemas — or `items` as a tuple array (pre-2020-12 style)
-        chargeBudget(budget);
-        copyRecord[key] = (value as JsonSchema[]).map((member) =>
+        copyRecord[key] = mapSlots(value as JsonSchema[], budget, (member) =>
           this.truncateDepthRecursive(member, childDepth, maxDepth, budget),
         );
       } else {
