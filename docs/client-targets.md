@@ -46,6 +46,12 @@ const geminiSafe = applyClientTarget(anyJsonSchema, "gemini");
 
 All transforms are pure and copy-on-write — inputs are never mutated.
 
+`inlineLocalRefs` inlines a definition once per `$ref` to it, so definitions that reference each other twice expand exponentially. Pass `{ maxNodes }` to `applyClientTarget` or `inlineLocalRefs` to cap the inlined schema (every JSON value counts; past the budget a `SchemaError` is thrown). The generator passes `maxSchemaNodes`; standalone calls are unbounded unless you pass it. Inlining nests at most 1,000 levels, counting each `$ref` hop, and throws a `SchemaError` past that.
+
+```typescript
+const geminiSafe = applyClientTarget(untrustedSchema, "gemini", { maxNodes: 100_000 });
+```
+
 ---
 
 **Related:** [Configuration](./configuration.md) | [SchemaBuilder](./schema-builder.md) | [API Reference](./api-reference.md)

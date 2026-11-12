@@ -2,7 +2,7 @@ import { OpenAPIToolGenerator } from '../generator';
 import { toPascalIdentifier } from '../type-signature';
 import { ParameterResolver } from '../parameter-resolver';
 import { ResponseBuilder } from '../response-builder';
-import { ParseError, LoadError } from '../errors';
+import { ParseError, LoadError, SchemaError } from '../errors';
 import type { OpenAPIDocument } from '../types';
 import { createLoopbackServer, type LoopbackHandler } from './helpers/loopback';
 import { makePinnedLookup } from '../ssrf';
@@ -4879,9 +4879,9 @@ describe('Shared $ref expansion stays bounded (issue #48)', () => {
   };
 
   it('generates the issue repro with bounded work, identical to a chain just past maxSchemaDepth', async () => {
-    // A 5000-node budget covers the ~2k-node output; converting each
-    // occurrence separately would need 2^40 conversions
-    const options = { includeAllResponses: true, maxSchemaNodes: 5000 };
+    // A 10,000-node budget covers the output's ~6,100 JSON values; converting
+    // each occurrence separately would need 2^40 conversions
+    const options = { includeAllResponses: true, maxSchemaNodes: 10000 };
     const long = await (await OpenAPIToolGenerator.fromJSON(specWithChain(40))).generateTools(options);
     const short = await (await OpenAPIToolGenerator.fromJSON(specWithChain(12))).generateTools(options);
 
@@ -4955,7 +4955,7 @@ describe('Shared $ref expansion stays bounded (issue #48)', () => {
   });
 
   it('generates a cycle that closes past maxSchemaDepth exactly like the open chain', async () => {
-    const options = { maxSchemaNodes: 5000 };
+    const options = { maxSchemaNodes: 10000 };
     const cyclic = await (await OpenAPIToolGenerator.fromJSON(specWithChain(40, { closeCycle: true }))).generateTools(options);
     const open = await (await OpenAPIToolGenerator.fromJSON(specWithChain(40))).generateTools(options);
 
@@ -5090,6 +5090,423 @@ describe('ParameterResolver schemaConversion option', () => {
 
     expect(() => new ParameterResolver(undefined, { schemaConversion: { maxNodes: 2 } }).resolve(operation)).toThrow(
       /maxSchemaNodes/,
+    );
+  });
+});
+
+describe('Deeply nested schemas (issue #50)', () => {
+  const LINKS = ['allOf', 'properties', 'items', 'anyOf', 'additionalProperties', 'not'] as const;
+  type Kind = (typeof LINKS)[number] | 'mixed';
+
+  /** One schema per level, each linking to the next by `kind` (`mixed` cycles through every link) */
+  const specWithChain = (kind: Kind, levels: number): any => {
+    const schemas: Record<string, unknown> = {};
+    for (let i = 0; i < levels; i++) {
+      const next =
+        i + 1 < levels
+          ? { $ref: `#/components/schemas/S${i + 1}` }
+          : { type: 'object', properties: { id: { type: 'string', format: 'uuid' } }, required: ['id'] };
+      const link = kind === 'mixed' ? LINKS[i % LINKS.length] : kind;
+      schemas[`S${i}`] = {
+        allOf: { allOf: [next], description: `level ${i}` },
+        properties: { type: 'object', properties: { next, [`p${i}`]: { type: 'string', example: 'x' } } },
+        items: { type: 'array', items: next },
+        anyOf: { anyOf: [next, { type: 'null' }] },
+        additionalProperties: { type: 'object', additionalProperties: next },
+        not: { not: next },
+      }[link];
+    }
+    const ref = { $ref: '#/components/schemas/S0' };
+    return {
+      openapi: '3.0.3',
+      info: { title: 'chain', version: '1.0.0' },
+      paths: {
+        '/item': {
+          get: {
+            operationId: 'getItem',
+            responses: { 200: { description: 'ok', content: { 'application/json': { schema: ref } } } },
+          },
+          post: {
+            operationId: 'putItem',
+            requestBody: { required: true, content: { 'application/json': { schema: ref } } },
+            responses: { 204: { description: 'done' } },
+          },
+        },
+      },
+      components: { schemas },
+    };
+  };
+
+  it.each<Kind>([...LINKS, 'mixed'])(
+    'generates a %s chain 5000 $refs long, identical to one just past maxSchemaDepth',
+    async (kind) => {
+      // Each link used to cost several stack frames when dereferencing, and an
+      // allOf link (which doesn't consume depth) more again in conversion,
+      // body flattening, and format resolution — v2.9.2 overflowed the call
+      // stack below 1100 links
+      const options = { resolveFormats: true, includeExamples: true };
+      const long = await (await OpenAPIToolGenerator.fromJSON(specWithChain(kind, 5000))).generateTools(options);
+      const short = await (await OpenAPIToolGenerator.fromJSON(specWithChain(kind, 40))).generateTools(options);
+
+      expect(long.map((tool) => tool.name)).toEqual(['getItem', 'putItem']);
+      expect(JSON.stringify(long)).toBe(JSON.stringify(short));
+    },
+  );
+
+  it('hoists the properties at the end of a 5000-link allOf request body', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithChain('allOf', 5000));
+    const tool = await generator.generateTool('/item', 'post');
+
+    expect(Object.keys(tool.inputSchema.properties!)).toEqual(['id']);
+    expect(tool.inputSchema.required).toEqual(['id']);
+  });
+
+  it('flattens an 8000-link allOf request body that adds a property per link, in linear time', async () => {
+    // Merging a full property map per link took quadratic time and memory:
+    // 5000 links took 2.8 s, 8000 would take about 7 s. The mapper's 8000
+    // entries must not exhaust the default node budget either.
+    const schemas: Record<string, unknown> = {};
+    for (let i = 0; i < 8000; i++) {
+      const own = { type: 'object', properties: { [`p${i}`]: { type: 'string' }, shared: { description: `link ${i}` } } };
+      schemas[`S${i}`] = i < 7999 ? { allOf: [{ $ref: `#/components/schemas/S${i + 1}` }, own] } : own;
+    }
+    const spec = specWithChain('allOf', 1);
+    Object.assign(spec.components.schemas, schemas);
+    spec.paths['/item'].post.requestBody.content['application/json'].schema = { $ref: '#/components/schemas/S0' };
+
+    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'post');
+
+    // Keys in the order they are first assigned — the deepest link first — and
+    // each with the value assigned last, by the shallowest link
+    const keys = Object.keys(tool.inputSchema.properties!);
+    expect(keys).toHaveLength(8001);
+    expect(keys.slice(0, 3)).toEqual(['p7999', 'shared', 'p7998']);
+    expect(keys[keys.length - 1]).toBe('p0');
+    expect((tool.inputSchema.properties as any).shared).toMatchObject({ description: 'link 0' });
+    expect(tool.mapper).toHaveLength(8001);
+  });
+
+  it('merges a member repeated in an allOf list as assigning its properties again would', async () => {
+    const spec = specWithChain('allOf', 1);
+    spec.components.schemas.A = { type: 'object', properties: { a: { type: 'string' }, both: { description: 'A' } } };
+    spec.components.schemas.B = { type: 'object', properties: { both: { description: 'B' }, b: { type: 'string' } } };
+    spec.paths['/item'].post.requestBody.content['application/json'].schema = {
+      allOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }, { $ref: '#/components/schemas/A' }],
+    };
+
+    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'post');
+
+    expect(tool.inputSchema.properties).toMatchObject({
+      a: { type: 'string' },
+      both: { description: 'A' },
+      b: { type: 'string' },
+    });
+    expect(Object.keys(tool.inputSchema.properties!)).toEqual(['a', 'both', 'b']);
+  });
+
+  it('lints a chain 5000 $refs long', async () => {
+    const { findings } = await (await OpenAPIToolGenerator.fromJSON(specWithChain('mixed', 5000))).lint();
+    const deep = findings.filter((finding) => finding.code === 'deep-schema');
+
+    expect(deep.map((finding) => finding.path)).toEqual(['GET /item', 'POST /item']);
+    // 5000 linked schemas, then the leaf object and its `id` property
+    expect(deep[0].message).toContain('depth 5002');
+  });
+
+  it('fails with a SchemaError, not a stack overflow, when maxSchemaDepth keeps too much nesting', async () => {
+    // Steps after depth truncation recurse once per level of the truncated
+    // schema; the default depth (10) keeps them shallow
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithChain('properties', 20000));
+    const options = { maxSchemaDepth: 100000, maxSchemaNodes: Infinity };
+
+    const failure = generator.generateTool('/item', 'get', options);
+    await expect(failure).rejects.toThrow(SchemaError);
+    await expect(failure).rejects.toThrow(
+      'Schemas of GET /item are nested too deeply to process at maxSchemaDepth 100000 (maximum call stack size ' +
+        'exceeded); lower maxSchemaDepth.',
+    );
+
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(await generator.generateTools(options)).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(
+        'Failed to generate tool for POST /item:',
+        expect.stringContaining('nested too deeply to process at maxSchemaDepth 100000'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('passes x-mcp meta through from a long $ref chain, failing just that tool past 1000 levels', async () => {
+    const withMeta = (levels: number): any => {
+      const spec = specWithChain('properties', levels);
+      spec.paths['/item'].get['x-mcp'] = { meta: { 'acme/schema': { $ref: '#/components/schemas/S0' } } };
+      return spec;
+    };
+
+    // Each chain link nests two levels: the schema and its `properties`
+    const tool = await (await OpenAPIToolGenerator.fromJSON(withMeta(300))).generateTool('/item', 'get');
+    let node: any = tool._meta!['acme/schema'];
+    for (let i = 0; i < 300; i++) node = node.properties.next;
+    expect(node).toEqual({ type: 'object', properties: { id: { type: 'string', format: 'uuid' } }, required: ['id'] });
+
+    const generator = await OpenAPIToolGenerator.fromJSON(withMeta(5000));
+    await expect(generator.generateTool('/item', 'get')).rejects.toThrow(
+      'Extension meta (x-mcp/x-frontmcp) is nested more than 1000 levels deep.',
+    );
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect((await generator.generateTools()).map((t) => t.name)).toEqual(['putItem']);
+      expect(warn).toHaveBeenCalledWith(
+        'Failed to generate tool for GET /item:',
+        'Extension meta (x-mcp/x-frontmcp) is nested more than 1000 levels deep.',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /** The chain spec with GET's x-mcp meta $ref-ing M0, where Mi = { left: Mi+1, right: Mi+1 } */
+  const specWithSharedMeta = (levels: number): any => {
+    const spec = specWithChain('properties', 1);
+    for (let i = 0; i < levels; i++) {
+      const next = { $ref: `#/components/schemas/M${i + 1}` };
+      spec.components.schemas[`M${i}`] = { left: next, right: next };
+    }
+    spec.components.schemas[`M${levels}`] = { leaf: true };
+    spec.paths['/item'].get['x-mcp'] = { meta: { 'acme/tree': { $ref: '#/components/schemas/M0' } } };
+    return spec;
+  };
+
+  it('bounds x-mcp meta that $refs schemas sharing a child, which is copied per occurrence', async () => {
+    // 2^41 copies without a budget; the operation filters never copy meta,
+    // so the other tools still generate
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithSharedMeta(40));
+    await expect(generator.generateTool('/item', 'get')).rejects.toThrow(
+      'Extension meta exceeds the node budget of 100000 (maxSchemaNodes)',
+    );
+
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect((await generator.generateTools()).map((t) => t.name)).toEqual(['putItem']);
+      expect(await generator.generateTools({ readOnlyOnly: true })).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(
+        'Failed to generate tool for GET /item:',
+        expect.stringContaining('Extension meta exceeds the node budget of 100000'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('charges x-mcp meta against maxSchemaNodes: every copied value, the meta object included', async () => {
+    // The meta object, 2^11 - 1 copied objects of the shared tree, and the
+    // `true` in each of its 2^10 leaves
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithSharedMeta(10));
+
+    const tool = await generator.generateTool('/item', 'get', { maxSchemaNodes: 3072 });
+    expect(JSON.stringify(tool._meta)).toContain('"leaf":true');
+    await expect(generator.generateTool('/item', 'get', { maxSchemaNodes: 3071 })).rejects.toThrow(
+      'Extension meta exceeds the node budget of 3071 (maxSchemaNodes)',
+    );
+  });
+
+  it('drops the reference back to an ancestor when x-mcp meta $refs a recursive schema', async () => {
+    const spec = specWithChain('properties', 1);
+    spec.components.schemas.Tree = { type: 'object', properties: { child: { $ref: '#/components/schemas/Tree' } } };
+    spec.paths['/item'].get['x-mcp'] = { meta: { 'acme/tree': { $ref: '#/components/schemas/Tree' } } };
+    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'get');
+
+    expect(JSON.stringify(tool._meta)).toBe('{"acme/tree":{"type":"object","properties":{}}}');
+  });
+});
+
+describe('Values copied from the spec into a tool (issue #50)', () => {
+  type Place = 'default' | 'example' | 'x-frontmcp' | 'tags';
+
+  /**
+   * POST /item with a `$ref` to M0 in `place`, where Mi = { left: Mi+1, right: Mi+1 }:
+   * 2^(levels + 1) values once copied per occurrence — or serialized
+   */
+  const specWithSharedValue = (place: Place, levels: number): any => {
+    const schemas: Record<string, unknown> = {};
+    for (let i = 0; i < levels; i++) {
+      const next = { $ref: `#/components/schemas/M${i + 1}` };
+      schemas[`M${i}`] = { left: next, right: next };
+    }
+    schemas[`M${levels}`] = { leaf: true };
+    const ref = { $ref: '#/components/schemas/M0' };
+    const body: any = { type: 'object', properties: { a: { type: 'object' } } };
+    const media: any = { schema: body };
+    const post: any = {
+      operationId: 'postItem',
+      requestBody: { content: { 'application/json': media } },
+      responses: { 204: { description: 'done' } },
+    };
+    if (place === 'default') body.properties.a.default = ref;
+    if (place === 'example') media.example = { a: ref };
+    if (place === 'x-frontmcp') post['x-frontmcp'] = { cache: ref };
+    if (place === 'tags') post.tags = ['items', ref];
+    return {
+      openapi: '3.0.3',
+      info: { title: 'values', version: '1.0.0' },
+      paths: { '/item': { post, get: { operationId: 'getItem', responses: { 204: { description: 'ok' } } } } },
+      components: { schemas },
+    };
+  };
+
+  it.each<[Place, string]>([
+    ['default', 'Schema exceeds the node budget of 100000 (maxSchemaNodes) after depth truncation'],
+    ['example', 'Schema exceeds the node budget of 100000 (maxSchemaNodes) after depth truncation'],
+    ['x-frontmcp', 'The metadata of POST /item exceeds the node budget of 100000 (maxSchemaNodes)'],
+    ['tags', 'The metadata of POST /item exceeds the node budget of 100000 (maxSchemaNodes)'],
+  ])('fails just the tool whose %s $refs a value expanding past maxSchemaNodes', async (place, message) => {
+    // v2.9.2 returned this tool, sharing the value: serializing it took 2^41 values
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithSharedValue(place, 40));
+    const options = { includeExamples: true, emitMeta: true };
+    await expect(generator.generateTool('/item', 'post', options)).rejects.toThrow(message);
+
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect((await generator.generateTools(options)).map((tool) => tool.name)).toEqual(['getItem']);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('copies a shared value per occurrence within the budget', async () => {
+    const tool = await (await OpenAPIToolGenerator.fromJSON(specWithSharedValue('default', 8))).generateTool(
+      '/item',
+      'post',
+    );
+    const value = (tool.inputSchema.properties!.a as any).default;
+
+    expect(value.left).not.toBe(value.right);
+    expect(JSON.stringify(value).match(/"leaf":true/g)).toHaveLength(256);
+  });
+
+  it('drops the reference back when a value $refs a recursive schema, so the tool stays serializable', async () => {
+    const spec = specWithSharedValue('default', 0);
+    spec.components.schemas.Tree = { type: 'object', properties: { child: { $ref: '#/components/schemas/Tree' } } };
+    spec.paths['/item'].post.requestBody.content['application/json'].schema.properties.a.default = {
+      $ref: '#/components/schemas/Tree',
+    };
+    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'post');
+
+    expect(JSON.stringify((tool.inputSchema.properties!.a as any).default)).toBe(
+      '{"type":"object","properties":{}}',
+    );
+  });
+
+  it('drops the reference back in x-frontmcp data that $refs a recursive schema, as metadata.frontmcp', async () => {
+    const spec = specWithSharedValue('x-frontmcp', 0);
+    spec.components.schemas.Tree = { type: 'object', properties: { child: { $ref: '#/components/schemas/Tree' } } };
+    spec.paths['/item'].post['x-frontmcp'] = { meta: { 'acme/tree': { $ref: '#/components/schemas/Tree' } } };
+    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'post');
+
+    const tree = '{"acme/tree":{"type":"object","properties":{}}}';
+    expect(JSON.stringify((tool.metadata.frontmcp as any).meta)).toBe(tree);
+    expect(JSON.stringify(tool._meta)).toBe(tree);
+  });
+
+  it('shares no object with the document, so changing one tool cannot change the next', async () => {
+    const spec = specWithSharedValue('x-frontmcp', 0);
+    spec.paths['/item'].post.requestBody.content['application/json'].schema.properties.a.default = { k: 1 };
+    spec.paths['/item'].post.servers = [{ url: 'https://api.example.com', variables: { v: { default: 'a' } } }];
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+
+    const first = await generator.generateTool('/item', 'post', { emitMeta: true });
+    (first.inputSchema.properties!.a as any).default.k = 2;
+    (first.metadata.frontmcp as any).cache.leaf = false;
+    (first.metadata.servers![0] as any).variables.v.default = 'changed';
+
+    const second = await generator.generateTool('/item', 'post', { emitMeta: true });
+    expect((second.inputSchema.properties!.a as any).default).toEqual({ k: 1 });
+    expect(second.metadata.frontmcp).toEqual({ cache: { leaf: true } });
+    expect(second.metadata.servers).toEqual([
+      { url: 'https://api.example.com', variables: { v: { default: 'a' } } },
+    ]);
+  });
+});
+
+describe('Wide schemas and inlined definitions stay bounded (issue #50)', () => {
+  /**
+   * GET /x returning L0: seven levels of four properties, then F — a schema
+   * with `keywords` keywords, which leads back to L0 when `cycle` is set
+   */
+  const specWithWideLeaf = (keywords: number, cycle: boolean): any => {
+    const wide: any = { type: 'object', properties: cycle ? { back: { $ref: '#/components/schemas/L0' } } : {} };
+    for (let k = 0; k < keywords; k++) wide[`x-k${k}`] = k;
+    const schemas: Record<string, unknown> = { F: wide };
+    for (let i = 0; i < 7; i++) {
+      const next = { $ref: i < 6 ? `#/components/schemas/L${i + 1}` : '#/components/schemas/F' };
+      schemas[`L${i}`] = { type: 'object', properties: { a: next, b: next, c: next, d: next } };
+    }
+    return {
+      openapi: '3.0.3',
+      info: { title: 'wide', version: '1.0.0' },
+      paths: {
+        '/x': {
+          get: {
+            operationId: 'getX',
+            responses: {
+              200: {
+                description: 'ok',
+                content: { 'application/json': { schema: { $ref: '#/components/schemas/L0' } } },
+              },
+            },
+          },
+        },
+      },
+      components: { schemas },
+    };
+  };
+
+  it('counts every keyword of a schema that the output copies once per occurrence', async () => {
+    // 4^7 copies of a schema with 2000 keywords: v2.9.2 produced 456 MB in 5 s
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithWideLeaf(2000, false));
+
+    await expect(generator.generateTool('/x', 'get')).rejects.toThrow(
+      'Schema exceeds the node budget of 100000 (maxSchemaNodes) after depth truncation',
+    );
+  });
+
+  it('charges every keyword of a schema that a cycle makes conversion rebuild once per path', async () => {
+    // v2.9.2 took 17.7 s and produced 456 MB
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithWideLeaf(2000, true));
+
+    await expect(generator.generateTool('/x', 'get')).rejects.toThrow(
+      'Schema conversion exceeded the node budget of 100000 (maxSchemaNodes)',
+    );
+  });
+
+  it('bounds a client target inlining definitions that reference each other twice', async () => {
+    // With dereferencing off, the target inlines a definition once per $ref to it: 2^40 copies
+    const $defs: Record<string, unknown> = { A40: { type: 'string' } };
+    for (let i = 0; i < 40; i++) {
+      const next = { $ref: `#/$defs/A${i + 1}` };
+      $defs[`A${i}`] = { type: 'object', properties: { x: next, y: next } };
+    }
+    const schema = { $defs, type: 'object', properties: { root: { $ref: '#/$defs/A0' } } };
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      {
+        openapi: '3.1.0',
+        info: { title: 'defs', version: '1.0.0' },
+        paths: {
+          '/x': {
+            get: {
+              operationId: 'getX',
+              responses: { 200: { description: 'ok', content: { 'application/json': { schema } } } },
+            },
+          },
+        },
+      },
+      { dereference: false },
+    );
+
+    await expect(generator.generateTool('/x', 'get', { target: 'claude' })).rejects.toThrow(
+      'Inlining the local $refs of a schema exceeds the node budget of 100000 (maxSchemaNodes)',
     );
   });
 });

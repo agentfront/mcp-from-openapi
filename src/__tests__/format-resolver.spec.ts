@@ -485,3 +485,22 @@ describe('resolveSchemaFormats on shared and circular schemas (issue #48)', () =
     expect(node.description).toBeUndefined();
   });
 });
+
+describe('resolveSchemaFormats on deeply nested schemas (issue #50)', () => {
+  it('resolves formats at the bottom of a schema 20000 levels deep', () => {
+    let schema: JsonSchema = { type: 'string', format: 'uuid' };
+    for (let i = 0; i < 20000; i++) {
+      schema = { type: 'object', properties: { next: { allOf: [schema], items: [schema] } } };
+    }
+
+    const result = resolveSchemaFormats(schema, BUILTIN_FORMAT_RESOLVERS) as any;
+
+    let node = result;
+    for (let i = 0; i < 20000; i++) {
+      // One input object, so one resolved object wherever it appears
+      expect(node.properties.next.items[0]).toBe(node.properties.next.allOf[0]);
+      node = node.properties.next.allOf[0];
+    }
+    expect(node.pattern).toBe(BUILTIN_FORMAT_RESOLVERS['uuid']({ type: 'string' }).pattern);
+  });
+});

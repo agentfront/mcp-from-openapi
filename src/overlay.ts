@@ -175,9 +175,6 @@ function isContainer(value: unknown): value is Record<string, unknown> | unknown
   return value !== null && typeof value === 'object';
 }
 
-/** Keys that reach Object.prototype — never matched, never merged. */
-const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-
 /** All descendant matches of a node (self excluded), depth-first. */
 function descendants(match: Match): Match[] {
   const result: Match[] = [];
@@ -228,13 +225,19 @@ function applySegment(matches: Match[], segment: Segment): Match[] {
     const node = match.value;
     switch (segment.kind) {
       case 'child': {
+        // Keys that reach Object.prototype are never matched. Literal
+        // comparisons (not a shared Set) so static analysis recognizes the
+        // prototype-pollution sanitizer (CodeQL js/prototype-polluting-assignment)
+        const name = segment.name;
         if (
           isContainer(node) &&
           !Array.isArray(node) &&
-          !UNSAFE_KEYS.has(segment.name) &&
-          Object.prototype.hasOwnProperty.call(node, segment.name)
+          name !== '__proto__' &&
+          name !== 'constructor' &&
+          name !== 'prototype' &&
+          Object.prototype.hasOwnProperty.call(node, name)
         ) {
-          next.push({ parent: node, key: segment.name, value: node[segment.name] });
+          next.push({ parent: node, key: name, value: node[name] });
         }
         break;
       }

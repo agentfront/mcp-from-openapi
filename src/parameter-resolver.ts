@@ -481,56 +481,89 @@ interface FlattenedObjectBody {
 }
 
 /**
- * Recursively collect the property map and required set of an object schema,
- * merging `allOf` members (in order). Returns 'union' when the schema — or ANY
- * allOf member, at any depth — carries a root `oneOf`/`anyOf`: such bodies
- * cannot be flattened into named properties without deleting the union
- * constraint, so the caller must keep the body whole.
+ * Collect the property map and required set of an object schema, merging
+ * `allOf` members (in order). Returns 'union' when the schema — or ANY allOf
+ * member, at any depth — carries a root `oneOf`/`anyOf`: such bodies cannot
+ * be flattened into named properties without deleting the union constraint,
+ * so the caller must keep the body whole.
+ *
+ * The merge is the one a recursive `Object.assign` of each member's merged
+ * map, in order, followed by the schema's own `properties`, would produce: a
+ * key sits where it first appears in that sequence of assignments and holds
+ * the value it was last assigned. Building that map for every member would
+ * cost quadratic time and memory on a long `allOf` chain (each level copies
+ * the whole map below it), so the two are found directly instead, by walks
+ * that each visit a member once — every key of a repeated member has already
+ * appeared (forward) or been assigned for the last time (backward). Both
+ * walks keep their own stacks, so any `allOf` chain can be flattened (issue
+ * #50). The schema is a `toJsonSchema` result, which is acyclic.
  */
-function collectObjectMembers(
-  schema: JsonSchema,
-  collected: Map<object, FlattenedObjectBody | 'union'>,
-): FlattenedObjectBody | 'union' {
-  /* c8 ignore next -- defensive: toJsonSchema always yields objects, so non-object nodes cannot reach here */
-  if (!schema || typeof schema !== 'object') return { properties: {}, required: new Set() };
-
-  // A member shared by several allOf lists (one $ref target, converted once)
-  // is collected once — the merge below only reads the result
-  const known = collected.get(schema);
-  if (known) return known;
-  const result = collectOwnMembers(schema, collected);
-  collected.set(schema, result);
-  return result;
-}
-
-function collectOwnMembers(
-  schema: Exclude<JsonSchema, boolean>,
-  collected: Map<object, FlattenedObjectBody | 'union'>,
-): FlattenedObjectBody | 'union' {
-  if (Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf)) return 'union';
-
-  const properties: Record<string, JsonSchema> = {};
+function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'union' {
+  // Forward, in assignment order (a member's members, then its own
+  // properties): each key's first appearance, every required field, and
+  // whether a union is reachable
+  const keys: string[] = [];
+  const seenKeys = new Set<string>();
   const required = new Set<string>();
-
-  // allOf members merge first (in order) — a member with only a `required`
-  // list (the common base-$ref + required-tightening pattern) still
-  // contributes its required fields. Direct properties/required win last.
-  if (Array.isArray(schema.allOf)) {
-    for (const member of schema.allOf) {
-      const members = collectObjectMembers(member as JsonSchema, collected);
-      if (members === 'union') return 'union';
-      Object.assign(properties, members.properties);
-      members.required.forEach((field) => required.add(field));
+  const entered = new Set<object>();
+  const frames: { schema: Record<string, unknown>; members: unknown[]; next: number }[] = [];
+  // False when `member` is a union
+  const enter = (member: unknown): boolean => {
+    /* c8 ignore next -- defensive: toJsonSchema always yields objects, so non-object members cannot reach here */
+    if (!member || typeof member !== 'object') return true;
+    if (entered.has(member)) return true;
+    entered.add(member);
+    const record = member as Record<string, unknown>;
+    if (Array.isArray(record['oneOf']) || Array.isArray(record['anyOf'])) return false;
+    frames.push({ schema: record, members: Array.isArray(record['allOf']) ? record['allOf'] : [], next: 0 });
+    return true;
+  };
+  if (!enter(schema)) return 'union';
+  while (frames.length > 0) {
+    const frame = frames[frames.length - 1];
+    if (frame.next < frame.members.length) {
+      if (!enter(frame.members[frame.next++])) return 'union';
+      continue;
+    }
+    frames.pop();
+    const own = frame.schema;
+    if (own['properties'] && typeof own['properties'] === 'object') {
+      for (const key of Object.keys(own['properties'])) {
+        if (!seenKeys.has(key)) {
+          seenKeys.add(key);
+          keys.push(key);
+        }
+      }
+    }
+    if (Array.isArray(own['required'])) {
+      own['required'].forEach((field: string) => required.add(field));
     }
   }
 
-  if (schema.properties && typeof schema.properties === 'object') {
-    Object.assign(properties, schema.properties as Record<string, JsonSchema>);
-  }
-  if (Array.isArray(schema.required)) {
-    schema.required.forEach((field) => required.add(field));
+  // Backward — own properties, then members from last to first: the first
+  // value seen for a key is the one it was last assigned
+  const values = new Map<string, unknown>();
+  const assigned = new Set<object>();
+  const pending: unknown[] = [schema];
+  while (pending.length > 0) {
+    const member = pending.pop();
+    if (!member || typeof member !== 'object' || assigned.has(member)) continue;
+    assigned.add(member);
+    const record = member as Record<string, unknown>;
+    if (record['properties'] && typeof record['properties'] === 'object') {
+      const own = record['properties'] as Record<string, unknown>;
+      for (const key of Object.keys(own)) {
+        if (!values.has(key)) values.set(key, own[key]);
+      }
+    }
+    // Pushed in order, so the last member is assigned first
+    if (Array.isArray(record['allOf'])) {
+      for (const child of record['allOf'] as unknown[]) pending.push(child);
+    }
   }
 
+  const properties: Record<string, JsonSchema> = {};
+  for (const key of keys) properties[key] = values.get(key) as JsonSchema;
   return { properties, required };
 }
 
@@ -542,7 +575,7 @@ function collectOwnMembers(
  * (arrays, primitives, binary), and free-form objects without properties.
  */
 function flattenObjectBody(schema: JsonSchema): FlattenedObjectBody | undefined {
-  const collected = collectObjectMembers(schema, new Map());
+  const collected = collectObjectMembers(schema);
   if (collected === 'union') return undefined;
   return Object.keys(collected.properties).length > 0 ? collected : undefined;
 }

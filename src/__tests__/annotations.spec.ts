@@ -2,7 +2,8 @@
  * Tests for annotation inference and x-mcp extension family overrides
  */
 
-import { inferAnnotationsFromMethod, extractExtensionOverrides } from '../annotations';
+import { inferAnnotationsFromMethod, extractExtensionOverrides, extractExtensionSettings } from '../annotations';
+import { SchemaError } from '../errors';
 import type { HTTPMethod, OperationObject } from '../types';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -303,5 +304,82 @@ describe('meta and icons extension extraction', () => {
     expect(overrides.title).toBe('Nice');
     expect(overrides.annotations).toEqual({ title: 'Nice', readOnlyHint: true });
     expect(overrides.meta).toEqual({ m: 1 });
+  });
+});
+
+describe('meta extension values of any shape (issue #50)', () => {
+  /** A value nested `levels` objects and arrays deep */
+  const nested = (levels: number): unknown => {
+    let value: unknown = { leaf: true };
+    for (let i = 1; i < levels; i++) value = i % 2 === 0 ? { next: value } : [value];
+    return value;
+  };
+  /** A value whose two branches share one child per level: copied per occurrence, 2^(levels + 1) - 1 containers */
+  const shared = (levels: number): unknown => {
+    let value: unknown = { leaf: true };
+    for (let i = 0; i < levels; i++) value = { left: value, right: value };
+    return value;
+  };
+
+  it('rebuilds meta nested 1000 levels deep and fails past that, at any depth', () => {
+    // The meta object is the first level
+    const overrides = extractExtensionOverrides({ 'x-mcp': { meta: { 'acme/deep': nested(999) } } } as any);
+    expect(JSON.stringify(overrides.meta)).toBe(JSON.stringify({ 'acme/deep': nested(999) }));
+
+    for (const levels of [1000, 20000]) {
+      expect(() => extractExtensionOverrides({ 'x-mcp': { meta: { 'acme/deep': nested(levels) } } } as any)).toThrow(
+        new SchemaError('Extension meta (x-mcp/x-frontmcp) is nested more than 1000 levels deep.'),
+      );
+    }
+  });
+
+  it('counts every copied value of x-mcp and x-frontmcp meta against maxMetaNodes', () => {
+    // x-mcp: the meta object, `a`, `b`, and its two numbers; x-frontmcp: the meta object and `c`
+    const operation = {
+      'x-mcp': { meta: { a: { b: [1, 2] } } },
+      'x-frontmcp': { meta: { c: {} } },
+    } as any;
+
+    expect(extractExtensionOverrides(operation, { maxMetaNodes: 7 }).meta).toEqual({ a: { b: [1, 2] }, c: {} });
+    expect(() => extractExtensionOverrides(operation, { maxMetaNodes: 6 })).toThrow(
+      'Extension meta exceeds the node budget of 6 (maxSchemaNodes)',
+    );
+  });
+
+  it('stops a shared value copied per occurrence at the default budget, unless the budget is disabled', () => {
+    expect(() => extractExtensionOverrides({ 'x-mcp': { meta: { tree: shared(40) } } } as any)).toThrow(
+      new SchemaError(
+        'Extension meta exceeds the node budget of 100000 (maxSchemaNodes): with its $refs resolved, the ' +
+          'x-mcp/x-frontmcp meta expands into more nodes than allowed. Remove the references or raise maxSchemaNodes.',
+      ),
+    );
+
+    const meta = extractExtensionOverrides({ 'x-mcp': { meta: { tree: shared(16) } } } as any, {
+      maxMetaNodes: Infinity,
+    }).meta as any;
+    expect(meta.tree.left).not.toBe(meta.tree.right);
+    expect(JSON.stringify(meta.tree.left)).toBe(JSON.stringify(meta.tree.right));
+  });
+
+  it('reads settings for operation filters without copying meta or icons', () => {
+    const operation = {
+      'x-mcp': { enabled: false, annotations: { readOnlyHint: true }, meta: { tree: shared(40) } },
+      'x-frontmcp': { icons: [{ src: 'https://e.com/i.png' }] },
+    } as any;
+
+    expect(extractExtensionSettings(operation)).toEqual({ disabled: true, annotations: { readOnlyHint: true } });
+  });
+
+  it('drops a reference back to an ancestor but copies a value shared by two paths into both', () => {
+    const value = { kind: 'shared' };
+    const tree: any = { left: value, right: value };
+    tree.self = tree;
+
+    const overrides = extractExtensionOverrides({ 'x-mcp': { meta: { 'acme/tree': tree } } } as any);
+
+    expect(overrides.meta).toEqual({
+      'acme/tree': { left: { kind: 'shared' }, right: { kind: 'shared' }, self: undefined },
+    });
+    expect(Object.keys(overrides.meta!['acme/tree'] as object)).toEqual(['left', 'right', 'self']);
   });
 });
