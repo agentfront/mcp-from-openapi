@@ -1,3 +1,11 @@
+## [2.9.2] - 2026-11-12
+
+### Fixed
+- Restored v2.9.1's allOf nesting limit.
+- Charged every conversion visit against maxSchemaNodes.
+- Budgeted only emitted work, using cheaper cycle analysis.
+- Bounded generateTools work on schemas that reuse a $ref.
+
 ## [2.9.1] - 2026-10-20
 
 ### Security
