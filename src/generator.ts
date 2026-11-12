@@ -28,7 +28,13 @@ import { isReferenceObject } from './types';
 import { ParameterResolver } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
 import { SchemaBuilder, resolveSchemaLimits } from './schema-builder';
-import { extractExtensionOverrides, inferAnnotationsFromMethod, isAllowedIconSrc, resolveExtensionEnabled } from './annotations';
+import {
+  extractExtensionOverrides,
+  extractExtensionSettings,
+  inferAnnotationsFromMethod,
+  isAllowedIconSrc,
+  resolveExtensionEnabled,
+} from './annotations';
 import { applyClientTarget } from './client-targets';
 import { applyOverlay } from './overlay';
 import { lintDocument, PAGINATION_PARAM, type LintResult } from './lint';
@@ -901,8 +907,9 @@ export class OpenAPIToolGenerator {
     const responseBuilder = new ResponseBuilder(options, schemaConversion);
     const outputSchema = responseBuilder.build(operation.responses);
 
-    // Extension overrides (x-speakeasy-mcp < x-mcp < x-frontmcp)
-    const overrides = extractExtensionOverrides(operation);
+    // Extension overrides (x-speakeasy-mcp < x-mcp < x-frontmcp); their meta
+    // shares the node budget, as $refs in it are dereferenced too
+    const overrides = extractExtensionOverrides(operation, { maxMetaNodes: maxSchemaNodes });
 
     // Generate tool name (an extension name override takes the operationId's
     // place, including as the value passed to a custom toolNameGenerator)
@@ -1137,7 +1144,7 @@ export class OpenAPIToolGenerator {
     if (options.readOnlyOnly) {
       const effective = {
         ...inferAnnotationsFromMethod(lowerMethod),
-        ...extractExtensionOverrides(operation).annotations,
+        ...extractExtensionSettings(operation).annotations,
       };
       if (effective.readOnlyHint !== true) {
         return false;

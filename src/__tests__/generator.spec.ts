@@ -5195,14 +5195,77 @@ describe('Deeply nested schemas (issue #50)', () => {
     }
   });
 
-  it('passes x-mcp meta through from a $ref chain 5000 levels long', async () => {
-    const spec = specWithChain('properties', 5000);
-    spec.paths['/item'].get['x-mcp'] = { meta: { 'acme/schema': { $ref: '#/components/schemas/S0' } } };
-    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'get');
+  it('passes x-mcp meta through from a long $ref chain, failing just that tool past 1000 levels', async () => {
+    const withMeta = (levels: number): any => {
+      const spec = specWithChain('properties', levels);
+      spec.paths['/item'].get['x-mcp'] = { meta: { 'acme/schema': { $ref: '#/components/schemas/S0' } } };
+      return spec;
+    };
 
+    // Each chain link nests two levels: the schema and its `properties`
+    const tool = await (await OpenAPIToolGenerator.fromJSON(withMeta(300))).generateTool('/item', 'get');
     let node: any = tool._meta!['acme/schema'];
-    for (let i = 0; i < 5000; i++) node = node.properties.next;
+    for (let i = 0; i < 300; i++) node = node.properties.next;
     expect(node).toEqual({ type: 'object', properties: { id: { type: 'string', format: 'uuid' } }, required: ['id'] });
+
+    const generator = await OpenAPIToolGenerator.fromJSON(withMeta(5000));
+    await expect(generator.generateTool('/item', 'get')).rejects.toThrow(
+      'Extension meta (x-mcp/x-frontmcp) is nested more than 1000 levels deep.',
+    );
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect((await generator.generateTools()).map((t) => t.name)).toEqual(['putItem']);
+      expect(warn).toHaveBeenCalledWith(
+        'Failed to generate tool for GET /item:',
+        'Extension meta (x-mcp/x-frontmcp) is nested more than 1000 levels deep.',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /** The chain spec with GET's x-mcp meta $ref-ing M0, where Mi = { left: Mi+1, right: Mi+1 } */
+  const specWithSharedMeta = (levels: number): any => {
+    const spec = specWithChain('properties', 1);
+    for (let i = 0; i < levels; i++) {
+      const next = { $ref: `#/components/schemas/M${i + 1}` };
+      spec.components.schemas[`M${i}`] = { left: next, right: next };
+    }
+    spec.components.schemas[`M${levels}`] = { leaf: true };
+    spec.paths['/item'].get['x-mcp'] = { meta: { 'acme/tree': { $ref: '#/components/schemas/M0' } } };
+    return spec;
+  };
+
+  it('bounds x-mcp meta that $refs schemas sharing a child, which is copied per occurrence', async () => {
+    // 2^41 copies without a budget; the operation filters never copy meta,
+    // so the other tools still generate
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithSharedMeta(40));
+    await expect(generator.generateTool('/item', 'get')).rejects.toThrow(
+      'Extension meta exceeds the node budget of 100000 (maxSchemaNodes)',
+    );
+
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect((await generator.generateTools()).map((t) => t.name)).toEqual(['putItem']);
+      expect(await generator.generateTools({ readOnlyOnly: true })).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(
+        'Failed to generate tool for GET /item:',
+        expect.stringContaining('Extension meta exceeds the node budget of 100000'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('charges x-mcp meta against maxSchemaNodes: every copied object, the meta object included', async () => {
+    // The meta object plus 2^11 - 1 copies of the shared tree
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithSharedMeta(10));
+
+    const tool = await generator.generateTool('/item', 'get', { maxSchemaNodes: 2048 });
+    expect(JSON.stringify(tool._meta)).toContain('"leaf":true');
+    await expect(generator.generateTool('/item', 'get', { maxSchemaNodes: 2047 })).rejects.toThrow(
+      'Extension meta exceeds the node budget of 2047 (maxSchemaNodes)',
+    );
   });
 
   it('drops the reference back to an ancestor when x-mcp meta $refs a recursive schema', async () => {

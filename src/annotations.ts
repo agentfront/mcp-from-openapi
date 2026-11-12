@@ -1,4 +1,26 @@
 import type { FrontMcpExtensionData, HTTPMethod, OperationObject, ToolAnnotations, ToolIcon } from './types';
+import { SchemaError } from './errors';
+import { resolveSchemaLimits } from './schema-builder';
+
+/** Options for {@link extractExtensionOverrides} */
+export interface ExtensionOverridesOptions {
+  /**
+   * Node budget for the `meta` copied out of the extensions (`x-mcp` and
+   * `x-frontmcp` together). Dereferencing resolves `$ref`s there too, and each
+   * occurrence is copied, so a few `$ref`s to schemas that share a child can
+   * expand into an enormous value. Past the budget a `SchemaError` is thrown.
+   * Defaults to 100000 — `OpenAPIToolGenerator` passes `maxSchemaNodes` —
+   * and `Infinity` disables it.
+   */
+  maxMetaNodes?: number;
+}
+
+/**
+ * How deeply extension meta may nest. A value nested deeper fails the tool, so
+ * that every generated tool stays safe to serialize (`JSON.stringify` overflows
+ * the call stack at a few thousand levels).
+ */
+const MAX_META_DEPTH = 1000;
 
 /**
  * Tool-level overrides read from the `x-mcp` extension family on an operation.
@@ -106,13 +128,21 @@ interface CleanseFrame {
   out: Record<string, unknown> | unknown[];
 }
 
+/** The meta node budget of one operation, shared by its extension layers */
+interface MetaBudget {
+  maxNodes: number;
+  nodes: number;
+}
+
 /** Rebuild a `_meta` contribution with pollution-gadget keys removed at every
  * level — untrusted specs cross a trust boundary here, and JSON/YAML parsing
  * creates `__proto__` as an own key that downstream deep-merges would follow.
  * Dereferencing resolves `$ref`s inside extensions too, so the value can be
- * deeply nested (walked with an explicit stack — issue #50) or circular (a
- * reference back to an ancestor is dropped). */
-function cleanseMeta(root: object): unknown {
+ * circular (a reference back to an ancestor is dropped), deeply nested
+ * (walked with an explicit stack — issue #50 — up to `MAX_META_DEPTH`), or
+ * shared (copied per occurrence, so every copied object or array counts
+ * against the budget). */
+function cleanseMeta(root: object, budget: MetaBudget): unknown {
   // Objects on the path from the root to the node being rebuilt
   const path = new Set<object>();
   const frames: CleanseFrame[] = [];
@@ -121,6 +151,19 @@ function cleanseMeta(root: object): unknown {
   const enter = (node: unknown): unknown => {
     if (!node || typeof node !== 'object') return node;
     if (path.has(node)) return undefined;
+    if (++budget.nodes > budget.maxNodes) {
+      throw new SchemaError(
+        `Extension meta exceeds the node budget of ${budget.maxNodes} (maxSchemaNodes): with its $refs resolved, ` +
+          `the x-mcp/x-frontmcp meta expands into more nodes than allowed. Remove the references or raise ` +
+          `maxSchemaNodes.`,
+        { maxNodes: budget.maxNodes },
+      );
+    }
+    if (frames.length >= MAX_META_DEPTH) {
+      throw new SchemaError(`Extension meta (x-mcp/x-frontmcp) is nested more than ${MAX_META_DEPTH} levels deep.`, {
+        maxDepth: MAX_META_DEPTH,
+      });
+    }
     path.add(node);
     if (Array.isArray(node)) {
       // JSON-cloned, so never sparse
@@ -158,9 +201,9 @@ function cleanseMeta(root: object): unknown {
 
 /** Accept only a plain (non-array) object as a `_meta` contribution,
  * rebuilding it with pollution keys stripped recursively. */
-function sanitizeMeta(value: unknown): Record<string, unknown> | undefined {
+function sanitizeMeta(value: unknown, budget: MetaBudget): Record<string, unknown> | undefined {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
-    return cleanseMeta(value) as Record<string, unknown>;
+    return cleanseMeta(value, budget) as Record<string, unknown>;
   }
   return undefined;
 }
@@ -231,7 +274,7 @@ export function resolveExtensionEnabled(document: object, pathItem: object, oper
   const pathSetting = parseXMcpEnabled(readXMcp(pathItem));
   if (pathSetting !== undefined) enabled = pathSetting;
 
-  const operationDisabled = extractExtensionOverrides(operation).disabled;
+  const operationDisabled = extractExtensionSettings(operation).disabled;
   if (operationDisabled !== undefined) enabled = !operationDisabled;
 
   return enabled;
@@ -246,8 +289,30 @@ export function resolveExtensionEnabled(document: object, pathItem: object, oper
  *   2. `x-mcp` — `false` to exclude, or `{ enabled, name, title, description, annotations }`
  *   3. `x-frontmcp` — the canonical extension for this stack; its `annotations`
  *      (including `annotations.title`) win over the generic variants
+ *
+ * Throws a `SchemaError` when the `meta` exceeds `options.maxMetaNodes` or
+ * nests more than 1000 levels deep.
  */
-export function extractExtensionOverrides(operation: OperationObject): ExtensionToolOverrides {
+export function extractExtensionOverrides(
+  operation: OperationObject,
+  options: ExtensionOverridesOptions = {},
+): ExtensionToolOverrides {
+  const { maxNodes } = resolveSchemaLimits({ maxSchemaNodes: options.maxMetaNodes });
+  return readExtensionOverrides(operation, { maxNodes, nodes: 0 });
+}
+
+/**
+ * The overrides without `meta` and `icons` — the only parts copied out of the
+ * spec — for callers that read just `disabled` or `annotations` (operation
+ * filters): oversized meta then fails only that tool's generation.
+ */
+export function extractExtensionSettings(operation: OperationObject): ExtensionToolOverrides {
+  return readExtensionOverrides(operation, null);
+}
+
+function readExtensionOverrides(operation: OperationObject, metaBudget: MetaBudget | null): ExtensionToolOverrides {
+  const meta = (value: unknown) => (metaBudget ? sanitizeMeta(value, metaBudget) : undefined);
+  const icons = (value: unknown) => (metaBudget ? sanitizeIcons(value) : undefined);
   const op = operation as Record<string, unknown>;
   let result: ExtensionToolOverrides = {};
 
@@ -279,8 +344,8 @@ export function extractExtensionOverrides(operation: OperationObject): Extension
       title: typeof ext['title'] === 'string' ? ext['title'] : undefined,
       description: typeof ext['description'] === 'string' ? ext['description'] : undefined,
       annotations: pickAnnotations(ext['annotations'] as Record<string, unknown> | undefined),
-      meta: sanitizeMeta(ext['meta']),
-      icons: sanitizeIcons(ext['icons']),
+      meta: meta(ext['meta']),
+      icons: icons(ext['icons']),
     });
   }
 
@@ -290,8 +355,8 @@ export function extractExtensionOverrides(operation: OperationObject): Extension
   const frontmcp = op['x-frontmcp'] as FrontMcpExtensionData | undefined;
   if (frontmcp && typeof frontmcp === 'object') {
     const layer: ExtensionToolOverrides = {
-      meta: sanitizeMeta(frontmcp.meta),
-      icons: sanitizeIcons(frontmcp.icons),
+      meta: meta(frontmcp.meta),
+      icons: icons(frontmcp.icons),
     };
     if (frontmcp.annotations) {
       layer.annotations = pickAnnotations(frontmcp.annotations as Record<string, unknown>);
