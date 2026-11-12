@@ -313,6 +313,16 @@ describe('applyOverlay', () => {
     expect(({} as any).polluted).toBeUndefined();
     expect(targeted.safe.value).toBe(1);
 
+    // nor do constructor/prototype, even as the document's own keys
+    const ownKeys = applyOverlay(
+      JSON.parse('{"constructor": {"v": 1}, "prototype": {"v": 2}}'),
+      overlayWith([
+        { target: '$.constructor', update: { hit: true } },
+        { target: "$['prototype']", update: { hit: true } },
+      ]),
+    );
+    expect(JSON.stringify(ownKeys)).toBe('{"constructor":{"v":1},"prototype":{"v":2}}');
+
     // update payloads carrying __proto__/constructor are skipped
     const merged = applyOverlay(
       doc,
