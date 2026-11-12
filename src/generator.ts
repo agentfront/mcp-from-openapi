@@ -27,7 +27,7 @@ import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import { isReferenceObject } from './types';
 import { ParameterResolver } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
-import { SchemaBuilder } from './schema-builder';
+import { SchemaBuilder, resolveSchemaLimits } from './schema-builder';
 import { extractExtensionOverrides, inferAnnotationsFromMethod, isAllowedIconSrc, resolveExtensionEnabled } from './annotations';
 import { applyClientTarget } from './client-targets';
 import { applyOverlay } from './overlay';
@@ -791,9 +791,16 @@ export class OpenAPIToolGenerator {
       throw new Error(`Operation not found: ${method.toUpperCase()} ${pathStr}`);
     }
 
+    // Schema limits: conversion stops descending at the same depth the final
+    // truncation cuts at (so work stays bounded by what the output keeps), and
+    // both phases share the node budget
+    const { maxDepth: maxSchemaDepth, maxNodes: maxSchemaNodes } = resolveSchemaLimits(options);
+    const schemaConversion = { maxDepth: maxSchemaDepth, maxNodes: maxSchemaNodes };
+
     // Resolve parameters
     const parameterResolver = new ParameterResolver(options.namingStrategy, {
       includeExamples: options.includeExamples,
+      schemaConversion,
     });
 
     // Filter out ReferenceObjects from parameters
@@ -819,7 +826,7 @@ export class OpenAPIToolGenerator {
     );
 
     // Build response schema
-    const responseBuilder = new ResponseBuilder(options);
+    const responseBuilder = new ResponseBuilder(options, schemaConversion);
     const outputSchema = responseBuilder.build(operation.responses);
 
     // Extension overrides (x-speakeasy-mcp < x-mcp < x-frontmcp)
@@ -866,11 +873,12 @@ export class OpenAPIToolGenerator {
 
     // Bound schema nesting depth (applied last so the final schemas are
     // bounded). Floor of 1: depth 0 would strip the ROOT inputSchema's
-    // properties while the mapper still lists every parameter.
-    const maxSchemaDepth = Math.max(1, options.maxSchemaDepth ?? 10);
-    resolvedInputSchema = SchemaBuilder.truncateDepth(resolvedInputSchema, maxSchemaDepth);
+    // properties while the mapper still lists every parameter. This also
+    // materializes the conversion's shared subschemas into independent copies.
+    const truncateOptions = { maxNodes: maxSchemaNodes };
+    resolvedInputSchema = SchemaBuilder.truncateDepth(resolvedInputSchema, maxSchemaDepth, truncateOptions);
     if (resolvedOutputSchema) {
-      resolvedOutputSchema = SchemaBuilder.truncateDepth(resolvedOutputSchema, maxSchemaDepth);
+      resolvedOutputSchema = SchemaBuilder.truncateDepth(resolvedOutputSchema, maxSchemaDepth, truncateOptions);
     }
 
     // Trimming controls (after depth truncation, before client targets so the

@@ -74,6 +74,11 @@ Resolves parameters from OpenAPI operations, detects naming conflicts, and gener
 
 ```typescript
 import { ParameterResolver } from "mcp-from-openapi";
+
+new ParameterResolver(namingStrategy?: NamingStrategy, options?: {
+  includeExamples?: boolean;
+  schemaConversion?: SchemaConversionOptions; // unbounded when omitted
+});
 ```
 
 #### Methods
@@ -95,6 +100,8 @@ Extracts and combines response schemas from OpenAPI operations.
 
 ```typescript
 import { ResponseBuilder } from "mcp-from-openapi";
+
+new ResponseBuilder(options?: GenerateOptions, schemaConversion?: SchemaConversionOptions);
 ```
 
 #### Methods
@@ -102,6 +109,24 @@ import { ResponseBuilder } from "mcp-from-openapi";
 ```typescript
 build(responses?: ResponsesObject): JsonSchema | undefined
 ```
+
+#### SchemaConversionOptions
+
+Limits for converting OpenAPI schemas, used by `ParameterResolver` and `ResponseBuilder`. The generator sets them from `maxSchemaDepth` / `maxSchemaNodes`; standalone, both default to unbounded.
+
+```typescript
+interface SchemaConversionOptions {
+  // Stop descending below this depth; deeper subschemas become `{}` placeholders.
+  // allOf members don't consume depth. SchemaBuilder.truncateDepth(schema, maxDepth)
+  // removes every placeholder.
+  maxDepth?: number;
+  // Throw a SchemaError once one conversion visits more than this many nodes
+  // (converted, reused, or placeholder), bounding its time and memory.
+  maxNodes?: number;
+}
+```
+
+A schema reused through `$ref` is converted once and shared, so the returned schemas can share nested objects. Treat them as read-only below the root, or copy them with `SchemaBuilder.truncateDepth`, which always returns an unshared tree.
 
 See [Response Schemas](./response-schemas.md) for details.
 
@@ -580,6 +605,7 @@ interface GenerateOptions {
   includeDeprecated?: boolean; // default: false
   includeAllResponses?: boolean; // default: true
   maxSchemaDepth?: number; // default: 10 (deeper structures truncated)
+  maxSchemaNodes?: number; // default: 100000 (per schema; Infinity disables)
   includeExamples?: boolean; // default: false (parameter/media-type examples)
   includeSecurityInInput?: boolean | string[]; // default: false; array = per-scheme selection
   target?: ClientTarget; // per-client schema dialect transforms

@@ -96,12 +96,27 @@ export const BUILTIN_FORMAT_RESOLVERS: Record<string, FormatResolver> = {
  * Recursively resolve format fields in a JSON Schema tree.
  * For each schema node with a `format` field, the matching resolver
  * is applied to enrich the schema with concrete constraints.
+ *
+ * A subschema object that appears in several places is resolved once and the
+ * result is shared the same way (so a reused `$ref` target costs one pass,
+ * not one per occurrence), and circular schema graphs terminate, yielding an
+ * equally circular result.
  */
 export function resolveSchemaFormats(
   schema: JsonSchema,
   resolvers: Record<string, FormatResolver>,
 ): JsonSchema {
+  return resolveNode(schema, resolvers, new Map());
+}
+
+function resolveNode(
+  schema: JsonSchema,
+  resolvers: Record<string, FormatResolver>,
+  resolved: Map<object, JsonSchema>,
+): JsonSchema {
   if (!schema || typeof schema !== 'object') return schema;
+  const done = resolved.get(schema);
+  if (done) return done;
 
   let result: Record<string, unknown> = { ...schema };
 
@@ -110,12 +125,15 @@ export function resolveSchemaFormats(
   if (format && resolvers[format]) {
     result = { ...resolvers[format](result as JsonSchema) };
   }
+  // Registered before descending, so a cycle back to this node resolves to it
+  resolved.set(schema, result as JsonSchema);
+  const recurse = (value: JsonSchema): JsonSchema => resolveNode(value, resolvers, resolved);
 
   // Recursively process properties
   if (result['properties'] && typeof result['properties'] === 'object') {
     const props: Record<string, JsonSchema> = {};
     for (const [key, value] of Object.entries(result['properties'] as Record<string, JsonSchema>)) {
-      props[key] = resolveSchemaFormats(value, resolvers);
+      props[key] = recurse(value);
     }
     result['properties'] = props;
   }
@@ -123,27 +141,27 @@ export function resolveSchemaFormats(
   // Recursively process items
   if (result['items']) {
     if (Array.isArray(result['items'])) {
-      result['items'] = (result['items'] as JsonSchema[]).map((item) => resolveSchemaFormats(item, resolvers));
+      result['items'] = (result['items'] as JsonSchema[]).map(recurse);
     } else {
-      result['items'] = resolveSchemaFormats(result['items'] as JsonSchema, resolvers);
+      result['items'] = recurse(result['items'] as JsonSchema);
     }
   }
 
   // Recursively process additionalProperties
   if (result['additionalProperties'] && typeof result['additionalProperties'] === 'object') {
-    result['additionalProperties'] = resolveSchemaFormats(result['additionalProperties'] as JsonSchema, resolvers);
+    result['additionalProperties'] = recurse(result['additionalProperties'] as JsonSchema);
   }
 
   // Recursively process composition keywords
   for (const key of ['allOf', 'anyOf', 'oneOf'] as const) {
     if (result[key] && Array.isArray(result[key])) {
-      result[key] = (result[key] as JsonSchema[]).map((s) => resolveSchemaFormats(s, resolvers));
+      result[key] = (result[key] as JsonSchema[]).map(recurse);
     }
   }
 
   // Recursively process not
   if (result['not'] && typeof result['not'] === 'object') {
-    result['not'] = resolveSchemaFormats(result['not'] as JsonSchema, resolvers);
+    result['not'] = recurse(result['not'] as JsonSchema);
   }
 
   return result as JsonSchema;

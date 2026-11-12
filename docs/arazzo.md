@@ -60,7 +60,7 @@ Workflow `outputs` derive the tool's output schema best-effort: `$statusCode` �
 
 ## Options
 
-`ArazzoGenerateOptions` is the schema-shaping subset of [`GenerateOptions`](./configuration.md): `target`, `maxSchemaDepth`, `maxProperties`, `maxDescriptionLength`, `stripExamples`, `includeExamples`, `resolveFormats`/`formatResolvers`, `preferredStatusCodes`, `includeAllResponses`, `maxToolNameLength`, `includeSecurityInInput`, and `emitTypeSignatures`. They apply to the per-step embedded schemas AND the consolidated workflow schemas, in the same order as `generateTool` (formats → depth truncation → trims → client target). Operation-filtering options have no meaning here and are not accepted.
+`ArazzoGenerateOptions` is the schema-shaping subset of [`GenerateOptions`](./configuration.md): `target`, `maxSchemaDepth`, `maxSchemaNodes`, `maxProperties`, `maxDescriptionLength`, `stripExamples`, `includeExamples`, `resolveFormats`/`formatResolvers`, `preferredStatusCodes`, `includeAllResponses`, `maxToolNameLength`, `includeSecurityInInput`, and `emitTypeSignatures`. They apply to the per-step embedded schemas AND the consolidated workflow schemas, in the same order as `generateTool` (formats → depth truncation → trims → client target). Operation-filtering options have no meaning here and are not accepted.
 
 ## Errors
 
