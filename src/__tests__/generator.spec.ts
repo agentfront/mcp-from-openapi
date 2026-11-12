@@ -4959,6 +4959,8 @@ describe('Shared $ref expansion stays bounded (issue #48)', () => {
     const cyclic = await (await OpenAPIToolGenerator.fromJSON(specWithChain(40, { closeCycle: true }))).generateTools(options);
     const open = await (await OpenAPIToolGenerator.fromJSON(specWithChain(40))).generateTools(options);
 
+    expect(cyclic.map((t) => t.name)).toEqual(['getItem', 'putItem']);
+    expect(open.map((t) => t.name)).toEqual(['getItem', 'putItem']);
     expect(JSON.stringify(cyclic)).toBe(JSON.stringify(open));
   });
 

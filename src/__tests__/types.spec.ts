@@ -680,8 +680,9 @@ describe('toJsonSchema shared references and limits (issue #48)', () => {
     return nodes[0];
   }
 
-  it('converts each shared node once: a 40-level chain stays within a 50-node budget', () => {
-    const result: any = toJsonSchema(chain(40), { maxNodes: 50 });
+  it('converts each shared node once: a 40-level chain stays within a 100-visit budget', () => {
+    // One visit per reference (81); converting every occurrence would take 2^41
+    const result: any = toJsonSchema(chain(40), { maxNodes: 100 });
 
     let node = result;
     for (let i = 0; i < 40; i++) {
@@ -770,7 +771,8 @@ describe('toJsonSchema shared references and limits (issue #48)', () => {
       node.properties.right = nodes[(i + 1) % 40];
       node.properties.back = nodes[0];
     });
-    const result: any = toJsonSchema(nodes[0], { maxDepth: 10, maxNodes: 5000 });
+    // 2^11 - 1 conversions with 3 child visits each
+    const result: any = toJsonSchema(nodes[0], { maxDepth: 10, maxNodes: 10_000 });
 
     let node = result;
     for (let i = 0; i < 10; i++) node = node.properties.left;
@@ -778,7 +780,7 @@ describe('toJsonSchema shared references and limits (issue #48)', () => {
     expect(result.properties.left).not.toBe(result.properties.right);
     expect(result.properties.left.properties.back).toEqual({});
     // 2^20 paths within depth 20 exceed the budget
-    expect(() => toJsonSchema(nodes[0], { maxDepth: 20, maxNodes: 5000 })).toThrow(SchemaError);
+    expect(() => toJsonSchema(nodes[0], { maxDepth: 20, maxNodes: 10_000 })).toThrow(SchemaError);
   });
 
   it('reuses nodes on a cycle too long to walk within maxDepth', () => {
@@ -795,14 +797,15 @@ describe('toJsonSchema shared references and limits (issue #48)', () => {
   });
 
   it('confines the cycle analysis to the region within maxDepth, abandoning it past the node budget', () => {
-    // `shared` is cut at maxDepth, so its revisit needs the cycle analysis; the
-    // 50 siblings put the region (53 nodes) over a 40-node budget
+    // `shared` is cut at maxDepth, so its revisit needs the cycle analysis. The
+    // region holds 53 nodes; conversion takes 55 visits by reusing `shared`
+    // (57 without), and the 50 siblings put it all over a 40-node budget
     const shared = { type: 'object', properties: { y: { type: 'object', properties: { z: { type: 'string' } } } } };
     const properties: Record<string, unknown> = { a: shared, b: shared };
     for (let i = 0; i < 50; i++) properties[`w${i}`] = { type: 'string' };
     const root = { type: 'object', properties };
 
-    const result: any = toJsonSchema(root, { maxDepth: 2, maxNodes: 53 });
+    const result: any = toJsonSchema(root, { maxDepth: 2, maxNodes: 55 });
     expect(result.properties.a).toBe(result.properties.b);
     expect(result.properties.a.properties.y.properties.z).toEqual({});
     // Past the budget nothing is reused (always correct), and conversion fails on its own budget
@@ -861,6 +864,34 @@ describe('toJsonSchema shared references and limits (issue #48)', () => {
     const result: any = toJsonSchema(root, { maxDepth: 2 });
 
     expect(result.properties.next.properties.next.properties.next).toEqual({});
+  });
+
+  it('charges cycle placeholders against the node budget', () => {
+    // Two schemas referencing each other through 300 properties each: every one
+    // of A's properties rebuilds B, whose 300 properties are cycle placeholders
+    const a: any = { type: 'object', properties: {} };
+    const b: any = { type: 'object', properties: {} };
+    for (let i = 0; i < 300; i++) {
+      a.properties[`b${i}`] = b;
+      b.properties[`a${i}`] = a;
+    }
+
+    expect(() => toJsonSchema(a, { maxDepth: 10, maxNodes: 10_000 })).toThrow(/node budget of 10000 /);
+    expect(() => toJsonSchema(a, { maxDepth: 10, maxNodes: 100_000 })).not.toThrow();
+  });
+
+  it('charges depth placeholders and reused results against the node budget', () => {
+    const leaf = { type: 'string' };
+    const properties: Record<string, unknown> = {};
+    for (let i = 0; i < 20; i++) properties[`p${i}`] = leaf;
+    const wide = { type: 'object', properties };
+
+    // 20 children past maxDepth: 21 visits
+    expect(() => toJsonSchema(wide, { maxDepth: 0, maxNodes: 20 })).toThrow(/node budget of 20 /);
+    expect(toJsonSchema(wide, { maxDepth: 0, maxNodes: 21 }).properties.p0).toEqual({});
+    // 1 conversion and 19 reuses of the shared leaf: 21 visits
+    expect(() => toJsonSchema(wide, { maxNodes: 20 })).toThrow(/node budget of 20 /);
+    expect(toJsonSchema(wide, { maxNodes: 21 }).properties.p19).toEqual({ type: 'string' });
   });
 
   it('floors fractional limits and treats absent or non-finite ones as unbounded', () => {

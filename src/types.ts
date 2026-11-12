@@ -77,8 +77,10 @@ export interface SchemaConversionOptions {
   maxDepth?: number;
 
   /**
-   * Throw a `SchemaError` once a single conversion has converted more than
-   * this many schema nodes. Unbounded when omitted.
+   * Throw a `SchemaError` once a single conversion has visited more than this
+   * many schema nodes — converted, reused, or placeholder alike, since each
+   * one fills a slot in the result — so its time and memory stay bounded.
+   * Unbounded when omitted.
    */
   maxNodes?: number;
 }
@@ -124,7 +126,7 @@ export function toJsonSchema(
     root: schema,
     maxDepth: normalizeConversionLimit(options.maxDepth, 0),
     maxNodes: normalizeConversionLimit(options.maxNodes, 1),
-    converted: 0,
+    visits: 0,
     stack: new Map(),
     cache: new Map(),
     cyclic: undefined,
@@ -143,8 +145,8 @@ interface ConversionState {
   readonly root: unknown;
   readonly maxDepth: number;
   readonly maxNodes: number;
-  /** Nodes converted so far (cache hits and placeholders are free). */
-  converted: number;
+  /** Schema nodes visited so far: conversions, reused results, and placeholders. */
+  visits: number;
   /** Ancestors on the current path, with their stack index: a revisit is a cycle, cut with `{}`. */
   readonly stack: Map<object, number>;
   /** The latest result for every converted node; reused only when it is valid anywhere. */
@@ -192,6 +194,17 @@ interface CachedConversion {
  *   walk and `maxNodes` stops pathological ones with a clear error.
  */
 function convertSchema(schema: SchemaObject | ReferenceObject, depth: number, state: ConversionState): JsonSchema {
+  // Charge every visit, not just conversions: a reused result or a `{}`
+  // placeholder still fills a slot in the parent being built, and a node on a
+  // cycle can be rebuilt once per path — so only counting every visit bounds
+  // the conversion's time and memory
+  if (++state.visits > state.maxNodes) {
+    throw new SchemaError(
+      `Schema conversion exceeded the node budget of ${state.maxNodes} (maxSchemaNodes): shared or recursive ` +
+        `$refs expand into more schema nodes than allowed. Lower maxSchemaDepth or raise maxSchemaNodes.`,
+      { maxNodes: state.maxNodes },
+    );
+  }
   if (isReferenceObject(schema)) {
     return { $ref: schema.$ref } as JsonSchema;
   }
@@ -212,13 +225,6 @@ function convertSchema(schema: SchemaObject | ReferenceObject, depth: number, st
       state.lowWater = Math.min(state.lowWater, onStack);
       return {} as JsonSchema;
     }
-  }
-  if (++state.converted > state.maxNodes) {
-    throw new SchemaError(
-      `Schema conversion exceeded the node budget of ${state.maxNodes} (maxSchemaNodes): shared or recursive ` +
-        `$refs expand into more schema nodes than allowed. Lower maxSchemaDepth or raise maxSchemaNodes.`,
-      { maxNodes: state.maxNodes },
-    );
   }
   if (!isNode) {
     // Boolean/degenerate schemas have no children to share or cycle through
@@ -302,8 +308,8 @@ function forEachChildSchema(node: object, visit: (child: object, weight: 0 | 1) 
 /**
  * The shallowest depth at which conversion can reach each node from `root`,
  * for the nodes within `maxDepth` (depth counted exactly as conversion counts
- * it). `null` once that region holds more than `maxNodes` nodes — conversion
- * would exceed the budget anyway.
+ * it). `null` once that region holds more than `maxNodes` nodes: conversion
+ * visits every node of the region, so it would exceed the budget anyway.
  */
 function reachableRegion(root: object, maxDepth: number, maxNodes: number): Map<object, number> | null {
   const depthOf = new Map<object, number>([[root, 0]]);
@@ -1255,7 +1261,8 @@ export interface GenerateOptions {
    * so a small spec that references the same schema many times can still
    * expand into an enormous tree. Generating a tool fails with a
    * `SchemaError` once one of its schemas — or the conversion work for one
-   * parameter, request body, or response — exceeds this many nodes;
+   * parameter, request body, or response, counting every subschema visit —
+   * exceeds this many nodes;
    * `generateTools()` skips that tool with a warning, like any other per-tool
    * failure. `Infinity` disables the budget.
    * @default 100000

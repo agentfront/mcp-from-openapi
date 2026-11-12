@@ -120,7 +120,8 @@ interface SchemaConversionOptions {
   // allOf members don't consume depth. SchemaBuilder.truncateDepth(schema, maxDepth)
   // removes every placeholder.
   maxDepth?: number;
-  // Throw a SchemaError after converting more than this many nodes in one conversion.
+  // Throw a SchemaError once one conversion visits more than this many nodes
+  // (converted, reused, or placeholder), bounding its time and memory.
   maxNodes?: number;
 }
 ```
