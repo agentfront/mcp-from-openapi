@@ -1000,9 +1000,11 @@ export class OpenAPIToolGenerator {
     // Client dialect transforms (final step — the emitted schemas must be
     // exactly what the targeted client accepts)
     if (options.target) {
-      resolvedInputSchema = applyClientTarget(resolvedInputSchema, options.target);
+      // Inlining local $refs expands each definition once per reference: bounded like the schemas
+      const targetOptions = { maxNodes: maxSchemaNodes };
+      resolvedInputSchema = applyClientTarget(resolvedInputSchema, options.target, targetOptions);
       if (resolvedOutputSchema) {
-        resolvedOutputSchema = applyClientTarget(resolvedOutputSchema, options.target);
+        resolvedOutputSchema = applyClientTarget(resolvedOutputSchema, options.target, targetOptions);
       }
     }
 

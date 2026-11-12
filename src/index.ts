@@ -66,7 +66,7 @@ export {
   enforceClosedObjects,
   requireAllProperties,
 } from './client-targets';
-export type { ClientTarget } from './client-targets';
+export type { ClientTarget, ClientTargetOptions } from './client-targets';
 
 // Request building
 export { buildHttpRequest } from './request-builder';

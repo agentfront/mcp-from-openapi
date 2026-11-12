@@ -160,13 +160,14 @@ No step before truncation recurses once per level of nesting: dereferencing, con
 
 The emitted schemas still spell every occurrence of a shared schema out, so a small spec can describe an enormous tree — for example, five properties per level that all reference the next level keep 5^10 nodes after depth truncation. `maxSchemaNodes` (default `100000`) caps several things for each tool. Past the budget, generating that tool fails with a `SchemaError` that names the option; `generateTools()` skips the tool with a warning, like any other per-tool failure.
 
-- Each generated input/output schema: every schema object counts, plus every value inside its object-valued keywords (`default`, `examples`, `enum`, `required`, `x-*`, ...).
-- The conversion work for each parameter, request body, and emitted response. With `includeAllResponses: false`, the responses left out are never converted.
-- The `x-mcp`/`x-frontmcp` meta copied into a tool's `_meta` (see [Modern MCP fields](./modern-mcp-fields.md)), and the other values a tool takes from the spec: its title, `mapper`, and `metadata`.
+- Each generated input/output schema: every JSON value in it counts — each schema object, each keyword's value, and everything inside those (`default`, `examples`, `enum`, `required`, `x-*`, ...). A schema with thousands of keywords, reached through many references, therefore cannot expand past the budget.
+- The conversion work for each parameter, request body, and emitted response: one node per schema visited, plus one per keyword of each schema converted (a schema on a cycle is converted once per path). With `includeAllResponses: false`, the responses left out are never converted.
+- The `x-mcp`/`x-frontmcp` meta copied into a tool's `_meta` (see [Modern MCP fields](./modern-mcp-fields.md)), and the other values a tool takes from the spec: its title, `metadata`, and the objects in its `mapper`.
+- With a client [`target`](./client-targets.md), the inlining of local `$ref`s: a definition is inlined once per `$ref` to it, and every value of the result counts.
 
 Values from the spec are copied, never shared: dereferencing resolves `$ref`s inside examples, defaults, and extensions too, so one value can expand like a schema can. A tool therefore shares no object with the document or with other tools. A reference back to an enclosing value (a cycle) is dropped, and a value nested more than 1,000 levels deep fails the tool.
 
-For scale, at the default depth: the largest schema generated from the full GitHub REST spec has 4,224 schema objects and 15,606 nodes, the largest from the vendored Discord spec 8,489 nodes, and no single conversion visits more than ~1,200 nodes. Lower `maxSchemaDepth` to shrink such tools, raise `maxSchemaNodes` to allow them, or pass `Infinity` to disable the budget.
+For scale, at the default depth: every tool of the full GitHub REST spec generates within a budget of 22,232 nodes, and every tool of the vendored Discord spec within 19,225 — the largest schemas' JSON values, which cost more than any conversion. Lower `maxSchemaDepth` to shrink such tools, raise `maxSchemaNodes` to allow them, or pass `Infinity` to disable the budget.
 
 ### includeExamples
 

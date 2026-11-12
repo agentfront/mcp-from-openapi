@@ -1,6 +1,6 @@
 import type { JSONSchema } from 'zod/v4/core';
 import { SchemaError } from './errors';
-import { copyJsonValue, type CopyBudget } from './json-copy';
+import { chargeBudget, copyJsonValue, type CopyBudget } from './json-copy';
 
 /** JSON Schema type from Zod v4 */
 type JsonSchema = JSONSchema.JSONSchema;
@@ -8,10 +8,11 @@ type JsonSchema = JSONSchema.JSONSchema;
 /** Options for {@link SchemaBuilder.truncateDepth} */
 export interface TruncateDepthOptions {
   /**
-   * Maximum number of nodes in the truncated tree — schema objects, plus every
-   * value inside their object-valued keywords (`default`, `examples`, `enum`,
-   * `required`, `x-*`, ...); a `SchemaError` is thrown as soon as it would
-   * contain more. Unbounded when omitted.
+   * Maximum number of nodes in the truncated tree — every JSON value in it:
+   * schema objects, each of their keywords' values, and everything inside
+   * those (`default`, `examples`, `enum`, `required`, `x-*`, ...); a
+   * `SchemaError` is thrown as soon as it would contain more. Unbounded when
+   * omitted.
    */
   maxNodes?: number;
 }
@@ -467,23 +468,24 @@ export class SchemaBuilder {
     maxDepth: number,
     budget: CopyBudget,
   ): JsonSchema {
-    /* c8 ignore next -- guard for boolean/degenerate schemas in recursive traversal */
-    if (!node || typeof node !== 'object') return node;
+    if (!node || typeof node !== 'object') {
+      // A boolean schema (`properties: { a: true }`) is one value
+      chargeBudget(budget);
+      return node;
+    }
     // A tuple-of-tuples `items` element is an array, not a schema: a value
     if (Array.isArray(node)) {
       return copyJsonValue(node, budget, { label: 'An array in place of a schema' }) as JsonSchema;
     }
 
-    if (++budget.nodes > budget.maxNodes) budget.exceeded();
-
+    chargeBudget(budget);
     const copy = { ...node } as JsonSchema;
     const copyRecord = copy as Record<string, unknown>;
-    const keys = Object.keys(copyRecord);
     const kinds = this.TRUNCATE_KEY_KINDS;
 
     if (depth >= maxDepth) {
       let stripped = false;
-      for (const key of keys) {
+      for (const key of Object.keys(copyRecord)) {
         if (kinds.has(key) && isObject(copyRecord[key])) {
           delete copyRecord[key];
           stripped = true;
@@ -497,25 +499,30 @@ export class SchemaBuilder {
       }
     }
 
+    // Every keyword value counts: a schema with thousands of keywords, shared
+    // by many parents, is copied once per occurrence like any other
     const childDepth = depth + 1;
-    for (const key of keys) {
+    for (const key of Object.keys(copyRecord)) {
       const value = copyRecord[key];
-      if (!isObject(value)) continue;
+      if (!isObject(value)) {
+        chargeBudget(budget);
+        continue;
+      }
       const kind = depth < maxDepth ? kinds.get(key) : undefined;
       if (kind === 'map' && !Array.isArray(value)) {
+        chargeBudget(budget);
         const mapped: Record<string, JsonSchema> = {};
         for (const [name, sub] of Object.entries(value as Record<string, JsonSchema>)) {
           mapped[name] = this.truncateDepthRecursive(sub, childDepth, maxDepth, budget);
         }
         copyRecord[key] = mapped;
-      } else if (kind === 'schema') {
-        // `items` may be a tuple array (pre-2020-12 style)
-        copyRecord[key] = Array.isArray(value)
-          ? value.map((item) => this.truncateDepthRecursive(item as JsonSchema, childDepth, maxDepth, budget))
-          : this.truncateDepthRecursive(value as JsonSchema, childDepth, maxDepth, budget);
-      } else if (kind === 'list' && Array.isArray(value)) {
-        copyRecord[key] = value.map((member) =>
-          this.truncateDepthRecursive(member as JsonSchema, childDepth, maxDepth, budget),
+      } else if (kind === 'schema' && !Array.isArray(value)) {
+        copyRecord[key] = this.truncateDepthRecursive(value as JsonSchema, childDepth, maxDepth, budget);
+      } else if (kind === 'schema' || (kind === 'list' && Array.isArray(value))) {
+        // A list of schemas — or `items` as a tuple array (pre-2020-12 style)
+        chargeBudget(budget);
+        copyRecord[key] = (value as JsonSchema[]).map((member) =>
+          this.truncateDepthRecursive(member, childDepth, maxDepth, budget),
         );
       } else {
         // Any other object value (`default`, `examples`, `enum`, `x-*`, ...)

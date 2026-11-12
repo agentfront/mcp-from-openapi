@@ -163,7 +163,8 @@ buildHttpRequest(tool: McpOpenAPITool, input: Record<string, unknown>, options?:
 Apply a client dialect's schema transforms (`'claude' | 'openai' | 'gemini' | 'strict'`). The individual transforms (`inlineLocalRefs`, `ensureArrayItems`, `collapseRootCompositions`, `collapseNestedUnions`, `demoteFormats`, `enforceClosedObjects`) are exported too. See [Client Targets](./client-targets.md).
 
 ```typescript
-applyClientTarget(schema: JsonSchema, target: ClientTarget): JsonSchema
+applyClientTarget(schema: JsonSchema, target: ClientTarget, options?: ClientTargetOptions): JsonSchema
+// ClientTargetOptions = { maxNodes?: number } — a node budget for inlining local $refs (unbounded when omitted)
 ```
 
 ### fromArazzo / parseRuntimeExpression

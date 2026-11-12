@@ -569,9 +569,10 @@ describe('ResponseBuilder schemaConversion limits', () => {
       400: { description: 'bad', content: { 'application/json': { schema: { type: 'object', properties: wide } } } },
     };
 
-    const preferred: any = new ResponseBuilder({ includeAllResponses: false }, { maxNodes: 5 }).build(withError);
+    // Converting the 200 schema charges 8 nodes, the 400 one 23
+    const preferred: any = new ResponseBuilder({ includeAllResponses: false }, { maxNodes: 10 }).build(withError);
     expect(preferred['x-status-code']).toBe(200);
-    expect(() => new ResponseBuilder({ includeAllResponses: true }, { maxNodes: 5 }).build(withError)).toThrow(
+    expect(() => new ResponseBuilder({ includeAllResponses: true }, { maxNodes: 10 }).build(withError)).toThrow(
       /maxSchemaNodes/,
     );
   });

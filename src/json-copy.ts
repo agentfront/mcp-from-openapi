@@ -12,6 +12,11 @@ export interface CopyBudget {
   readonly exceeded: () => never;
 }
 
+/** Charge `cost` nodes against `budget`, calling its owner once it is exceeded */
+export function chargeBudget(budget: CopyBudget, cost = 1): void {
+  if ((budget.nodes += cost) > budget.maxNodes) budget.exceeded();
+}
+
 /** Options for {@link copyJsonValue} */
 export interface CopyOptions {
   /** What is copied, for the error when it nests too deeply — e.g. "The `default` value of a schema" */
@@ -54,7 +59,7 @@ interface CopyFrame {
  */
 export function copyJsonValue(root: unknown, budget: CopyBudget, options: CopyOptions): unknown {
   if (root === null || typeof root !== 'object') {
-    if (++budget.nodes > budget.maxNodes) budget.exceeded();
+    chargeBudget(budget);
     return root;
   }
   return copyFlat(root, budget, options) ?? copyTree(root, budget, options);
@@ -74,8 +79,7 @@ function copyFlat(node: object, budget: CopyBudget, options: CopyOptions): objec
       if (value !== null && typeof value === 'object') return undefined;
       present++;
     }
-    budget.nodes += 1 + present;
-    if (budget.nodes > budget.maxNodes) budget.exceeded();
+    chargeBudget(budget, 1 + present);
     // Holes stay holes
     return node.slice();
   }
@@ -85,8 +89,7 @@ function copyFlat(node: object, budget: CopyBudget, options: CopyOptions): objec
     const value = record[key];
     if (value !== null && typeof value === 'object') return undefined;
   }
-  budget.nodes += 1 + keys.length;
-  if (budget.nodes > budget.maxNodes) budget.exceeded();
+  chargeBudget(budget, 1 + keys.length);
   if (!options.omitPrototypeKeys) {
     // Spread defines each key as an own property — `__proto__` included
     return { ...record };
@@ -113,7 +116,7 @@ function copyTree(root: object, budget: CopyBudget, options: CopyOptions): unkno
   const frames: CopyFrame[] = [];
   const pending = {};
   const push = (node: object): void => {
-    if (++budget.nodes > budget.maxNodes) budget.exceeded();
+    chargeBudget(budget);
     path.add(node);
     if (Array.isArray(node)) {
       frames.push({ node, keys: null, values: node, next: 0, out: new Array<unknown>(node.length) });
@@ -126,7 +129,7 @@ function copyTree(root: object, budget: CopyBudget, options: CopyOptions): unkno
   // A value's copy — or `pending`, with a frame pushed to copy it
   const enter = (node: unknown): unknown => {
     if (node === null || typeof node !== 'object' || path.has(node)) {
-      if (++budget.nodes > budget.maxNodes) budget.exceeded();
+      chargeBudget(budget);
       // A reference back to an enclosing container (a cycle) is dropped
       return node === null || typeof node !== 'object' ? node : undefined;
     }

@@ -77,10 +77,12 @@ export interface SchemaConversionOptions {
   maxDepth?: number;
 
   /**
-   * Throw a `SchemaError` once a single conversion has visited more than this
-   * many schema nodes — converted, reused, or placeholder alike, since each
-   * one fills a slot in the result — so its time and memory stay bounded.
-   * Unbounded when omitted.
+   * Throw a `SchemaError` once a single conversion has charged more than this
+   * many nodes, so its time and memory stay bounded. Every schema visited
+   * costs one — converted, reused, or placeholder alike, since each one fills
+   * a slot in the result — and a converted schema costs one more per keyword,
+   * as converting copies every keyword (and a schema on a cycle can be
+   * converted once per path). Unbounded when omitted.
    */
   maxNodes?: number;
 }
@@ -126,7 +128,7 @@ export function toJsonSchema(
     root: schema,
     maxDepth: normalizeConversionLimit(options.maxDepth, 0),
     maxNodes: normalizeConversionLimit(options.maxNodes, 1),
-    visits: 0,
+    nodes: 0,
     stack: new Map(),
     cache: new Map(),
     cyclic: undefined,
@@ -145,8 +147,8 @@ interface ConversionState {
   readonly root: unknown;
   readonly maxDepth: number;
   readonly maxNodes: number;
-  /** Schema nodes visited so far: conversions, reused results, and placeholders. */
-  visits: number;
+  /** Nodes charged so far: one per schema visited, plus one per keyword of each schema converted. */
+  nodes: number;
   /** Ancestors on the current path, with their stack index: a revisit is a cycle, cut with `{}`. */
   readonly stack: Map<object, number>;
   /** The latest result for every converted node; reused only when it is valid anywhere. */
@@ -270,13 +272,7 @@ function visitSchema(
   // placeholder still fills a slot in the parent being built, and a node on a
   // cycle can be rebuilt once per path — so only counting every visit bounds
   // the conversion's time and memory
-  if (++state.visits > state.maxNodes) {
-    throw new SchemaError(
-      `Schema conversion exceeded the node budget of ${state.maxNodes} (maxSchemaNodes): shared or recursive ` +
-        `$refs expand into more schema nodes than allowed. Lower maxSchemaDepth or raise maxSchemaNodes.`,
-      { maxNodes: state.maxNodes },
-    );
-  }
+  charge(state, 1);
   if (isReferenceObject(schema)) {
     return { $ref: schema.$ref } as JsonSchema;
   }
@@ -300,6 +296,17 @@ function visitSchema(
     return {} as JsonSchema;
   }
   return enterSchema(schema, depth, node, state, frames);
+}
+
+/** Charge `cost` nodes against the conversion's budget, throwing once it is exceeded */
+function charge(state: ConversionState, cost: number): void {
+  if ((state.nodes += cost) > state.maxNodes) {
+    throw new SchemaError(
+      `Schema conversion exceeded the node budget of ${state.maxNodes} (maxSchemaNodes): shared or recursive ` +
+        `$refs expand into more schema nodes than allowed. Lower maxSchemaDepth or raise maxSchemaNodes.`,
+      { maxNodes: state.maxNodes },
+    );
+  }
 }
 
 /**
@@ -496,6 +503,9 @@ function enterSchema(
   state: ConversionState,
   frames: ConversionFrame[],
 ): JsonSchema | typeof PENDING {
+  // Converting copies every keyword: a schema with thousands of them, reached
+  // by many paths, must not slip under the budget by counting once each time
+  if (node) charge(state, Object.keys(node).length);
   const frame: ConversionFrame = {
     node,
     depth,
@@ -1378,11 +1388,13 @@ export interface GenerateOptions {
    * are converted once, but the emitted schema spells every occurrence out,
    * so a small spec that references the same schema many times can still
    * expand into an enormous tree. Generating a tool fails with a
-   * `SchemaError` once one of its schemas — or the conversion work for one
-   * parameter, request body, or response, counting every subschema visit —
-   * exceeds this many nodes;
-   * `generateTools()` skips that tool with a warning, like any other per-tool
-   * failure. `Infinity` disables the budget.
+   * `SchemaError` once one of its schemas exceeds this many nodes — every
+   * JSON value in it counts — or so does the conversion work for one
+   * parameter, request body, or response (each schema visited, plus each
+   * keyword of each schema converted), the spec values the tool copies
+   * (title, metadata, mapper objects, extension meta), or a client target's
+   * inlining of local `$ref`s. `generateTools()` skips that tool with a
+   * warning, like any other per-tool failure. `Infinity` disables the budget.
    * @default 100000
    */
   maxSchemaNodes?: number;

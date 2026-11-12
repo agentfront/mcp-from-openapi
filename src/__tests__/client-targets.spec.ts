@@ -640,3 +640,68 @@ describe('nested compositions and strict-mode rewrites', () => {
     expect(input.properties.q.type).toEqual(['string', 'null']);
   });
 });
+
+describe('inlineLocalRefs stays bounded (issue #50)', () => {
+  const { SchemaError } = require('../errors');
+
+  /** `levels` definitions, each referencing the next twice: 2^levels copies once inlined */
+  const sharedDefs = (levels: number): any => {
+    const $defs: Record<string, unknown> = {};
+    for (let i = 0; i < levels; i++) {
+      const next = { $ref: `#/$defs/A${i + 1}` };
+      $defs[`A${i}`] = { type: 'object', properties: { x: next, y: next } };
+    }
+    $defs[`A${levels}`] = { type: 'string', enum: ['a', 'b'] };
+    return { $defs, type: 'object', properties: { root: { $ref: '#/$defs/A0' } } };
+  };
+
+  it('inlines a definition once per $ref, its values copied, so occurrences share nothing', () => {
+    const result: any = inlineLocalRefs(sharedDefs(1));
+
+    const { x, y } = result.properties.root.properties;
+    expect(x).toEqual({ type: 'string', enum: ['a', 'b'] });
+    expect(x).not.toBe(y);
+    expect(x.enum).not.toBe(y.enum);
+  });
+
+  it('counts every JSON value of the inlined schema against maxNodes', () => {
+    // root: object, `type`, `properties` (3); `root`: object, `type`, `properties` (3);
+    // `x` and `y`: object, `type`, `enum` array, two strings (5 each)
+    expect(inlineLocalRefs(sharedDefs(1), { maxNodes: 16 })).toBeDefined();
+    expect(() => inlineLocalRefs(sharedDefs(1), { maxNodes: 15 })).toThrow(
+      new SchemaError(
+        'Inlining the local $refs of a schema exceeds the node budget of 15 (maxSchemaNodes): a definition is ' +
+          'inlined once per $ref to it, so definitions that reference each other expand into more nodes than allowed.',
+      ),
+    );
+  });
+
+  it('stops definitions that reference each other twice at the budget instead of expanding them', () => {
+    // 2^40 copies unbounded; v2.9.2 took 2.6 s for 20 levels
+    expect(() => applyClientTarget(sharedDefs(40), 'claude', { maxNodes: 100000 })).toThrow(/node budget of 100000/);
+  });
+
+  it('rejects $refs nested more than 1000 levels deep — $ref hops included', () => {
+    /** Property `p` (one level down) followed by `hops` $refs in a row: the target nests `hops + 1` deep */
+    const refs = (hops: number): any => {
+      const $defs: Record<string, unknown> = {};
+      for (let i = 0; i < hops - 1; i++) $defs[`A${i}`] = { $ref: `#/$defs/A${i + 1}` };
+      $defs[`A${hops - 1}`] = { type: 'string' };
+      return { $defs, type: 'object', properties: { p: { $ref: '#/$defs/A0' } } };
+    };
+
+    expect((inlineLocalRefs(refs(999)) as any).properties.p).toEqual({ type: 'string' });
+    expect(() => inlineLocalRefs(refs(1000))).toThrow(
+      'Inlining the local $refs of a schema nests it more than 1000 levels deep.',
+    );
+  });
+
+  it('copies boolean schemas and tuple-of-tuples items as values', () => {
+    const tuple = [{ type: 'string' }];
+    const result: any = inlineLocalRefs({ type: 'object', properties: { a: true }, items: [tuple] } as any);
+
+    expect(result.properties.a).toBe(true);
+    expect(result.items[0]).toEqual(tuple);
+    expect(result.items[0]).not.toBe(tuple);
+  });
+});

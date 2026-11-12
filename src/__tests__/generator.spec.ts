@@ -4879,9 +4879,9 @@ describe('Shared $ref expansion stays bounded (issue #48)', () => {
   };
 
   it('generates the issue repro with bounded work, identical to a chain just past maxSchemaDepth', async () => {
-    // A 5000-node budget covers the ~2k-node output; converting each
-    // occurrence separately would need 2^40 conversions
-    const options = { includeAllResponses: true, maxSchemaNodes: 5000 };
+    // A 10,000-node budget covers the output's ~6,100 JSON values; converting
+    // each occurrence separately would need 2^40 conversions
+    const options = { includeAllResponses: true, maxSchemaNodes: 10000 };
     const long = await (await OpenAPIToolGenerator.fromJSON(specWithChain(40))).generateTools(options);
     const short = await (await OpenAPIToolGenerator.fromJSON(specWithChain(12))).generateTools(options);
 
@@ -4955,7 +4955,7 @@ describe('Shared $ref expansion stays bounded (issue #48)', () => {
   });
 
   it('generates a cycle that closes past maxSchemaDepth exactly like the open chain', async () => {
-    const options = { maxSchemaNodes: 5000 };
+    const options = { maxSchemaNodes: 10000 };
     const cyclic = await (await OpenAPIToolGenerator.fromJSON(specWithChain(40, { closeCycle: true }))).generateTools(options);
     const open = await (await OpenAPIToolGenerator.fromJSON(specWithChain(40))).generateTools(options);
 
@@ -5161,14 +5161,14 @@ describe('Deeply nested schemas (issue #50)', () => {
     expect(tool.inputSchema.required).toEqual(['id']);
   });
 
-  it('flattens a 20000-link allOf request body that adds a property per link, in linear time', async () => {
+  it('flattens an 8000-link allOf request body that adds a property per link, in linear time', async () => {
     // Merging a full property map per link took quadratic time and memory:
-    // 5000 links took 2.8 s; this would take minutes. The mapper's 20000
-    // entries must not exhaust the node budget either.
+    // 5000 links took 2.8 s, 8000 would take about 7 s. The mapper's 8000
+    // entries must not exhaust the default node budget either.
     const schemas: Record<string, unknown> = {};
-    for (let i = 0; i < 20000; i++) {
+    for (let i = 0; i < 8000; i++) {
       const own = { type: 'object', properties: { [`p${i}`]: { type: 'string' }, shared: { description: `link ${i}` } } };
-      schemas[`S${i}`] = i < 19999 ? { allOf: [{ $ref: `#/components/schemas/S${i + 1}` }, own] } : own;
+      schemas[`S${i}`] = i < 7999 ? { allOf: [{ $ref: `#/components/schemas/S${i + 1}` }, own] } : own;
     }
     const spec = specWithChain('allOf', 1);
     Object.assign(spec.components.schemas, schemas);
@@ -5179,11 +5179,11 @@ describe('Deeply nested schemas (issue #50)', () => {
     // Keys in the order they are first assigned — the deepest link first — and
     // each with the value assigned last, by the shallowest link
     const keys = Object.keys(tool.inputSchema.properties!);
-    expect(keys).toHaveLength(20001);
-    expect(keys.slice(0, 3)).toEqual(['p19999', 'shared', 'p19998']);
+    expect(keys).toHaveLength(8001);
+    expect(keys.slice(0, 3)).toEqual(['p7999', 'shared', 'p7998']);
     expect(keys[keys.length - 1]).toBe('p0');
     expect((tool.inputSchema.properties as any).shared).toMatchObject({ description: 'link 0' });
-    expect(tool.mapper).toHaveLength(20001);
+    expect(tool.mapper).toHaveLength(8001);
   });
 
   it('merges a member repeated in an allOf list as assigning its properties again would', async () => {
@@ -5427,5 +5427,86 @@ describe('Values copied from the spec into a tool (issue #50)', () => {
     expect(second.metadata.servers).toEqual([
       { url: 'https://api.example.com', variables: { v: { default: 'a' } } },
     ]);
+  });
+});
+
+describe('Wide schemas and inlined definitions stay bounded (issue #50)', () => {
+  /**
+   * GET /x returning L0: seven levels of four properties, then F — a schema
+   * with `keywords` keywords, which leads back to L0 when `cycle` is set
+   */
+  const specWithWideLeaf = (keywords: number, cycle: boolean): any => {
+    const wide: any = { type: 'object', properties: cycle ? { back: { $ref: '#/components/schemas/L0' } } : {} };
+    for (let k = 0; k < keywords; k++) wide[`x-k${k}`] = k;
+    const schemas: Record<string, unknown> = { F: wide };
+    for (let i = 0; i < 7; i++) {
+      const next = { $ref: i < 6 ? `#/components/schemas/L${i + 1}` : '#/components/schemas/F' };
+      schemas[`L${i}`] = { type: 'object', properties: { a: next, b: next, c: next, d: next } };
+    }
+    return {
+      openapi: '3.0.3',
+      info: { title: 'wide', version: '1.0.0' },
+      paths: {
+        '/x': {
+          get: {
+            operationId: 'getX',
+            responses: {
+              200: {
+                description: 'ok',
+                content: { 'application/json': { schema: { $ref: '#/components/schemas/L0' } } },
+              },
+            },
+          },
+        },
+      },
+      components: { schemas },
+    };
+  };
+
+  it('counts every keyword of a schema that the output copies once per occurrence', async () => {
+    // 4^7 copies of a schema with 2000 keywords: v2.9.2 produced 456 MB in 5 s
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithWideLeaf(2000, false));
+
+    await expect(generator.generateTool('/x', 'get')).rejects.toThrow(
+      'Schema exceeds the node budget of 100000 (maxSchemaNodes) after depth truncation',
+    );
+  });
+
+  it('charges every keyword of a schema that a cycle makes conversion rebuild once per path', async () => {
+    // v2.9.2 took 17.7 s and produced 456 MB
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithWideLeaf(2000, true));
+
+    await expect(generator.generateTool('/x', 'get')).rejects.toThrow(
+      'Schema conversion exceeded the node budget of 100000 (maxSchemaNodes)',
+    );
+  });
+
+  it('bounds a client target inlining definitions that reference each other twice', async () => {
+    // With dereferencing off, the target inlines a definition once per $ref to it: 2^40 copies
+    const $defs: Record<string, unknown> = { A40: { type: 'string' } };
+    for (let i = 0; i < 40; i++) {
+      const next = { $ref: `#/$defs/A${i + 1}` };
+      $defs[`A${i}`] = { type: 'object', properties: { x: next, y: next } };
+    }
+    const schema = { $defs, type: 'object', properties: { root: { $ref: '#/$defs/A0' } } };
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      {
+        openapi: '3.1.0',
+        info: { title: 'defs', version: '1.0.0' },
+        paths: {
+          '/x': {
+            get: {
+              operationId: 'getX',
+              responses: { 200: { description: 'ok', content: { 'application/json': { schema } } } },
+            },
+          },
+        },
+      },
+      { dereference: false },
+    );
+
+    await expect(generator.generateTool('/x', 'get', { target: 'claude' })).rejects.toThrow(
+      'Inlining the local $refs of a schema exceeds the node budget of 100000 (maxSchemaNodes)',
+    );
   });
 });
