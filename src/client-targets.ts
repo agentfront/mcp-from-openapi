@@ -1,4 +1,6 @@
 import type { JsonSchema } from './types';
+import { SchemaError } from './errors';
+import { chargeBudget, copyJsonValue, mapSlots, MAX_VALUE_DEPTH, type CopyBudget } from './json-copy';
 
 /**
  * Client dialect targets. Every MCP client accepts a different JSON Schema
@@ -16,6 +18,18 @@ import type { JsonSchema } from './types';
  *   union-heavy schemas, and most string formats)
  */
 export type ClientTarget = 'claude' | 'openai' | 'gemini' | 'strict';
+
+/** Options for {@link applyClientTarget} and {@link inlineLocalRefs} */
+export interface ClientTargetOptions {
+  /**
+   * Node budget for inlining local `$ref`s: every JSON value of the inlined
+   * schema counts. A definition is inlined once per `$ref` to it, so
+   * definitions that reference each other twice expand exponentially; past
+   * the budget a `SchemaError` is thrown. Unbounded when omitted —
+   * `OpenAPIToolGenerator` passes `maxSchemaNodes`.
+   */
+  maxNodes?: number;
+}
 
 type SchemaRecord = Record<string, unknown>;
 
@@ -37,6 +51,13 @@ const SCHEMA_KEYS = [
 ] as const;
 /** Keys whose value is an array of schemas */
 const LIST_KEYS = ['allOf', 'anyOf', 'oneOf', 'prefixItems'] as const;
+
+/** The keys that hold child schemas, by the shape of their value */
+const KEY_KINDS = new Map<string, 'map' | 'schema' | 'list'>([
+  ...MAP_KEYS.map((key) => [key, 'map'] as const),
+  ...SCHEMA_KEYS.map((key) => [key, 'schema'] as const),
+  ...LIST_KEYS.map((key) => [key, 'list'] as const),
+]);
 
 function isSchemaObject(value: unknown): value is SchemaRecord {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -89,10 +110,48 @@ function walkSchema(node: JsonSchema, visit: (node: SchemaRecord) => SchemaRecor
  * permissive `{}` nodes with an explanatory description. (Generated schemas
  * are usually fully dereferenced already — this covers `dereference: false`
  * flows and hand-fed schemas.)
+ *
+ * A definition is inlined once per `$ref` to it, values included, so the
+ * result shares no object — and `options.maxNodes` caps it. Inlining nests
+ * at most 1000 levels (`$ref` hops included); past that a `SchemaError` is
+ * thrown, as the result could not be walked safely.
  */
-export function inlineLocalRefs(schema: JsonSchema): JsonSchema {
+export function inlineLocalRefs(schema: JsonSchema, options: ClientTargetOptions = {}): JsonSchema {
   /* c8 ignore next -- guard for degenerate root schemas */
   if (!isSchemaObject(schema)) return schema;
+
+  const limit = options.maxNodes;
+  const maxNodes = limit !== undefined && Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : Infinity;
+  const budget: CopyBudget = {
+    maxNodes,
+    nodes: 0,
+    exceeded: () => {
+      throw new SchemaError(
+        `Inlining the local $refs of a schema exceeds the node budget of ${maxNodes} (maxSchemaNodes): a ` +
+          `definition is inlined once per $ref to it, so definitions that reference each other expand into more ` +
+          `nodes than allowed.`,
+        { maxNodes },
+      );
+    },
+  };
+  // A value not walked as a schema: copied, so occurrences share nothing, and counted
+  const copyValue = (value: unknown, key: string): unknown => {
+    if (value === null || typeof value !== 'object') {
+      chargeBudget(budget);
+      return value;
+    }
+    return copyJsonValue(value, budget, { label: `The \`${key}\` value of a schema` });
+  };
+  // `replaced`: keys an enclosing `$ref`'s siblings overwrite — left as
+  // `undefined` placeholders (which keep their position), neither copied nor
+  // charged, so the budget measures only what the result keeps
+  const copyValues = (record: SchemaRecord, replaced?: ReadonlySet<string>): SchemaRecord => {
+    const copy: SchemaRecord = { ...record };
+    for (const key of Object.keys(copy)) {
+      copy[key] = replaced?.has(key) ? undefined : copyValue(copy[key], key);
+    }
+    return copy;
+  };
 
   const root = schema as SchemaRecord;
   const resolvePointer = (pointer: string): unknown => {
@@ -109,9 +168,19 @@ export function inlineLocalRefs(schema: JsonSchema): JsonSchema {
     return current;
   };
 
-  const inline = (node: JsonSchema, seenPointers: Set<string>): JsonSchema => {
-    /* c8 ignore next -- guard for boolean/degenerate schemas in recursive traversal */
-    if (!isSchemaObject(node)) return node;
+  const inline = (
+    node: JsonSchema,
+    seenPointers: Set<string>,
+    depth: number,
+    replaced?: ReadonlySet<string>,
+  ): JsonSchema => {
+    // A boolean schema, or a tuple-of-tuples `items` element (an array): a value
+    if (!isSchemaObject(node)) return copyValue(node, 'items') as JsonSchema;
+    if (depth > MAX_VALUE_DEPTH) {
+      throw new SchemaError(`Inlining the local $refs of a schema nests it more than ${MAX_VALUE_DEPTH} levels deep.`, {
+        maxDepth: MAX_VALUE_DEPTH,
+      });
+    }
     const record = node as SchemaRecord;
 
     const ref = record['$ref'];
@@ -124,57 +193,66 @@ export function inlineLocalRefs(schema: JsonSchema): JsonSchema {
       return inline(
         { description: `[External $ref ${ref} removed for client compatibility]`, ...siblings } as JsonSchema,
         seenPointers,
+        depth,
+        replaced,
       );
     }
     if (typeof ref === 'string') {
       // 2020-12 allows keywords alongside $ref; siblings win over the target
       const { $ref: _ref, ...siblings } = record;
       if (seenPointers.has(ref)) {
-        return { description: '[Circular $ref removed for client compatibility]', ...siblings } as JsonSchema;
+        chargeBudget(budget);
+        const circular = { description: '[Circular $ref removed for client compatibility]', ...siblings };
+        return copyValues(circular, replaced) as JsonSchema;
       }
       const resolved = resolvePointer(ref);
       if (!isSchemaObject(resolved)) {
-        return { description: `[Unresolvable $ref ${ref} removed for client compatibility]`, ...siblings } as JsonSchema;
+        chargeBudget(budget);
+        return copyValues(
+          { description: `[Unresolvable $ref ${ref} removed for client compatibility]`, ...siblings },
+          replaced,
+        ) as JsonSchema;
       }
-      const inlined = inline(resolved as JsonSchema, new Set([...seenPointers, ref]));
+      // The siblings overwrite these keys of the target (as do the enclosing
+      // `$ref`'s): the target leaves them as placeholders. A `$ref` hop nests
+      // the walk one level deeper.
+      const overwritten = new Set([...(replaced ?? []), ...Object.keys(siblings)]);
+      const inlined = inline(resolved as JsonSchema, new Set([...seenPointers, ref]), depth + 1, overwritten);
       /* c8 ignore next -- inline() only returns non-objects for degenerate boolean schemas */
       if (!isSchemaObject(inlined)) return inlined;
-      return { ...(inlined as SchemaRecord), ...siblings } as JsonSchema;
+      return { ...(inlined as SchemaRecord), ...copyValues(siblings, replaced) } as JsonSchema;
     }
 
+    chargeBudget(budget);
     const copy: SchemaRecord = { ...record };
     delete copy['$defs'];
     delete copy['definitions'];
 
-    for (const key of MAP_KEYS) {
+    for (const key of Object.keys(copy)) {
       const value = copy[key];
-      if (isSchemaObject(value)) {
+      const kind = KEY_KINDS.get(key);
+      if (replaced?.has(key)) {
+        copy[key] = undefined;
+      } else if (kind === 'map' && isSchemaObject(value)) {
+        chargeBudget(budget);
         const mapped: SchemaRecord = {};
         for (const [name, sub] of Object.entries(value)) {
-          mapped[name] = inline(sub as JsonSchema, seenPointers);
+          mapped[name] = inline(sub as JsonSchema, seenPointers, depth + 1);
         }
         copy[key] = mapped;
-      }
-    }
-    for (const key of SCHEMA_KEYS) {
-      const value = copy[key];
-      if (Array.isArray(value)) {
-        copy[key] = value.map((item) => inline(item as JsonSchema, seenPointers));
-      } else if (isSchemaObject(value)) {
-        copy[key] = inline(value as JsonSchema, seenPointers);
-      }
-    }
-    for (const key of LIST_KEYS) {
-      const value = copy[key];
-      if (Array.isArray(value)) {
-        copy[key] = value.map((member) => inline(member as JsonSchema, seenPointers));
+      } else if (kind === 'schema' && isSchemaObject(value)) {
+        copy[key] = inline(value as JsonSchema, seenPointers, depth + 1);
+      } else if ((kind === 'schema' || kind === 'list') && Array.isArray(value)) {
+        copy[key] = mapSlots(value as JsonSchema[], budget, (member) => inline(member, seenPointers, depth + 1));
+      } else {
+        copy[key] = copyValue(value, key);
       }
     }
 
     return copy as JsonSchema;
   };
 
-  return inline(schema, new Set());
+  return inline(schema, new Set(), 0);
 }
 
 /** Ensure every array schema carries an `items` schema (permissive when absent). */
@@ -460,8 +538,12 @@ export function requireAllProperties(schema: JsonSchema): JsonSchema {
  * Apply a client target's transform pipeline to a schema. Also exported for
  * standalone use on schemas that did not come from the generator.
  */
-export function applyClientTarget(schema: JsonSchema, target: ClientTarget): JsonSchema {
-  let result = inlineLocalRefs(schema);
+export function applyClientTarget(
+  schema: JsonSchema,
+  target: ClientTarget,
+  options: ClientTargetOptions = {},
+): JsonSchema {
+  let result = inlineLocalRefs(schema, options);
   result = ensureArrayItems(result);
 
   if (target === 'gemini') {

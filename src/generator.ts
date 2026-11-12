@@ -17,6 +17,7 @@ import type {
   AuthType,
   OperationObject,
   OperationWithContext,
+  ParameterMapper,
   ToolMetadata,
   ServerObject,
   PathItemObject,
@@ -28,15 +29,22 @@ import { isReferenceObject } from './types';
 import { ParameterResolver } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
 import { SchemaBuilder, resolveSchemaLimits } from './schema-builder';
-import { extractExtensionOverrides, inferAnnotationsFromMethod, isAllowedIconSrc, resolveExtensionEnabled } from './annotations';
+import {
+  extractExtensionOverrides,
+  extractExtensionSettings,
+  inferAnnotationsFromMethod,
+  isAllowedIconSrc,
+  resolveExtensionEnabled,
+} from './annotations';
 import { applyClientTarget } from './client-targets';
 import { applyOverlay } from './overlay';
 import { lintDocument, PAGINATION_PARAM, type LintResult } from './lint';
 import { Validator } from './validator';
-import { GenerationError, LoadError, OverlayError, ParseError } from './errors';
+import { GenerationError, LoadError, OverlayError, ParseError, SchemaError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { emitToolTypeScript } from './type-signature';
 import { hostListIncludes, isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
+import { copyJsonValue, type CopyBudget } from './json-copy';
 
 /** MCP hard limit for tool name length (spec revision 2025-11-25, SEP-986) */
 const MCP_MAX_TOOL_NAME_LENGTH = 128;
@@ -615,6 +623,10 @@ export class OpenAPIToolGenerator {
    * Dereference local (`#/...`) `$ref`s without `$RefParser` — pure, dependency-
    * free, runtime-agnostic. A pointer cache makes circular schemas resolve to a
    * shared reference instead of recursing forever (same contract as `$RefParser`).
+   *
+   * The walk keeps its own stack instead of recursing: a chain of N `$ref`s
+   * nests N levels deep, and a call per level would overflow the call stack
+   * after a few hundred levels (issue #50).
    */
   private static dereferenceInternal(root: OpenAPIDocument): OpenAPIDocument {
     const cache = new Map<string, unknown>();
@@ -628,24 +640,70 @@ export class OpenAPIToolGenerator {
       for (const p of parts) cur = (cur as Record<string, unknown> | undefined)?.[p];
       return cur;
     };
-    const walk = (node: unknown): unknown => {
+
+    // A node whose children are being walked, depth-first and in order. A
+    // `$ref` is a frame with one child, its target: the walked target is
+    // copied into the placeholder that other references to it already hold.
+    interface WalkFrame {
+      children: unknown[];
+      /** The children's property names for an object; `null` for an array or a `$ref` */
+      keys: string[] | null;
+      /** Index of the next child to walk; the one before it is being walked */
+      next: number;
+      out: Record<string, unknown> | unknown[];
+      placeholder: Record<string, unknown> | null;
+    }
+    const frames: WalkFrame[] = [];
+    const pending = {};
+    // A node's walked value — or `pending`, with a frame pushed to walk it
+    const enter = (node: unknown): unknown => {
       if (node === null || typeof node !== 'object') return node;
-      if (Array.isArray(node)) return node.map(walk);
+      if (Array.isArray(node)) {
+        // The document is JSON-cloned, so arrays are never sparse
+        frames.push({ children: node, keys: null, next: 0, out: new Array(node.length), placeholder: null });
+        return pending;
+      }
       const ref = (node as { $ref?: unknown }).$ref;
       if (typeof ref === 'string' && ref.startsWith('#')) {
         const cached = cache.get(ref);
         if (cached !== undefined) return cached;
         const placeholder: Record<string, unknown> = {};
         cache.set(ref, placeholder); // break cycles: self-refs see the placeholder
-        const resolved = walk(resolvePointer(ref));
-        if (resolved && typeof resolved === 'object') Object.assign(placeholder, resolved);
-        return placeholder;
+        frames.push({ children: [resolvePointer(ref)], keys: null, next: 0, out: [], placeholder });
+        return pending;
       }
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(node as Record<string, unknown>)) out[k] = walk(v);
-      return out;
+      const record = node as Record<string, unknown>;
+      const keys = Object.keys(record);
+      frames.push({ children: keys.map((key) => record[key]), keys, next: 0, out: {}, placeholder: null });
+      return pending;
     };
-    return walk(root) as OpenAPIDocument;
+    const store = (frame: WalkFrame, index: number, value: unknown): void => {
+      if (frame.keys) (frame.out as Record<string, unknown>)[frame.keys[index]] = value;
+      else (frame.out as unknown[])[index] = value;
+    };
+
+    // The document is the single child of a top frame
+    const top: WalkFrame = { children: [root], keys: null, next: 0, out: [], placeholder: null };
+    frames.push(top);
+    for (;;) {
+      const frame = frames[frames.length - 1];
+      if (frame.next < frame.children.length) {
+        const index = frame.next++;
+        const value = enter(frame.children[index]);
+        if (value !== pending) store(frame, index, value);
+        continue;
+      }
+      frames.pop();
+      if (frame === top) return (top.out as unknown[])[0] as OpenAPIDocument;
+      let value: unknown = frame.out;
+      if (frame.placeholder) {
+        const resolved = (frame.out as unknown[])[0];
+        if (resolved && typeof resolved === 'object') Object.assign(frame.placeholder, resolved);
+        value = frame.placeholder;
+      }
+      const parent = frames[frames.length - 1];
+      store(parent, parent.next - 1, value);
+    }
   }
 
   /**
@@ -777,7 +835,29 @@ export class OpenAPIToolGenerator {
    */
   async generateTool(pathStr: string, method: string, options: GenerateOptions = {}): Promise<McpOpenAPITool> {
     await this.initialize();
+    try {
+      return this.buildTool(pathStr, method, options);
+    } catch (error: unknown) {
+      // Every walk before depth truncation keeps its own stack, so schemas of
+      // any nesting convert. Truncation and the steps after it (trims, client
+      // targets, type signatures) recurse once per level they keep, so only a
+      // maxSchemaDepth in the hundreds or more can overflow the call stack.
+      if (error instanceof RangeError && /call stack/i.test(error.message)) {
+        const { maxDepth } = resolveSchemaLimits(options);
+        throw new SchemaError(
+          `Schemas of ${method.toUpperCase()} ${pathStr} are nested too deeply to process at maxSchemaDepth ` +
+            `${maxDepth} (maximum call stack size exceeded); lower maxSchemaDepth.`,
+          { path: pathStr, method, maxSchemaDepth: maxDepth },
+        );
+      }
+      throw error;
+    }
+  }
 
+  /**
+   * Build the tool for one operation of the initialized document
+   */
+  private buildTool(pathStr: string, method: string, options: GenerateOptions): McpOpenAPITool {
     const document = this.getDocument();
 
     if (!document.paths) {
@@ -829,8 +909,9 @@ export class OpenAPIToolGenerator {
     const responseBuilder = new ResponseBuilder(options, schemaConversion);
     const outputSchema = responseBuilder.build(operation.responses);
 
-    // Extension overrides (x-speakeasy-mcp < x-mcp < x-frontmcp)
-    const overrides = extractExtensionOverrides(operation);
+    // Extension overrides (x-speakeasy-mcp < x-mcp < x-frontmcp); their meta
+    // shares the node budget, as $refs in it are dereferenced too
+    const overrides = extractExtensionOverrides(operation, { maxMetaNodes: maxSchemaNodes });
 
     // Generate tool name (an extension name override takes the operationId's
     // place, including as the value passed to a custom toolNameGenerator)
@@ -919,9 +1000,11 @@ export class OpenAPIToolGenerator {
     // Client dialect transforms (final step — the emitted schemas must be
     // exactly what the targeted client accepts)
     if (options.target) {
-      resolvedInputSchema = applyClientTarget(resolvedInputSchema, options.target);
+      // Inlining local $refs expands each definition once per reference: bounded like the schemas
+      const targetOptions = { maxNodes: maxSchemaNodes };
+      resolvedInputSchema = applyClientTarget(resolvedInputSchema, options.target, targetOptions);
       if (resolvedOutputSchema) {
-        resolvedOutputSchema = applyClientTarget(resolvedOutputSchema, options.target);
+        resolvedOutputSchema = applyClientTarget(resolvedOutputSchema, options.target, targetOptions);
       }
     }
 
@@ -949,6 +1032,37 @@ export class OpenAPIToolGenerator {
       });
     }
 
+    // Values from the spec outside the schemas — the title, the mapper's
+    // encodings, the metadata (tags, servers, externalDocs, x-frontmcp, ...),
+    // and _meta's operation entry — are copied like schema values: into fresh
+    // trees that share nothing with the document, bounded by the node budget
+    // because a `$ref` resolved inside one can expand exponentially
+    const valueBudget: CopyBudget = {
+      maxNodes: maxSchemaNodes,
+      nodes: 0,
+      exceeded: () => {
+        throw new SchemaError(
+          `The metadata of ${method.toUpperCase()} ${pathStr} exceeds the node budget of ${maxSchemaNodes} ` +
+            `(maxSchemaNodes): with its $refs resolved, a value copied from the spec (tags, servers, externalDocs, ` +
+            `x-frontmcp, request encodings, ...) expands into more nodes than allowed.`,
+          { maxNodes: maxSchemaNodes },
+        );
+      },
+    };
+    const copyValue = <T>(value: T, label: string, omitPrototypeKeys = false): T =>
+      copyJsonValue(value, valueBudget, { label, omitPrototypeKeys }) as T;
+    // The mapper has an entry per parameter, built here: only the objects in
+    // it (serialization, encodings, security) can hold values from the spec,
+    // so only they count — a wide body must not exhaust the budget
+    const copyEntry = (entry: ParameterMapper): ParameterMapper => {
+      const copy = { ...entry } as Record<string, unknown>;
+      for (const key of Object.keys(copy)) {
+        const value = copy[key];
+        if (value !== null && typeof value === 'object') copy[key] = copyValue(value, 'A parameter mapper entry');
+      }
+      return copy as unknown as ParameterMapper;
+    };
+
     // MCP `_meta`: generated operation entry (opt-in) + extension pass-through (always)
     let toolMeta: Record<string, unknown> | undefined;
     if (overrides.meta) {
@@ -965,15 +1079,19 @@ export class OpenAPIToolGenerator {
       const info = document.info as Record<string, unknown> | undefined;
       toolMeta = {
         ...toolMeta,
-        'dev.agentfront.openapi/operation': {
-          path: pathStr,
-          method,
-          ...(operation.operationId !== undefined && { operationId: operation.operationId }),
-          ...(operation.tags && { tags: [...operation.tags] }),
-          ...(operation.deprecated !== undefined && { deprecated: operation.deprecated }),
-          ...(typeof info?.['title'] === 'string' && { specTitle: info['title'] }),
-          ...(typeof info?.['version'] === 'string' && { specVersion: info['version'] }),
-        },
+        'dev.agentfront.openapi/operation': copyValue(
+          {
+            path: pathStr,
+            method,
+            ...(operation.operationId !== undefined && { operationId: operation.operationId }),
+            ...(operation.tags && { tags: operation.tags }),
+            ...(operation.deprecated !== undefined && { deprecated: operation.deprecated }),
+            ...(typeof info?.['title'] === 'string' && { specTitle: info['title'] }),
+            ...(typeof info?.['version'] === 'string' && { specVersion: info['version'] }),
+          },
+          'The _meta operation entry',
+          true,
+        ),
       };
     }
     if (toolMeta && Object.keys(toolMeta).length === 0) {
@@ -986,15 +1104,15 @@ export class OpenAPIToolGenerator {
 
     return {
       name,
-      ...(title !== undefined && { title }),
+      ...(title !== undefined && { title: copyValue(title, 'The tool title') }),
       description: finalDescription,
       ...(annotations && { annotations }),
       ...(toolMeta && { _meta: toolMeta }),
       ...(icons && { icons }),
       inputSchema: resolvedInputSchema,
       outputSchema: resolvedOutputSchema,
-      mapper,
-      metadata,
+      mapper: mapper.map(copyEntry),
+      metadata: copyValue(metadata, 'The tool metadata'),
     };
   }
 
@@ -1065,7 +1183,7 @@ export class OpenAPIToolGenerator {
     if (options.readOnlyOnly) {
       const effective = {
         ...inferAnnotationsFromMethod(lowerMethod),
-        ...extractExtensionOverrides(operation).annotations,
+        ...extractExtensionSettings(operation).annotations,
       };
       if (effective.readOnlyHint !== true) {
         return false;

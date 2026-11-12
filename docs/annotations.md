@@ -118,6 +118,9 @@ inferAnnotationsFromMethod('delete');
 
 extractExtensionOverrides(operation);
 // { disabled?, name?, title?, description?, annotations?, meta?, icons? }
+
+// `meta` is copied with a node budget (default 100000; the generator passes maxSchemaNodes)
+extractExtensionOverrides(operation, { maxMetaNodes: 10_000 });
 ```
 
 ---

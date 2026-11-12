@@ -911,14 +911,18 @@ describe('SchemaBuilder.truncateDepth materialization and node budget (issue #48
     expect(shared).toEqual({ type: 'string', format: 'uuid' });
   });
 
-  it('counts every node it keeps against maxNodes and throws a SchemaError past it', () => {
+  it('counts every JSON value it keeps against maxNodes and throws a SchemaError past it', () => {
+    // The root, its `type`, the `properties` map, and each property with its `type`
     const schema = { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } } } as any;
 
-    expect(SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 3 })).toEqual(schema);
-    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 2 })).toThrow(SchemaError);
-    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 2 })).toThrow(/node budget of 2 \(maxSchemaNodes\)/);
-    // Nodes dropped by the depth cut are not counted
-    expect(() => SchemaBuilder.truncateDepth(schema, 0, { maxNodes: 1 })).not.toThrow();
+    expect(SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 7 })).toEqual(schema);
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 6 })).toThrow(SchemaError);
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 6 })).toThrow(
+      /node budget of 6 \(maxSchemaNodes\)/,
+    );
+    // Values dropped by the depth cut are not counted: the root keeps `type` and gains the note
+    expect(() => SchemaBuilder.truncateDepth(schema, 0, { maxNodes: 3 })).not.toThrow();
+    expect(() => SchemaBuilder.truncateDepth(schema, 0, { maxNodes: 2 })).toThrow(/node budget of 2 /);
   });
 
   it('stops early on a reused subschema that would expand past the budget', () => {
@@ -930,20 +934,107 @@ describe('SchemaBuilder.truncateDepth materialization and node budget (issue #48
   });
 
   it('floors fractional budgets and treats absent or non-finite ones as unbounded', () => {
+    // 5 values: the root, its `type`, `properties`, `a`, and `a.type`
     const schema = { type: 'object', properties: { a: { type: 'string' } } } as any;
 
-    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 2.9 })).not.toThrow();
-    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 1.9 })).toThrow(/node budget of 1 /);
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 5.9 })).not.toThrow();
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 4.9 })).toThrow(/node budget of 4 /);
     expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 0 })).toThrow(/node budget of 1 /);
     expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: Infinity })).not.toThrow();
     expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: NaN })).not.toThrow();
   });
 
-  it('keeps a nested tuple array (not a schema) as is', () => {
+  it('copies keyword values too, so no object is shared — not even a value a $ref resolved', () => {
+    const shared = { nested: { list: [1, 2] } };
+    const schema = {
+      type: 'object',
+      required: ['a'],
+      properties: { a: { type: 'object', default: shared, examples: [shared], 'x-extra': shared } },
+    } as any;
+
+    const result = SchemaBuilder.truncateDepth(schema, 10) as any;
+
+    expect(result).toEqual(schema);
+    const a = result.properties.a;
+    expect(a.default).not.toBe(shared);
+    expect(a.examples[0]).not.toBe(a.default);
+    expect(a['x-extra'].nested.list).not.toBe(shared.nested.list);
+    expect(result.required).not.toBe(schema.required);
+  });
+
+  it('counts the values inside keywords against maxNodes, so a value with shared children stays bounded', () => {
+    // The schema object, its `type`, then `enum`'s array and its two strings
+    const schema = { type: 'string', enum: ['a', 'b'] } as any;
+    expect(SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 5 })).toEqual(schema);
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 4 })).toThrow(
+      /node budget of 4 \(maxSchemaNodes\)/,
+    );
+
+    // A `default` whose 40 levels each reference the next twice: 2^41 values
+    let value: any = { leaf: true };
+    for (let i = 0; i < 40; i++) value = { left: value, right: value };
+    const schemaWithValue = { type: 'object', default: value } as any;
+    expect(() => SchemaBuilder.truncateDepth(schemaWithValue, 10, { maxNodes: 100000 })).toThrow(SchemaError);
+  });
+
+  it('drops a reference back to an enclosing value, and rejects values nested past 1000 levels', () => {
+    const tree: any = { name: 'root' };
+    tree.self = tree;
+    const result = SchemaBuilder.truncateDepth({ type: 'object', default: tree } as any, 10) as any;
+    expect(JSON.stringify(result)).toBe('{"type":"object","default":{"name":"root"}}');
+
+    let deep: any = 'bottom';
+    for (let i = 0; i < 1001; i++) deep = [deep];
+    expect(() => SchemaBuilder.truncateDepth({ type: 'array', default: deep } as any, 10)).toThrow(
+      'The `default` value of a schema is nested more than 1000 levels deep.',
+    );
+  });
+
+  it('copies the values of a node at the depth limit, dropping only its child schemas', () => {
+    const shared = ['x'];
+    const schema = {
+      type: 'object',
+      properties: { a: { type: 'object', enum: shared, required: ['b'], properties: { b: { type: 'string' } } } },
+    } as any;
+
+    const result = SchemaBuilder.truncateDepth(schema, 1) as any;
+
+    expect(result.properties.a.enum).toEqual(['x']);
+    expect(result.properties.a.enum).not.toBe(shared);
+    expect(result.properties.a.required).toBeUndefined();
+    expect(result.properties.a.properties).toBeUndefined();
+  });
+
+  it('counts each hole of an array as the null it serializes as', () => {
+    // Without that, a million holes passed a budget of 2 — and serialized a million nulls
+    expect(() => SchemaBuilder.truncateDepth({ default: new Array(1_000_000) } as any, 10, { maxNodes: 2 })).toThrow(
+      /node budget of 2 /,
+    );
+    // The root, `allOf`, its hole, and its member with `type`
+    // eslint-disable-next-line no-sparse-arrays
+    const schema = { allOf: [, { type: 'string' }] } as any;
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 5 })).not.toThrow();
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 4 })).toThrow(/node budget of 4 /);
+    expect(() => SchemaBuilder.truncateDepth({ anyOf: new Array(1e9) } as any, 10, { maxNodes: 1000 })).toThrow(
+      /node budget of 1000 /,
+    );
+  });
+
+  it('counts a boolean schema as one value', () => {
+    // The root, the `properties` map, and `true`
+    const schema = { properties: { a: true } } as any;
+
+    expect(SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 3 })).toEqual(schema);
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 2 })).toThrow(/node budget of 2 /);
+  });
+
+  it('copies a nested tuple array (not a schema) as a value', () => {
     const inner = [{ type: 'string' }];
     const result = SchemaBuilder.truncateDepth({ type: 'array', items: [inner] } as any, 10) as any;
 
-    expect(result.items[0]).toBe(inner);
+    expect(result.items[0]).toEqual(inner);
+    expect(result.items[0]).not.toBe(inner);
+    expect(result.items[0][0]).not.toBe(inner[0]);
   });
 });
 
