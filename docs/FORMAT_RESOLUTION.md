@@ -207,6 +207,8 @@ const enrichedSchema = resolveSchemaFormats(mySchema, {
 
 Format resolution is applied to both `inputSchema` (request parameters and body) and `outputSchema` (response body) of every generated tool. Resolution is recursive --- formats are resolved in nested `properties`, `items`, `additionalProperties`, and composition keywords (`allOf`, `anyOf`, `oneOf`, `not`).
 
+A subschema object used in several places is resolved once and the result is shared the same way, so a reused `$ref` target costs one resolver call, not one per occurrence. Circular schemas terminate and produce an equally circular result.
+
 ### What It Does Not Do
 
 - **Does not remove the `format` field** --- the original format annotation is always preserved alongside the added constraints.

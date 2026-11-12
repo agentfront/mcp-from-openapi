@@ -3,6 +3,7 @@ import type { JSONSchema } from 'zod/v4/core';
 /** JSON Schema type from Zod v4 */
 export type JsonSchema = JSONSchema.JSONSchema;
 import type { OpenAPIV3, OpenAPIV3_1 } from 'openapi-types';
+import { SchemaError } from './errors';
 
 /**
  * OpenAPI specification version 3.0.x or 3.1.x
@@ -60,6 +61,44 @@ export function isReferenceObject(obj: any): obj is ReferenceObject {
 }
 
 /**
+ * Limits for {@link toJsonSchema} (and the `ParameterResolver` /
+ * `ResponseBuilder` conversions built on it). `OpenAPIToolGenerator` derives
+ * them from `GenerateOptions.maxSchemaDepth` / `maxSchemaNodes`.
+ */
+export interface SchemaConversionOptions {
+  /**
+   * Stop descending below this nesting depth: deeper subschemas become `{}`
+   * placeholders. `allOf` members do not consume depth, because request-body
+   * flattening hoists their properties to the top of the input schema — so
+   * the bound never cuts anything `SchemaBuilder.truncateDepth(schema,
+   * maxDepth)` keeps, and that call removes every placeholder.
+   * Unbounded when omitted.
+   */
+  maxDepth?: number;
+
+  /**
+   * Throw a `SchemaError` once a single conversion has converted more than
+   * this many schema nodes. Unbounded when omitted.
+   */
+  maxNodes?: number;
+}
+
+/** Structural keywords whose value is a map of subschemas (besides `properties`). */
+const SCHEMA_MAP_KEYWORDS = ['patternProperties', '$defs', 'definitions', 'dependentSchemas'] as const;
+
+/** Single-subschema keywords (besides `items`/`additionalProperties`/`not`); `unevaluated*` may be boolean. */
+const SCHEMA_SINGLE_KEYWORDS = [
+  'contains',
+  'propertyNames',
+  'if',
+  'then',
+  'else',
+  'contentSchema',
+  'unevaluatedItems',
+  'unevaluatedProperties',
+] as const;
+
+/**
  * Convert OpenAPI schema to JsonSchema
  * Note: OpenAPI 3.0 uses a subset of JSON Schema Draft 4
  * OpenAPI 3.1 uses JSON Schema Draft 2020-12
@@ -70,36 +109,206 @@ export function isReferenceObject(obj: any): obj is ReferenceObject {
  * - OpenAPI 3.0 boolean `exclusiveMinimum`/`exclusiveMaximum` -> numeric form
  * - OpenAPI `example` (singular) -> `examples` array (2020-12 keyword)
  * - OpenAPI-only `xml` metadata is dropped
+ *
+ * A subschema shared by several parents (a `$ref` target, after
+ * dereferencing) is converted once and the result is reused, so the output
+ * may share nested objects — treat it as immutable below the root, or
+ * materialize a fresh tree with `SchemaBuilder.truncateDepth`. The root is
+ * always a fresh object.
  */
-export function toJsonSchema(schema: SchemaObject | ReferenceObject): JsonSchema {
-  return convertSchema(schema, new Set());
+export function toJsonSchema(
+  schema: SchemaObject | ReferenceObject,
+  options: SchemaConversionOptions = {},
+): JsonSchema {
+  const state: ConversionState = {
+    maxDepth: normalizeConversionLimit(options.maxDepth, 0),
+    maxNodes: normalizeConversionLimit(options.maxNodes, 1),
+    converted: 0,
+    stack: new Set(),
+    cache: new Map(),
+    cyclic: findCyclicNodes(schema),
+    cut: false,
+  };
+  return convertSchema(schema, 0, state);
+}
+
+/** Absent or non-finite limits mean "unbounded"; finite ones floor, with a minimum. */
+function normalizeConversionLimit(value: number | undefined, min: number): number {
+  return value !== undefined && Number.isFinite(value) ? Math.max(min, Math.floor(value)) : Infinity;
+}
+
+interface ConversionState {
+  readonly maxDepth: number;
+  readonly maxNodes: number;
+  /** Nodes converted so far (cache hits and placeholders are free). */
+  converted: number;
+  /** Ancestors on the current path: a revisit is a cycle, cut with `{}`. */
+  readonly stack: Set<object>;
+  /** Results for acyclic nodes, keyed by source node. */
+  readonly cache: Map<object, CachedConversion>;
+  /** Nodes on a reference cycle — their result depends on the path, so they are never cached. */
+  readonly cyclic: Set<object>;
+  /** Whether the subtree being converted was cut at `maxDepth`. */
+  cut: boolean;
+}
+
+interface CachedConversion {
+  result: JsonSchema;
+  /** Depth the result was converted at; -1 when nothing below it was cut (valid at any depth). */
+  depth: number;
+  cut: boolean;
 }
 
 /**
- * Recursive core of `toJsonSchema`. `stack` holds the ancestors on the
- * current path: dereferenced real-world specs can be cyclic (self-referential
- * schemas), and a revisit within the same path breaks the cycle with an
- * unconstrained schema instead of recursing forever. Diamond-shared nodes are
- * NOT cached — every occurrence still converts to a fresh copy, because
- * downstream steps annotate parameter schemas in place.
+ * Recursive core of `toJsonSchema`.
+ *
+ * - Cycles: dereferenced real-world specs can be cyclic (self-referential
+ *   schemas); a revisit within the same path breaks the cycle with an
+ *   unconstrained schema instead of recursing forever.
+ * - Sharing: an acyclic node converts to the same result wherever it appears
+ *   (it cannot reach any of its ancestors), so the first result is reused.
+ *   Without this, a schema whose properties reference the same child twice,
+ *   chained N levels deep, costs 2^N conversions.
+ * - Depth: below `maxDepth` the conversion stops with `{}` placeholders. A
+ *   cut result depends on the depth it started at, so it is reused only at
+ *   that depth or deeper (where it is at least as deep as needed).
+ * - Cyclic nodes are converted afresh on every visit; `maxDepth` bounds that
+ *   walk and `maxNodes` stops pathological ones with a clear error.
  */
-function convertSchema(schema: SchemaObject | ReferenceObject, stack: Set<object>): JsonSchema {
+function convertSchema(schema: SchemaObject | ReferenceObject, depth: number, state: ConversionState): JsonSchema {
   if (isReferenceObject(schema)) {
     return { $ref: schema.$ref } as JsonSchema;
   }
-  if (stack.has(schema as object)) {
+  if (depth > state.maxDepth) {
+    state.cut = true;
     return {} as JsonSchema;
   }
-  stack.add(schema as object);
+  const node: unknown = schema;
+  const isNode = node !== null && typeof node === 'object';
+  if (isNode) {
+    const cached = state.cache.get(node);
+    if (cached && cached.depth <= depth) {
+      state.cut ||= cached.cut;
+      return cached.result;
+    }
+    if (state.stack.has(node)) {
+      return {} as JsonSchema;
+    }
+  }
+  if (++state.converted > state.maxNodes) {
+    throw new SchemaError(
+      `Schema conversion exceeded the node budget of ${state.maxNodes} (maxSchemaNodes): shared or recursive ` +
+        `$refs expand into more schema nodes than allowed. Lower maxSchemaDepth or raise maxSchemaNodes.`,
+      { maxNodes: state.maxNodes },
+    );
+  }
+  if (!isNode) {
+    // Boolean/degenerate schemas have no children to share or cycle through
+    return convertSchemaInner(schema, depth, state);
+  }
+
+  const outerCut = state.cut;
+  state.cut = false;
+  state.stack.add(node);
   try {
-    return convertSchemaInner(schema, stack);
+    const result = convertSchemaInner(schema, depth, state);
+    if (!state.cyclic.has(node)) {
+      state.cache.set(node, { result, depth: state.cut ? depth : -1, cut: state.cut });
+    }
+    return result;
   } finally {
-    stack.delete(schema as object);
+    state.stack.delete(node);
+    state.cut ||= outerCut;
   }
 }
 
-function convertSchemaInner(schema: SchemaObject, stack: Set<object>): JsonSchema {
-  const recurse = (value: SchemaObject | ReferenceObject): JsonSchema => convertSchema(value, stack);
+/**
+ * The object-valued child schemas `convertSchemaInner` recurses into — the
+ * edges of the schema graph. Reference objects are leaves (never followed).
+ */
+function childSchemas(node: Record<string, unknown>): object[] {
+  const children: unknown[] = [];
+  const properties = node['properties'];
+  if (properties && typeof properties === 'object') children.push(...Object.values(properties));
+  const items = node['items'];
+  if (items) children.push(...(Array.isArray(items) ? items : [items]));
+  const additionalProperties = node['additionalProperties'];
+  if (additionalProperties && typeof additionalProperties === 'object') children.push(additionalProperties);
+  for (const key of ['allOf', 'anyOf', 'oneOf', 'prefixItems'] as const) {
+    const members = node[key];
+    if (Array.isArray(members)) children.push(...members);
+  }
+  children.push(node['not']);
+  for (const key of SCHEMA_MAP_KEYWORDS) {
+    const value = node[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) children.push(...Object.values(value));
+  }
+  for (const key of SCHEMA_SINGLE_KEYWORDS) children.push(node[key]);
+  return children.filter(
+    (child): child is object => child !== null && typeof child === 'object' && !isReferenceObject(child),
+  );
+}
+
+/**
+ * Nodes that lie on a cycle of the schema graph reachable from `root`
+ * (Tarjan's strongly-connected-components algorithm, iterative so deep specs
+ * cannot overflow the call stack). Only these convert differently depending
+ * on the path that reaches them.
+ */
+function findCyclicNodes(root: unknown): Set<object> {
+  const cyclic = new Set<object>();
+  if (root === null || typeof root !== 'object' || isReferenceObject(root)) return cyclic;
+
+  const index = new Map<object, number>();
+  const low = new Map<object, number>();
+  const open: object[] = [];
+  const onOpen = new Set<object>();
+  const frames: { node: object; children: object[]; next: number }[] = [];
+  const enter = (node: object): void => {
+    index.set(node, index.size);
+    low.set(node, index.size - 1);
+    open.push(node);
+    onOpen.add(node);
+    frames.push({ node, children: childSchemas(node as Record<string, unknown>), next: 0 });
+  };
+
+  enter(root);
+  while (frames.length > 0) {
+    const frame = frames[frames.length - 1];
+    if (frame.next < frame.children.length) {
+      const child = frame.children[frame.next++];
+      if (!index.has(child)) {
+        enter(child);
+      } else if (onOpen.has(child)) {
+        low.set(frame.node, Math.min(low.get(frame.node)!, index.get(child)!));
+      }
+      continue;
+    }
+    frames.pop();
+    const nodeLow = low.get(frame.node)!;
+    const parent = frames[frames.length - 1];
+    if (parent) low.set(parent.node, Math.min(low.get(parent.node)!, nodeLow));
+    if (nodeLow === index.get(frame.node)) {
+      const component: object[] = [];
+      let member: object;
+      do {
+        member = open.pop()!;
+        onOpen.delete(member);
+        component.push(member);
+      } while (member !== frame.node);
+      if (component.length > 1 || frame.children.includes(frame.node)) {
+        component.forEach((m) => cyclic.add(m));
+      }
+    }
+  }
+  return cyclic;
+}
+
+function convertSchemaInner(schema: SchemaObject, depth: number, state: ConversionState): JsonSchema {
+  const recurse = (value: SchemaObject | ReferenceObject): JsonSchema => convertSchema(value, depth + 1, state);
+  // allOf members merge into their parent (request-body flattening hoists
+  // them), so they don't consume depth — see SchemaConversionOptions.maxDepth
+  const recurseMember = (value: SchemaObject | ReferenceObject): JsonSchema => convertSchema(value, depth, state);
 
   // Handle OpenAPI 3.0 boolean exclusiveMaximum/exclusiveMinimum
   // by converting them to JSON Schema Draft 7 numeric format
@@ -204,7 +413,7 @@ function convertSchemaInner(schema: SchemaObject, stack: Set<object>): JsonSchem
 
   for (const key of ['allOf', 'anyOf', 'oneOf'] as const) {
     if (result[key] && Array.isArray(result[key])) {
-      result[key] = (result[key] as (SchemaObject | ReferenceObject)[]).map(recurse);
+      result[key] = (result[key] as (SchemaObject | ReferenceObject)[]).map(key === 'allOf' ? recurseMember : recurse);
     }
   }
 
@@ -215,7 +424,7 @@ function convertSchemaInner(schema: SchemaObject, stack: Set<object>): JsonSchem
   // Remaining JSON Schema 2020-12 structural keywords, so nested `nullable`/
   // `example`/`xml` under them receive the same normalization as the root.
   // Map-of-schemas keywords:
-  for (const key of ['patternProperties', '$defs', 'definitions', 'dependentSchemas'] as const) {
+  for (const key of SCHEMA_MAP_KEYWORDS) {
     const value = result[key];
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       const mapped: Record<string, JsonSchema> = {};
@@ -226,16 +435,7 @@ function convertSchemaInner(schema: SchemaObject, stack: Set<object>): JsonSchem
     }
   }
   // Single-schema keywords (`unevaluated*` may be boolean — object guard skips those):
-  for (const key of [
-    'contains',
-    'propertyNames',
-    'if',
-    'then',
-    'else',
-    'contentSchema',
-    'unevaluatedItems',
-    'unevaluatedProperties',
-  ] as const) {
+  for (const key of SCHEMA_SINGLE_KEYWORDS) {
     const value = result[key];
     if (value && typeof value === 'object') {
       result[key] = recurse(value as SchemaObject | ReferenceObject);
@@ -958,6 +1158,19 @@ export interface GenerateOptions {
    * @default 10
    */
   maxSchemaDepth?: number;
+
+  /**
+   * Node budget for each generated input/output schema. Shared `$ref` targets
+   * are converted once, but the emitted schema spells every occurrence out,
+   * so a small spec that references the same schema many times can still
+   * expand into an enormous tree. Generating a tool fails with a
+   * `SchemaError` once one of its schemas — or the conversion work for one
+   * parameter, request body, or response — exceeds this many nodes;
+   * `generateTools()` skips that tool with a warning, like any other per-tool
+   * failure. `Infinity` disables the budget.
+   * @default 100000
+   */
+  maxSchemaNodes?: number;
 
   /**
    * How the tool description is assembled from the operation:

@@ -894,3 +894,78 @@ describe('SchemaBuilder trimming transforms', () => {
     });
   });
 });
+
+describe('SchemaBuilder.truncateDepth materialization and node budget (issue #48)', () => {
+  const { SchemaError } = require('../errors');
+
+  it('returns a fresh tree that shares no schema object with its input or itself', () => {
+    const shared = { type: 'string', format: 'uuid' };
+    const schema = { type: 'object', properties: { a: shared, b: shared } } as any;
+    const result = SchemaBuilder.truncateDepth(schema, 10) as any;
+
+    expect(result).toEqual(schema);
+    expect(result.properties.a).not.toBe(shared);
+    expect(result.properties.a).not.toBe(result.properties.b);
+    result.properties.a.description = 'changed';
+    expect(result.properties.b.description).toBeUndefined();
+    expect(shared).toEqual({ type: 'string', format: 'uuid' });
+  });
+
+  it('counts every node it keeps against maxNodes and throws a SchemaError past it', () => {
+    const schema = { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } } } as any;
+
+    expect(SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 3 })).toEqual(schema);
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 2 })).toThrow(SchemaError);
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 2 })).toThrow(/node budget of 2 \(maxSchemaNodes\)/);
+    // Nodes dropped by the depth cut are not counted
+    expect(() => SchemaBuilder.truncateDepth(schema, 0, { maxNodes: 1 })).not.toThrow();
+  });
+
+  it('stops early on a reused subschema that would expand past the budget', () => {
+    // 30 levels, each referencing the next twice: 2^31 nodes if fully expanded
+    let level: any = { type: 'string' };
+    for (let i = 0; i < 30; i++) level = { type: 'object', properties: { left: level, right: level } };
+
+    expect(() => SchemaBuilder.truncateDepth(level, 40, { maxNodes: 1000 })).toThrow(SchemaError);
+  });
+
+  it('floors fractional budgets and treats absent or non-finite ones as unbounded', () => {
+    const schema = { type: 'object', properties: { a: { type: 'string' } } } as any;
+
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 2.9 })).not.toThrow();
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 1.9 })).toThrow(/node budget of 1 /);
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: 0 })).toThrow(/node budget of 1 /);
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: Infinity })).not.toThrow();
+    expect(() => SchemaBuilder.truncateDepth(schema, 10, { maxNodes: NaN })).not.toThrow();
+  });
+
+  it('keeps a nested tuple array (not a schema) as is', () => {
+    const inner = [{ type: 'string' }];
+    const result = SchemaBuilder.truncateDepth({ type: 'array', items: [inner] } as any, 10) as any;
+
+    expect(result.items[0]).toBe(inner);
+  });
+});
+
+describe('resolveSchemaLimits', () => {
+  const { resolveSchemaLimits, DEFAULT_MAX_SCHEMA_NODES } = require('../schema-builder');
+
+  it('defaults to depth 10 and the default node budget', () => {
+    expect(resolveSchemaLimits({})).toEqual({ maxDepth: 10, maxNodes: DEFAULT_MAX_SCHEMA_NODES });
+    expect(DEFAULT_MAX_SCHEMA_NODES).toBe(100_000);
+  });
+
+  it('normalizes the depth exactly as truncateDepth applies it, with a floor of 1', () => {
+    expect(resolveSchemaLimits({ maxSchemaDepth: 0 }).maxDepth).toBe(1);
+    expect(resolveSchemaLimits({ maxSchemaDepth: 3.7 }).maxDepth).toBe(3);
+    expect(resolveSchemaLimits({ maxSchemaDepth: Infinity }).maxDepth).toBe(10);
+    expect(resolveSchemaLimits({ maxSchemaDepth: NaN }).maxDepth).toBe(10);
+  });
+
+  it('lets Infinity disable the node budget and falls back to the default for NaN', () => {
+    expect(resolveSchemaLimits({ maxSchemaNodes: Infinity }).maxNodes).toBe(Infinity);
+    expect(resolveSchemaLimits({ maxSchemaNodes: NaN }).maxNodes).toBe(DEFAULT_MAX_SCHEMA_NODES);
+    expect(resolveSchemaLimits({ maxSchemaNodes: 2.5 }).maxNodes).toBe(2);
+    expect(resolveSchemaLimits({ maxSchemaNodes: -4 }).maxNodes).toBe(1);
+  });
+});

@@ -13,7 +13,7 @@ import { OpenAPIToolGenerator, fnv1aHex, normalizeToolName } from './generator';
 import { ArazzoError } from './errors';
 import { collectPayloadExpressions, parseExpressionValue, parseRuntimeExpression } from './arazzo-expressions';
 import { inferAnnotationsFromMethod } from './annotations';
-import { SchemaBuilder } from './schema-builder';
+import { SchemaBuilder, resolveSchemaLimits } from './schema-builder';
 import { applyClientTarget } from './client-targets';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { emitToolTypeScript } from './type-signature';
@@ -59,6 +59,7 @@ export type ArazzoGenerateOptions = Pick<
   GenerateOptions,
   | 'target'
   | 'maxSchemaDepth'
+  | 'maxSchemaNodes'
   | 'maxProperties'
   | 'maxDescriptionLength'
   | 'stripExamples'
@@ -951,7 +952,8 @@ function applySchemaPipeline(schema: JsonSchema, options: ArazzoGenerateOptions,
     ...options.formatResolvers,
   };
   let resolved = Object.keys(formatResolvers).length > 0 ? resolveSchemaFormats(schema, formatResolvers) : schema;
-  resolved = SchemaBuilder.truncateDepth(resolved, Math.max(1, options.maxSchemaDepth ?? 10));
+  const { maxDepth, maxNodes } = resolveSchemaLimits(options);
+  resolved = SchemaBuilder.truncateDepth(resolved, maxDepth, { maxNodes });
   if (options.stripExamples) resolved = SchemaBuilder.stripExamples(resolved);
   if (options.maxDescriptionLength !== undefined) {
     resolved = SchemaBuilder.capDescriptions(resolved, options.maxDescriptionLength);
@@ -989,7 +991,8 @@ function buildWorkflowTool(
   let rawInputSchema: JsonSchema | undefined;
   if (workflow.inputs !== undefined) {
     const resolved = resolveInputRefs(workflow.inputs, ctx.doc.components, `${wPath}/inputs`, new Set());
-    rawInputSchema = toJsonSchema(resolved as SchemaObject);
+    const { maxDepth, maxNodes } = resolveSchemaLimits(options);
+    rawInputSchema = toJsonSchema(resolved as SchemaObject, { maxDepth, maxNodes });
     inputSchema = applySchemaPipeline(rawInputSchema, options, true);
   } else {
     inputSchema = { type: 'object', properties: {} };

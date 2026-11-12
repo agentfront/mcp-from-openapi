@@ -1,7 +1,55 @@
 import type { JSONSchema } from 'zod/v4/core';
+import { SchemaError } from './errors';
 
 /** JSON Schema type from Zod v4 */
 type JsonSchema = JSONSchema.JSONSchema;
+
+/** Options for {@link SchemaBuilder.truncateDepth} */
+export interface TruncateDepthOptions {
+  /**
+   * Maximum number of schema nodes in the truncated tree; a `SchemaError` is
+   * thrown as soon as it would contain more. Unbounded when omitted.
+   */
+  maxNodes?: number;
+}
+
+/**
+ * Default `GenerateOptions.maxSchemaNodes`. The largest schemas the vendored
+ * real-world specs (GitHub, Discord) produce at the default depth have ~5k
+ * nodes (~440 KB of JSON), so this only stops schemas no client could use.
+ */
+export const DEFAULT_MAX_SCHEMA_NODES = 100_000;
+
+/**
+ * Guard a depth bound: NaN/Infinity would disable truncation (`depth >= NaN`
+ * is always false) and hang on circular graphs; fractional depths floor.
+ * Non-finite input falls back to the documented default.
+ */
+function normalizeDepthBound(maxDepth: number): number {
+  return Number.isFinite(maxDepth) ? Math.max(0, Math.floor(maxDepth)) : 10;
+}
+
+/**
+ * The effective schema limits of a generation run: the depth `truncateDepth`
+ * cuts at (clamped to at least 1 so the root keeps its properties) and the
+ * node budget (`Infinity` disables it; absent or NaN uses the default).
+ * Conversion and truncation must use the same depth, so both read it here.
+ */
+export function resolveSchemaLimits(options: { maxSchemaDepth?: number; maxSchemaNodes?: number }): {
+  maxDepth: number;
+  maxNodes: number;
+} {
+  const nodes = options.maxSchemaNodes;
+  return {
+    maxDepth: normalizeDepthBound(Math.max(1, options.maxSchemaDepth ?? 10)),
+    maxNodes:
+      nodes === undefined || Number.isNaN(nodes)
+        ? DEFAULT_MAX_SCHEMA_NODES
+        : nodes === Infinity
+          ? Infinity
+          : Math.max(1, Math.floor(nodes)),
+  };
+}
 
 /**
  * Helper class for building and manipulating JSON schemas
@@ -340,13 +388,19 @@ export class SchemaBuilder {
    * `not` increments the depth. Nodes at `maxDepth` keep their scalar keywords
    * (type, description, format, ...) but have their child schemas stripped and
    * a truncation note appended to the description.
+   *
+   * The result is a fresh tree: it shares no schema object with the input or
+   * with itself, even when the input reuses one subschema in several places.
+   * `options.maxNodes` caps the size of that tree — a `SchemaError` is thrown
+   * as soon as it would contain more nodes (unbounded when omitted).
    */
-  static truncateDepth(schema: JsonSchema, maxDepth: number): JsonSchema {
-    // Guard the depth bound itself: NaN/Infinity would disable truncation
-    // (`depth >= NaN` is always false) and hang on circular graphs; fractional
-    // depths floor. Non-finite input falls back to the documented default.
-    const bound = Number.isFinite(maxDepth) ? Math.max(0, Math.floor(maxDepth)) : 10;
-    return this.truncateDepthRecursive(schema, 0, bound);
+  static truncateDepth(schema: JsonSchema, maxDepth: number, options: TruncateDepthOptions = {}): JsonSchema {
+    const { maxNodes } = options;
+    const budget = {
+      count: 0,
+      maxNodes: maxNodes !== undefined && Number.isFinite(maxNodes) ? Math.max(1, Math.floor(maxNodes)) : Infinity,
+    };
+    return this.truncateDepthRecursive(schema, 0, normalizeDepthBound(maxDepth), budget);
   }
 
   /** Keys whose value is a map of schemas (JSON Schema 2020-12) */
@@ -376,12 +430,27 @@ export class SchemaBuilder {
   /** Keys whose value is an array of schemas */
   private static readonly TRUNCATE_LIST_KEYS = ['allOf', 'anyOf', 'oneOf', 'prefixItems'] as const;
 
-  // Copy-on-walk: never mutates the input, only copies nodes that have schema
-  // children, and — because the walk is depth-bounded — terminates even on
-  // circular schema graphs (which `clone()`'s JSON round-trip would reject).
-  private static truncateDepthRecursive(node: JsonSchema, depth: number, maxDepth: number): JsonSchema {
+  // Copy-on-walk: never mutates the input and copies every node it keeps, so
+  // shared subschemas come out as independent copies. Because the walk is
+  // depth-bounded it terminates even on circular schema graphs (which
+  // `clone()`'s JSON round-trip would reject), and its work is bounded by the
+  // size of the tree it returns — which `budget.maxNodes` caps.
+  private static truncateDepthRecursive(
+    node: JsonSchema,
+    depth: number,
+    maxDepth: number,
+    budget: { count: number; maxNodes: number },
+  ): JsonSchema {
     /* c8 ignore next -- guard for boolean/degenerate schemas in recursive traversal */
     if (!node || typeof node !== 'object') return node;
+
+    if (++budget.count > budget.maxNodes) {
+      throw new SchemaError(
+        `Schema exceeds the node budget of ${budget.maxNodes} (maxSchemaNodes) after depth truncation: shared or ` +
+          `recursive $refs expand into more schema nodes than allowed. Lower maxSchemaDepth or raise maxSchemaNodes.`,
+        { maxNodes: budget.maxNodes },
+      );
+    }
 
     const record = node as Record<string, unknown>;
     const childKeys = [...this.TRUNCATE_MAP_KEYS, ...this.TRUNCATE_SCHEMA_KEYS, ...this.TRUNCATE_LIST_KEYS];
@@ -390,7 +459,8 @@ export class SchemaBuilder {
       return value !== null && typeof value === 'object';
     });
 
-    if (!hasChildren) return node;
+    // (A tuple-of-tuples `items` element is an array, not a schema — kept as is)
+    if (!hasChildren) return Array.isArray(node) ? node : { ...node };
 
     const copy = { ...node } as JsonSchema;
     const copyRecord = copy as Record<string, unknown>;
@@ -414,7 +484,7 @@ export class SchemaBuilder {
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
         const mapped: Record<string, JsonSchema> = {};
         for (const [name, sub] of Object.entries(value as Record<string, JsonSchema>)) {
-          mapped[name] = this.truncateDepthRecursive(sub, depth + 1, maxDepth);
+          mapped[name] = this.truncateDepthRecursive(sub, depth + 1, maxDepth, budget);
         }
         copyRecord[key] = mapped;
       }
@@ -425,15 +495,15 @@ export class SchemaBuilder {
       if (value !== null && typeof value === 'object') {
         // `items` may be a tuple array (pre-2020-12 style)
         copyRecord[key] = Array.isArray(value)
-          ? value.map((item) => this.truncateDepthRecursive(item as JsonSchema, depth + 1, maxDepth))
-          : this.truncateDepthRecursive(value as JsonSchema, depth + 1, maxDepth);
+          ? value.map((item) => this.truncateDepthRecursive(item as JsonSchema, depth + 1, maxDepth, budget))
+          : this.truncateDepthRecursive(value as JsonSchema, depth + 1, maxDepth, budget);
       }
     }
 
     for (const key of this.TRUNCATE_LIST_KEYS) {
       const value = copyRecord[key];
       if (Array.isArray(value)) {
-        copyRecord[key] = value.map((member) => this.truncateDepthRecursive(member as JsonSchema, depth + 1, maxDepth));
+        copyRecord[key] = value.map((member) => this.truncateDepthRecursive(member as JsonSchema, depth + 1, maxDepth, budget));
       }
     }
 

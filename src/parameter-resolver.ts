@@ -13,6 +13,7 @@ import type {
   SecurityRequirement,
   SecurityParameterInfo,
   SecuritySchemeObject,
+  SchemaConversionOptions,
 } from './types';
 import { toJsonSchema, isReferenceObject } from './types';
 
@@ -25,6 +26,13 @@ export interface ParameterResolverOptions {
    * generated input schema (as JSON Schema `examples` arrays).
    */
   includeExamples?: boolean;
+
+  /**
+   * Limits for converting parameter and request-body schemas (see
+   * `SchemaConversionOptions`). `OpenAPIToolGenerator` sets them from
+   * `maxSchemaDepth` / `maxSchemaNodes`; unbounded when omitted.
+   */
+  schemaConversion?: SchemaConversionOptions;
 }
 
 /**
@@ -33,6 +41,7 @@ export interface ParameterResolverOptions {
 export class ParameterResolver {
   private namingStrategy: NamingStrategy & { conflictResolver: NonNullable<NamingStrategy['conflictResolver']> };
   private includeExamples: boolean;
+  private schemaConversion: SchemaConversionOptions;
 
   constructor(namingStrategy?: NamingStrategy, options?: ParameterResolverOptions) {
     this.namingStrategy = {
@@ -44,6 +53,7 @@ export class ParameterResolver {
         : this.defaultConflictResolver,
     };
     this.includeExamples = options?.includeExamples ?? false;
+    this.schemaConversion = options?.schemaConversion ?? {};
   }
 
   /**
@@ -203,7 +213,7 @@ export class ParameterResolver {
     if (!schema || typeof schema !== 'object') return;
 
     // Convert to JsonSchema for processing
-    const jsonSchema = toJsonSchema(schema);
+    const jsonSchema = toJsonSchema(schema, this.schemaConversion);
 
     // Flatten object bodies into named parameters — including `allOf`
     // compositions, whose object members merge into one property set.
@@ -277,7 +287,7 @@ export class ParameterResolver {
    * Build JSON Schema for a parameter
    */
   private buildParameterSchema(param: ParameterInfo): JsonSchema {
-    const schema: JsonSchema = toJsonSchema(param.schema as any);
+    const schema: JsonSchema = toJsonSchema(param.schema as any, this.schemaConversion);
 
     if (param.description) {
       schema.description = param.description;
@@ -477,10 +487,26 @@ interface FlattenedObjectBody {
  * cannot be flattened into named properties without deleting the union
  * constraint, so the caller must keep the body whole.
  */
-function collectObjectMembers(schema: JsonSchema): { properties: Record<string, JsonSchema>; required: Set<string> } | 'union' {
+function collectObjectMembers(
+  schema: JsonSchema,
+  collected: Map<object, FlattenedObjectBody | 'union'>,
+): FlattenedObjectBody | 'union' {
   /* c8 ignore next -- defensive: toJsonSchema always yields objects, so non-object nodes cannot reach here */
   if (!schema || typeof schema !== 'object') return { properties: {}, required: new Set() };
 
+  // A member shared by several allOf lists (one $ref target, converted once)
+  // is collected once — the merge below only reads the result
+  const known = collected.get(schema);
+  if (known) return known;
+  const result = collectOwnMembers(schema, collected);
+  collected.set(schema, result);
+  return result;
+}
+
+function collectOwnMembers(
+  schema: Exclude<JsonSchema, boolean>,
+  collected: Map<object, FlattenedObjectBody | 'union'>,
+): FlattenedObjectBody | 'union' {
   if (Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf)) return 'union';
 
   const properties: Record<string, JsonSchema> = {};
@@ -491,10 +517,10 @@ function collectObjectMembers(schema: JsonSchema): { properties: Record<string, 
   // contributes its required fields. Direct properties/required win last.
   if (Array.isArray(schema.allOf)) {
     for (const member of schema.allOf) {
-      const collected = collectObjectMembers(member as JsonSchema);
-      if (collected === 'union') return 'union';
-      Object.assign(properties, collected.properties);
-      collected.required.forEach((field) => required.add(field));
+      const members = collectObjectMembers(member as JsonSchema, collected);
+      if (members === 'union') return 'union';
+      Object.assign(properties, members.properties);
+      members.required.forEach((field) => required.add(field));
     }
   }
 
@@ -516,7 +542,7 @@ function collectObjectMembers(schema: JsonSchema): { properties: Record<string, 
  * (arrays, primitives, binary), and free-form objects without properties.
  */
 function flattenObjectBody(schema: JsonSchema): FlattenedObjectBody | undefined {
-  const collected = collectObjectMembers(schema);
+  const collected = collectObjectMembers(schema, new Map());
   if (collected === 'union') return undefined;
   return Object.keys(collected.properties).length > 0 ? collected : undefined;
 }

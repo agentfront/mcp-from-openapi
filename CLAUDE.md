@@ -146,6 +146,7 @@ GenerateOptions (generateTools/generateTool)
 - Trimming order in generateTool: formats → depth truncation → stripExamples/maxProperties/maxDescriptionLength → client target
 - `metadata.responseHints` (unboundedArray/paginationParams/largeResponseRisk) computed on the FINAL output schema
 - Format resolution is a post-processing step applied to final inputSchema/outputSchema; `maxSchemaDepth` truncation (default 10) runs after it, BEFORE client target transforms
+- Shared `$ref` targets stay bounded (issue #48): `toJsonSchema` converts each acyclic node once (cycle membership via Tarjan SCC; cyclic nodes convert per path, preserving the cut-at-revisit output) and stops at `maxDepth` (`allOf` members don't count — body flattening hoists them) with `{}` placeholders that `truncateDepth` always discards. `resolveSchemaFormats` memoizes by node; `truncateDepth` materializes a fresh unshared tree. `maxSchemaNodes` (default 100k) budgets conversion and the truncated output → `SchemaError`. Generator output is byte-identical to per-occurrence conversion; conversion and truncation must use the same `resolveSchemaLimits` depth
 
 ## Documentation
 

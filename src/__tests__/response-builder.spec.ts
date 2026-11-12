@@ -543,3 +543,28 @@ describe('ResponseBuilder', () => {
     });
   });
 });
+
+describe('ResponseBuilder schemaConversion limits', () => {
+  const responses: any = {
+    200: {
+      description: 'ok',
+      content: {
+        'application/json': {
+          schema: { type: 'object', properties: { a: { type: 'object', properties: { b: { type: 'string' } } } } },
+        },
+      },
+    },
+  };
+
+  it('converts without limits by default', () => {
+    const schema: any = new ResponseBuilder().build(responses);
+    expect(schema.properties.a.properties.b).toEqual({ type: 'string' });
+  });
+
+  it('applies maxDepth and maxNodes when given', () => {
+    const schema: any = new ResponseBuilder({}, { maxDepth: 1 }).build(responses);
+    expect(schema.properties.a.properties.b).toEqual({});
+
+    expect(() => new ResponseBuilder({}, { maxNodes: 2 }).build(responses)).toThrow(/maxSchemaNodes/);
+  });
+});

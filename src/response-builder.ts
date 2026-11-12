@@ -2,7 +2,7 @@ import type { JSONSchema } from 'zod/v4/core';
 
 /** JSON Schema type from Zod v4 */
 type JsonSchema = JSONSchema.JSONSchema;
-import type { ResponseObject, GenerateOptions, ResponsesObject } from './types';
+import type { ResponseObject, GenerateOptions, ResponsesObject, SchemaConversionOptions } from './types';
 import { isReferenceObject, toJsonSchema } from './types';
 import { collectExampleValues } from './parameter-resolver';
 
@@ -13,11 +13,18 @@ export class ResponseBuilder {
   private preferredStatusCodes: number[];
   private includeAllResponses: boolean;
   private includeExamples: boolean;
+  private schemaConversion: SchemaConversionOptions;
 
-  constructor(options: GenerateOptions = {}) {
+  /**
+   * @param schemaConversion - limits for converting response schemas (see
+   *   `SchemaConversionOptions`). `OpenAPIToolGenerator` sets them from
+   *   `maxSchemaDepth` / `maxSchemaNodes`; unbounded when omitted.
+   */
+  constructor(options: GenerateOptions = {}, schemaConversion: SchemaConversionOptions = {}) {
     this.preferredStatusCodes = options.preferredStatusCodes ?? [200, 201, 204, 202, 203, 206];
     this.includeAllResponses = options.includeAllResponses ?? true;
     this.includeExamples = options.includeExamples ?? false;
+    this.schemaConversion = schemaConversion;
   }
 
   /**
@@ -111,7 +118,7 @@ export class ResponseBuilder {
     }
 
     const schema: JsonSchema & { 'x-status-code'?: number } = {
-      ...toJsonSchema(mediaType.schema),
+      ...toJsonSchema(mediaType.schema, this.schemaConversion),
       'x-status-code': statusCode,
     };
 
