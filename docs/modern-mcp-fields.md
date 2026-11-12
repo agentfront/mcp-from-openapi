@@ -30,7 +30,7 @@ x-mcp:
 
 Extension-supplied `meta` is emitted **even when `emitMeta` is off**, merged key-by-key with `x-frontmcp.meta` winning over `x-mcp.meta`. Keys under the reserved `dev.agentfront.openapi/` namespace are ignored from extensions — consumers can trust the generated entry's operation coordinates. Pollution-gadget keys (`__proto__`, `constructor`, `prototype`) are stripped recursively. `x-speakeasy-mcp` does not participate (outside its published contract).
 
-A `$ref` inside `meta` is resolved like any other, and the meta is copied once per occurrence of each referenced value (a reference back to an enclosing value is dropped). So the copy is bounded: every object and array copied from `x-mcp` and `x-frontmcp` meta together counts against [`maxSchemaNodes`](./configuration.md#maxschemanodes), and meta may nest at most 1,000 levels. Past either limit, generating that tool fails with a `SchemaError`; `generateTools()` skips it with a warning.
+A `$ref` inside `meta` is resolved like any other, and the meta is copied once per occurrence of each referenced value (a reference back to an enclosing value is dropped). So the copy is bounded: every value copied from `x-mcp` and `x-frontmcp` meta together counts against [`maxSchemaNodes`](./configuration.md#maxschemanodes), and meta may nest at most 1,000 levels. Past either limit, generating that tool fails with a `SchemaError`; `generateTools()` skips it with a warning.
 
 ## Tool icons
 

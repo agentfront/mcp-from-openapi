@@ -238,7 +238,7 @@ toSdkTool<TSchema>(tool: McpOpenAPITool, wrapper?: SdkSchemaWrapper<TSchema>): [
 
 ### inferAnnotationsFromMethod / extractExtensionOverrides / resolveExtensionEnabled
 
-Annotation inference and `x-mcp` extension family parsing. `extractExtensionOverrides(operation, { maxMetaNodes })` throws a `SchemaError` when the extensions' `meta`, with its `$ref`s resolved, copies more than `maxMetaNodes` objects and arrays (default `100000`) or nests more than 1,000 levels. See [Annotations & Extensions](./annotations.md).
+Annotation inference and `x-mcp` extension family parsing. `extractExtensionOverrides(operation, { maxMetaNodes })` throws a `SchemaError` when the extensions' `meta`, with its `$ref`s resolved, copies more than `maxMetaNodes` values (default `100000`) or nests more than 1,000 levels. See [Annotations & Extensions](./annotations.md).
 
 ### createSecurityContext
 

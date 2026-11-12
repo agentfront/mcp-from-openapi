@@ -43,6 +43,7 @@ import { GenerationError, LoadError, OverlayError, ParseError, SchemaError } fro
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { emitToolTypeScript } from './type-signature';
 import { hostListIncludes, isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
+import { copyJsonValue, type CopyBudget } from './json-copy';
 
 /** MCP hard limit for tool name length (spec revision 2025-11-25, SEP-986) */
 const MCP_MAX_TOOL_NAME_LENGTH = 128;
@@ -1028,6 +1029,26 @@ export class OpenAPIToolGenerator {
       });
     }
 
+    // Values from the spec outside the schemas — the title, the mapper's
+    // encodings, the metadata (tags, servers, externalDocs, x-frontmcp, ...),
+    // and _meta's operation entry — are copied like schema values: into fresh
+    // trees that share nothing with the document, bounded by the node budget
+    // because a `$ref` resolved inside one can expand exponentially
+    const valueBudget: CopyBudget = {
+      maxNodes: maxSchemaNodes,
+      nodes: 0,
+      exceeded: () => {
+        throw new SchemaError(
+          `The metadata of ${method.toUpperCase()} ${pathStr} exceeds the node budget of ${maxSchemaNodes} ` +
+            `(maxSchemaNodes): with its $refs resolved, a value copied from the spec (tags, servers, externalDocs, ` +
+            `x-frontmcp, request encodings, ...) expands into more nodes than allowed.`,
+          { maxNodes: maxSchemaNodes },
+        );
+      },
+    };
+    const copyValue = <T>(value: T, label: string, omitPrototypeKeys = false): T =>
+      copyJsonValue(value, valueBudget, { label, omitPrototypeKeys }) as T;
+
     // MCP `_meta`: generated operation entry (opt-in) + extension pass-through (always)
     let toolMeta: Record<string, unknown> | undefined;
     if (overrides.meta) {
@@ -1044,15 +1065,19 @@ export class OpenAPIToolGenerator {
       const info = document.info as Record<string, unknown> | undefined;
       toolMeta = {
         ...toolMeta,
-        'dev.agentfront.openapi/operation': {
-          path: pathStr,
-          method,
-          ...(operation.operationId !== undefined && { operationId: operation.operationId }),
-          ...(operation.tags && { tags: [...operation.tags] }),
-          ...(operation.deprecated !== undefined && { deprecated: operation.deprecated }),
-          ...(typeof info?.['title'] === 'string' && { specTitle: info['title'] }),
-          ...(typeof info?.['version'] === 'string' && { specVersion: info['version'] }),
-        },
+        'dev.agentfront.openapi/operation': copyValue(
+          {
+            path: pathStr,
+            method,
+            ...(operation.operationId !== undefined && { operationId: operation.operationId }),
+            ...(operation.tags && { tags: operation.tags }),
+            ...(operation.deprecated !== undefined && { deprecated: operation.deprecated }),
+            ...(typeof info?.['title'] === 'string' && { specTitle: info['title'] }),
+            ...(typeof info?.['version'] === 'string' && { specVersion: info['version'] }),
+          },
+          'The _meta operation entry',
+          true,
+        ),
       };
     }
     if (toolMeta && Object.keys(toolMeta).length === 0) {
@@ -1065,15 +1090,15 @@ export class OpenAPIToolGenerator {
 
     return {
       name,
-      ...(title !== undefined && { title }),
+      ...(title !== undefined && { title: copyValue(title, 'The tool title') }),
       description: finalDescription,
       ...(annotations && { annotations }),
       ...(toolMeta && { _meta: toolMeta }),
       ...(icons && { icons }),
       inputSchema: resolvedInputSchema,
       outputSchema: resolvedOutputSchema,
-      mapper,
-      metadata,
+      mapper: copyValue(mapper, 'The parameter mapper'),
+      metadata: copyValue(metadata, 'The tool metadata'),
     };
   }
 

@@ -1,26 +1,20 @@
 import type { FrontMcpExtensionData, HTTPMethod, OperationObject, ToolAnnotations, ToolIcon } from './types';
 import { SchemaError } from './errors';
+import { copyJsonValue, type CopyBudget } from './json-copy';
 import { resolveSchemaLimits } from './schema-builder';
 
 /** Options for {@link extractExtensionOverrides} */
 export interface ExtensionOverridesOptions {
   /**
    * Node budget for the `meta` copied out of the extensions (`x-mcp` and
-   * `x-frontmcp` together). Dereferencing resolves `$ref`s there too, and each
-   * occurrence is copied, so a few `$ref`s to schemas that share a child can
-   * expand into an enormous value. Past the budget a `SchemaError` is thrown.
-   * Defaults to 100000 — `OpenAPIToolGenerator` passes `maxSchemaNodes` —
-   * and `Infinity` disables it.
+   * `x-frontmcp` together): every copied value counts. Dereferencing resolves
+   * `$ref`s there too, and each occurrence is copied, so a few `$ref`s to
+   * schemas that share a child can expand into an enormous value. Past the
+   * budget a `SchemaError` is thrown. Defaults to 100000 —
+   * `OpenAPIToolGenerator` passes `maxSchemaNodes` — and `Infinity` disables it.
    */
   maxMetaNodes?: number;
 }
-
-/**
- * How deeply extension meta may nest. A value nested deeper fails the tool, so
- * that every generated tool stays safe to serialize (`JSON.stringify` overflows
- * the call stack at a few thousand levels).
- */
-const MAX_META_DEPTH = 1000;
 
 /**
  * Tool-level overrides read from the `x-mcp` extension family on an operation.
@@ -119,91 +113,18 @@ function mergeOverrides(base: ExtensionToolOverrides, layer: ExtensionToolOverri
   };
 }
 
-/** A meta object or array being rebuilt: its kept keys (`null` for an array) and their values. */
-interface CleanseFrame {
-  node: object;
-  keys: string[] | null;
-  values: unknown[];
-  next: number;
-  out: Record<string, unknown> | unknown[];
-}
-
-/** The meta node budget of one operation, shared by its extension layers */
-interface MetaBudget {
-  maxNodes: number;
-  nodes: number;
-}
-
-/** Rebuild a `_meta` contribution with pollution-gadget keys removed at every
- * level — untrusted specs cross a trust boundary here, and JSON/YAML parsing
- * creates `__proto__` as an own key that downstream deep-merges would follow.
- * Dereferencing resolves `$ref`s inside extensions too, so the value can be
- * circular (a reference back to an ancestor is dropped), deeply nested
- * (walked with an explicit stack — issue #50 — up to `MAX_META_DEPTH`), or
- * shared (copied per occurrence, so every copied object or array counts
- * against the budget). */
-function cleanseMeta(root: object, budget: MetaBudget): unknown {
-  // Objects on the path from the root to the node being rebuilt
-  const path = new Set<object>();
-  const frames: CleanseFrame[] = [];
-  const pending = {};
-  // A node's rebuilt value — or `pending`, with a frame pushed to rebuild it
-  const enter = (node: unknown): unknown => {
-    if (!node || typeof node !== 'object') return node;
-    if (path.has(node)) return undefined;
-    if (++budget.nodes > budget.maxNodes) {
-      throw new SchemaError(
-        `Extension meta exceeds the node budget of ${budget.maxNodes} (maxSchemaNodes): with its $refs resolved, ` +
-          `the x-mcp/x-frontmcp meta expands into more nodes than allowed. Remove the references or raise ` +
-          `maxSchemaNodes.`,
-        { maxNodes: budget.maxNodes },
-      );
-    }
-    if (frames.length >= MAX_META_DEPTH) {
-      throw new SchemaError(`Extension meta (x-mcp/x-frontmcp) is nested more than ${MAX_META_DEPTH} levels deep.`, {
-        maxDepth: MAX_META_DEPTH,
-      });
-    }
-    path.add(node);
-    if (Array.isArray(node)) {
-      // JSON-cloned, so never sparse
-      frames.push({ node, keys: null, values: node, next: 0, out: new Array<unknown>(node.length) });
-      return pending;
-    }
-    // Literal comparisons (not a shared Set) so static analysis recognizes
-    // the prototype-pollution sanitizer
-    const keys = Object.keys(node).filter((key) => key !== '__proto__' && key !== 'constructor' && key !== 'prototype');
-    const record = node as Record<string, unknown>;
-    frames.push({ node, keys, values: keys.map((key) => record[key]), next: 0, out: {} });
-    return pending;
-  };
-  const store = (frame: CleanseFrame, index: number, value: unknown): void => {
-    if (frame.keys) (frame.out as Record<string, unknown>)[frame.keys[index]] = value;
-    else (frame.out as unknown[])[index] = value;
-  };
-
-  enter(root);
-  for (;;) {
-    const frame = frames[frames.length - 1];
-    if (frame.next < frame.values.length) {
-      const index = frame.next++;
-      const value = enter(frame.values[index]);
-      if (value !== pending) store(frame, index, value);
-      continue;
-    }
-    frames.pop();
-    path.delete(frame.node);
-    const parent = frames[frames.length - 1];
-    if (!parent) return frame.out;
-    store(parent, parent.next - 1, frame.out);
-  }
-}
-
 /** Accept only a plain (non-array) object as a `_meta` contribution,
- * rebuilding it with pollution keys stripped recursively. */
-function sanitizeMeta(value: unknown, budget: MetaBudget): Record<string, unknown> | undefined {
+ * rebuilding it with pollution-gadget keys removed at every level — untrusted
+ * specs cross a trust boundary here, and JSON/YAML parsing creates
+ * `__proto__` as an own key that downstream deep-merges would follow.
+ * `copyJsonValue` also bounds the copy: dereferencing resolves `$ref`s inside
+ * extensions, so the value can be shared, circular, or deeply nested. */
+function sanitizeMeta(value: unknown, budget: CopyBudget): Record<string, unknown> | undefined {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
-    return cleanseMeta(value, budget) as Record<string, unknown>;
+    return copyJsonValue(value, budget, {
+      label: 'Extension meta (x-mcp/x-frontmcp)',
+      omitPrototypeKeys: true,
+    }) as Record<string, unknown>;
   }
   return undefined;
 }
@@ -298,7 +219,17 @@ export function extractExtensionOverrides(
   options: ExtensionOverridesOptions = {},
 ): ExtensionToolOverrides {
   const { maxNodes } = resolveSchemaLimits({ maxSchemaNodes: options.maxMetaNodes });
-  return readExtensionOverrides(operation, { maxNodes, nodes: 0 });
+  return readExtensionOverrides(operation, {
+    maxNodes,
+    nodes: 0,
+    exceeded: () => {
+      throw new SchemaError(
+        `Extension meta exceeds the node budget of ${maxNodes} (maxSchemaNodes): with its $refs resolved, the ` +
+          `x-mcp/x-frontmcp meta expands into more nodes than allowed. Remove the references or raise maxSchemaNodes.`,
+        { maxNodes },
+      );
+    },
+  });
 }
 
 /**
@@ -310,7 +241,7 @@ export function extractExtensionSettings(operation: OperationObject): ExtensionT
   return readExtensionOverrides(operation, null);
 }
 
-function readExtensionOverrides(operation: OperationObject, metaBudget: MetaBudget | null): ExtensionToolOverrides {
+function readExtensionOverrides(operation: OperationObject, metaBudget: CopyBudget | null): ExtensionToolOverrides {
   const meta = (value: unknown) => (metaBudget ? sanitizeMeta(value, metaBudget) : undefined);
   const icons = (value: unknown) => (metaBudget ? sanitizeIcons(value) : undefined);
   const op = operation as Record<string, unknown>;

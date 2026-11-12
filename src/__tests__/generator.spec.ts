@@ -5257,14 +5257,15 @@ describe('Deeply nested schemas (issue #50)', () => {
     }
   });
 
-  it('charges x-mcp meta against maxSchemaNodes: every copied object, the meta object included', async () => {
-    // The meta object plus 2^11 - 1 copies of the shared tree
+  it('charges x-mcp meta against maxSchemaNodes: every copied value, the meta object included', async () => {
+    // The meta object, 2^11 - 1 copied objects of the shared tree, and the
+    // `true` in each of its 2^10 leaves
     const generator = await OpenAPIToolGenerator.fromJSON(specWithSharedMeta(10));
 
-    const tool = await generator.generateTool('/item', 'get', { maxSchemaNodes: 2048 });
+    const tool = await generator.generateTool('/item', 'get', { maxSchemaNodes: 3072 });
     expect(JSON.stringify(tool._meta)).toContain('"leaf":true');
-    await expect(generator.generateTool('/item', 'get', { maxSchemaNodes: 2047 })).rejects.toThrow(
-      'Extension meta exceeds the node budget of 2047 (maxSchemaNodes)',
+    await expect(generator.generateTool('/item', 'get', { maxSchemaNodes: 3071 })).rejects.toThrow(
+      'Extension meta exceeds the node budget of 3071 (maxSchemaNodes)',
     );
   });
 
@@ -5275,5 +5276,102 @@ describe('Deeply nested schemas (issue #50)', () => {
     const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'get');
 
     expect(JSON.stringify(tool._meta)).toBe('{"acme/tree":{"type":"object","properties":{}}}');
+  });
+});
+
+describe('Values copied from the spec into a tool (issue #50)', () => {
+  type Place = 'default' | 'example' | 'x-frontmcp' | 'tags';
+
+  /**
+   * POST /item with a `$ref` to M0 in `place`, where Mi = { left: Mi+1, right: Mi+1 }:
+   * 2^(levels + 1) values once copied per occurrence — or serialized
+   */
+  const specWithSharedValue = (place: Place, levels: number): any => {
+    const schemas: Record<string, unknown> = {};
+    for (let i = 0; i < levels; i++) {
+      const next = { $ref: `#/components/schemas/M${i + 1}` };
+      schemas[`M${i}`] = { left: next, right: next };
+    }
+    schemas[`M${levels}`] = { leaf: true };
+    const ref = { $ref: '#/components/schemas/M0' };
+    const body: any = { type: 'object', properties: { a: { type: 'object' } } };
+    const media: any = { schema: body };
+    const post: any = {
+      operationId: 'postItem',
+      requestBody: { content: { 'application/json': media } },
+      responses: { 204: { description: 'done' } },
+    };
+    if (place === 'default') body.properties.a.default = ref;
+    if (place === 'example') media.example = { a: ref };
+    if (place === 'x-frontmcp') post['x-frontmcp'] = { cache: ref };
+    if (place === 'tags') post.tags = ['items', ref];
+    return {
+      openapi: '3.0.3',
+      info: { title: 'values', version: '1.0.0' },
+      paths: { '/item': { post, get: { operationId: 'getItem', responses: { 204: { description: 'ok' } } } } },
+      components: { schemas },
+    };
+  };
+
+  it.each<[Place, string]>([
+    ['default', 'Schema exceeds the node budget of 100000 (maxSchemaNodes) after depth truncation'],
+    ['example', 'Schema exceeds the node budget of 100000 (maxSchemaNodes) after depth truncation'],
+    ['x-frontmcp', 'The metadata of POST /item exceeds the node budget of 100000 (maxSchemaNodes)'],
+    ['tags', 'The metadata of POST /item exceeds the node budget of 100000 (maxSchemaNodes)'],
+  ])('fails just the tool whose %s $refs a value expanding past maxSchemaNodes', async (place, message) => {
+    // v2.9.2 returned this tool, sharing the value: serializing it took 2^41 values
+    const generator = await OpenAPIToolGenerator.fromJSON(specWithSharedValue(place, 40));
+    const options = { includeExamples: true, emitMeta: true };
+    await expect(generator.generateTool('/item', 'post', options)).rejects.toThrow(message);
+
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect((await generator.generateTools(options)).map((tool) => tool.name)).toEqual(['getItem']);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('copies a shared value per occurrence within the budget', async () => {
+    const tool = await (await OpenAPIToolGenerator.fromJSON(specWithSharedValue('default', 8))).generateTool(
+      '/item',
+      'post',
+    );
+    const value = (tool.inputSchema.properties!.a as any).default;
+
+    expect(value.left).not.toBe(value.right);
+    expect(JSON.stringify(value).match(/"leaf":true/g)).toHaveLength(256);
+  });
+
+  it('drops the reference back when a value $refs a recursive schema, so the tool stays serializable', async () => {
+    const spec = specWithSharedValue('default', 0);
+    spec.components.schemas.Tree = { type: 'object', properties: { child: { $ref: '#/components/schemas/Tree' } } };
+    spec.paths['/item'].post.requestBody.content['application/json'].schema.properties.a.default = {
+      $ref: '#/components/schemas/Tree',
+    };
+    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'post');
+
+    expect(JSON.stringify((tool.inputSchema.properties!.a as any).default)).toBe(
+      '{"type":"object","properties":{}}',
+    );
+  });
+
+  it('shares no object with the document, so changing one tool cannot change the next', async () => {
+    const spec = specWithSharedValue('x-frontmcp', 0);
+    spec.paths['/item'].post.requestBody.content['application/json'].schema.properties.a.default = { k: 1 };
+    spec.paths['/item'].post.servers = [{ url: 'https://api.example.com', variables: { v: { default: 'a' } } }];
+    const generator = await OpenAPIToolGenerator.fromJSON(spec);
+
+    const first = await generator.generateTool('/item', 'post', { emitMeta: true });
+    (first.inputSchema.properties!.a as any).default.k = 2;
+    (first.metadata.frontmcp as any).cache.leaf = false;
+    (first.metadata.servers![0] as any).variables.v.default = 'changed';
+
+    const second = await generator.generateTool('/item', 'post', { emitMeta: true });
+    expect((second.inputSchema.properties!.a as any).default).toEqual({ k: 1 });
+    expect(second.metadata.frontmcp).toEqual({ cache: { leaf: true } });
+    expect(second.metadata.servers).toEqual([
+      { url: 'https://api.example.com', variables: { v: { default: 'a' } } },
+    ]);
   });
 });

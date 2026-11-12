@@ -333,15 +333,16 @@ describe('meta extension values of any shape (issue #50)', () => {
     }
   });
 
-  it('counts every copied object and array of x-mcp and x-frontmcp meta against maxMetaNodes', () => {
+  it('counts every copied value of x-mcp and x-frontmcp meta against maxMetaNodes', () => {
+    // x-mcp: the meta object, `a`, `b`, and its two numbers; x-frontmcp: the meta object and `c`
     const operation = {
       'x-mcp': { meta: { a: { b: [1, 2] } } },
       'x-frontmcp': { meta: { c: {} } },
     } as any;
 
-    expect(extractExtensionOverrides(operation, { maxMetaNodes: 5 }).meta).toEqual({ a: { b: [1, 2] }, c: {} });
-    expect(() => extractExtensionOverrides(operation, { maxMetaNodes: 4 })).toThrow(
-      'Extension meta exceeds the node budget of 4 (maxSchemaNodes)',
+    expect(extractExtensionOverrides(operation, { maxMetaNodes: 7 }).meta).toEqual({ a: { b: [1, 2] }, c: {} });
+    expect(() => extractExtensionOverrides(operation, { maxMetaNodes: 6 })).toThrow(
+      'Extension meta exceeds the node budget of 6 (maxSchemaNodes)',
     );
   });
 
