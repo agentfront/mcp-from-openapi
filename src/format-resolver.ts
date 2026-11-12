@@ -100,19 +100,37 @@ export const BUILTIN_FORMAT_RESOLVERS: Record<string, FormatResolver> = {
  * A subschema object that appears in several places is resolved once and the
  * result is shared the same way (so a reused `$ref` target costs one pass,
  * not one per occurrence), and circular schema graphs terminate, yielding an
- * equally circular result.
+ * equally circular result. The walk keeps its own stack, so no schema is
+ * nested too deeply to resolve (issue #50).
  */
 export function resolveSchemaFormats(
   schema: JsonSchema,
   resolvers: Record<string, FormatResolver>,
 ): JsonSchema {
-  return resolveNode(schema, resolvers, new Map());
+  const resolved = new Map<object, JsonSchema>();
+  // Pending child slots, depth-first: the container and key the resolved
+  // child is stored at, then the child. Pushed in reverse so they pop in order.
+  const slots: unknown[] = [];
+  const root = enterNode(schema, resolvers, resolved, slots);
+  while (slots.length > 0) {
+    const child = slots.pop() as JsonSchema;
+    const key = slots.pop() as string;
+    const container = slots.pop() as Record<string, unknown>;
+    container[key] = enterNode(child, resolvers, resolved, slots);
+  }
+  return root;
 }
 
-function resolveNode(
+/**
+ * Resolve one node: apply its format resolver to a copy, register the copy
+ * (so a shared or circular reference to the node resolves to it), and queue
+ * its child schemas — whose slots in the copy are filled as they resolve.
+ */
+function enterNode(
   schema: JsonSchema,
   resolvers: Record<string, FormatResolver>,
   resolved: Map<object, JsonSchema>,
+  slots: unknown[],
 ): JsonSchema {
   if (!schema || typeof schema !== 'object') return schema;
   const done = resolved.get(schema);
@@ -127,42 +145,51 @@ function resolveNode(
   }
   // Registered before descending, so a cycle back to this node resolves to it
   resolved.set(schema, result as JsonSchema);
-  const recurse = (value: JsonSchema): JsonSchema => resolveNode(value, resolvers, resolved);
 
-  // Recursively process properties
+  // The children, in the order they resolve: queued last-first below
+  const children: unknown[] = [];
+
   if (result['properties'] && typeof result['properties'] === 'object') {
     const props: Record<string, JsonSchema> = {};
     for (const [key, value] of Object.entries(result['properties'] as Record<string, JsonSchema>)) {
-      props[key] = recurse(value);
+      children.push(props, key, value);
     }
     result['properties'] = props;
   }
 
-  // Recursively process items
   if (result['items']) {
     if (Array.isArray(result['items'])) {
-      result['items'] = (result['items'] as JsonSchema[]).map(recurse);
+      result['items'] = queueMembers(result['items'] as JsonSchema[], children);
     } else {
-      result['items'] = recurse(result['items'] as JsonSchema);
+      children.push(result, 'items', result['items']);
     }
   }
 
-  // Recursively process additionalProperties
   if (result['additionalProperties'] && typeof result['additionalProperties'] === 'object') {
-    result['additionalProperties'] = recurse(result['additionalProperties'] as JsonSchema);
+    children.push(result, 'additionalProperties', result['additionalProperties']);
   }
 
-  // Recursively process composition keywords
   for (const key of ['allOf', 'anyOf', 'oneOf'] as const) {
     if (result[key] && Array.isArray(result[key])) {
-      result[key] = (result[key] as JsonSchema[]).map(recurse);
+      result[key] = queueMembers(result[key] as JsonSchema[], children);
     }
   }
 
-  // Recursively process not
   if (result['not'] && typeof result['not'] === 'object') {
-    result['not'] = recurse(result['not'] as JsonSchema);
+    children.push(result, 'not', result['not']);
   }
 
+  for (let i = children.length - 3; i >= 0; i -= 3) {
+    slots.push(children[i], children[i + 1], children[i + 2]);
+  }
   return result as JsonSchema;
+}
+
+/** A new array for `members`' resolved schemas, with a slot queued for each one (holes stay holes, as with `.map`). */
+function queueMembers(members: JsonSchema[], children: unknown[]): JsonSchema[] {
+  const resolvedMembers: JsonSchema[] = new Array(members.length);
+  for (let i = 0; i < members.length; i++) {
+    if (i in members) children.push(resolvedMembers, i, members[i]);
+  }
+  return resolvedMembers;
 }

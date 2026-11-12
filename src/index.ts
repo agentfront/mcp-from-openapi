@@ -8,7 +8,7 @@ export { Validator } from './validator';
 export { SecurityResolver, createSecurityContext } from './security-resolver';
 export { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 export { inferAnnotationsFromMethod, extractExtensionOverrides, resolveExtensionEnabled } from './annotations';
-export type { ExtensionToolOverrides } from './annotations';
+export type { ExtensionToolOverrides, ExtensionOverridesOptions } from './annotations';
 
 // TypeScript call-signature emission
 export { emitToolTypeScript, toPascalIdentifier } from './type-signature';
@@ -66,7 +66,7 @@ export {
   enforceClosedObjects,
   requireAllProperties,
 } from './client-targets';
-export type { ClientTarget } from './client-targets';
+export type { ClientTarget, ClientTargetOptions } from './client-targets';
 
 // Request building
 export { buildHttpRequest } from './request-builder';

@@ -163,7 +163,8 @@ buildHttpRequest(tool: McpOpenAPITool, input: Record<string, unknown>, options?:
 Apply a client dialect's schema transforms (`'claude' | 'openai' | 'gemini' | 'strict'`). The individual transforms (`inlineLocalRefs`, `ensureArrayItems`, `collapseRootCompositions`, `collapseNestedUnions`, `demoteFormats`, `enforceClosedObjects`) are exported too. See [Client Targets](./client-targets.md).
 
 ```typescript
-applyClientTarget(schema: JsonSchema, target: ClientTarget): JsonSchema
+applyClientTarget(schema: JsonSchema, target: ClientTarget, options?: ClientTargetOptions): JsonSchema
+// ClientTargetOptions = { maxNodes?: number } — a node budget for inlining local $refs (unbounded when omitted)
 ```
 
 ### fromArazzo / parseRuntimeExpression
@@ -238,7 +239,7 @@ toSdkTool<TSchema>(tool: McpOpenAPITool, wrapper?: SdkSchemaWrapper<TSchema>): [
 
 ### inferAnnotationsFromMethod / extractExtensionOverrides / resolveExtensionEnabled
 
-Annotation inference and `x-mcp` extension family parsing. See [Annotations & Extensions](./annotations.md).
+Annotation inference and `x-mcp` extension family parsing. `extractExtensionOverrides(operation, { maxMetaNodes })` throws a `SchemaError` when the extensions' `meta`, with its `$ref`s resolved, copies more than `maxMetaNodes` values (default `100000`) or nests more than 1,000 levels. See [Annotations & Extensions](./annotations.md).
 
 ### createSecurityContext
 

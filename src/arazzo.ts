@@ -973,7 +973,7 @@ function applySchemaPipeline(schema: JsonSchema, options: ArazzoGenerateOptions,
     }
   }
   if (options.target) {
-    resolved = applyClientTarget(resolved, options.target);
+    resolved = applyClientTarget(resolved, options.target, { maxNodes });
   }
   return resolved;
 }

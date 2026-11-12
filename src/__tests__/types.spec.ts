@@ -680,9 +680,10 @@ describe('toJsonSchema shared references and limits (issue #48)', () => {
     return nodes[0];
   }
 
-  it('converts each shared node once: a 40-level chain stays within a 100-visit budget', () => {
-    // One visit per reference (81); converting every occurrence would take 2^41
-    const result: any = toJsonSchema(chain(40), { maxNodes: 100 });
+  it('converts each shared node once: a 40-level chain stays within a 162-node budget', () => {
+    // One visit per reference (81), plus the keywords of each node, converted
+    // once (81); converting every occurrence would take 2^41
+    const result: any = toJsonSchema(chain(40), { maxNodes: 162 });
 
     let node = result;
     for (let i = 0; i < 40; i++) {
@@ -798,14 +799,15 @@ describe('toJsonSchema shared references and limits (issue #48)', () => {
 
   it('confines the cycle analysis to the region within maxDepth, abandoning it past the node budget', () => {
     // `shared` is cut at maxDepth, so its revisit needs the cycle analysis. The
-    // region holds 53 nodes; conversion takes 55 visits by reusing `shared`
-    // (57 without), and the 50 siblings put it all over a 40-node budget
+    // region holds 53 nodes; conversion charges 111 by reusing `shared` (117
+    // without) — a visit per schema plus each converted schema's keywords —
+    // and the 50 siblings put the region over a 40-node budget
     const shared = { type: 'object', properties: { y: { type: 'object', properties: { z: { type: 'string' } } } } };
     const properties: Record<string, unknown> = { a: shared, b: shared };
     for (let i = 0; i < 50; i++) properties[`w${i}`] = { type: 'string' };
     const root = { type: 'object', properties };
 
-    const result: any = toJsonSchema(root, { maxDepth: 2, maxNodes: 55 });
+    const result: any = toJsonSchema(root, { maxDepth: 2, maxNodes: 111 });
     expect(result.properties.a).toBe(result.properties.b);
     expect(result.properties.a.properties.y.properties.z).toEqual({});
     // Past the budget nothing is reused (always correct), and conversion fails on its own budget
@@ -886,12 +888,12 @@ describe('toJsonSchema shared references and limits (issue #48)', () => {
     for (let i = 0; i < 20; i++) properties[`p${i}`] = leaf;
     const wide = { type: 'object', properties };
 
-    // 20 children past maxDepth: 21 visits
-    expect(() => toJsonSchema(wide, { maxDepth: 0, maxNodes: 20 })).toThrow(/node budget of 20 /);
-    expect(toJsonSchema(wide, { maxDepth: 0, maxNodes: 21 }).properties.p0).toEqual({});
-    // 1 conversion and 19 reuses of the shared leaf: 21 visits
-    expect(() => toJsonSchema(wide, { maxNodes: 20 })).toThrow(/node budget of 20 /);
-    expect(toJsonSchema(wide, { maxNodes: 21 }).properties.p19).toEqual({ type: 'string' });
+    // The root with its 2 keywords (3), and 20 children past maxDepth: 23
+    expect(() => toJsonSchema(wide, { maxDepth: 0, maxNodes: 22 })).toThrow(/node budget of 22 /);
+    expect(toJsonSchema(wide, { maxDepth: 0, maxNodes: 23 }).properties.p0).toEqual({});
+    // The root (3), 1 conversion of the shared leaf (2), and 19 reuses: 24
+    expect(() => toJsonSchema(wide, { maxNodes: 23 })).toThrow(/node budget of 23 /);
+    expect(toJsonSchema(wide, { maxNodes: 24 }).properties.p19).toEqual({ type: 'string' });
   });
 
   it('floors fractional limits and treats absent or non-finite ones as unbounded', () => {
@@ -926,5 +928,90 @@ describe('toJsonSchema shared references and limits (issue #48)', () => {
     expect(toJsonSchema({ type: 'array', items: true } as any)).toEqual({ type: 'array', items: {} });
     expect(toJsonSchema(true as any)).toEqual({});
     expect(toJsonSchema({ $ref: '#/components/schemas/Pet' })).toEqual({ $ref: '#/components/schemas/Pet' });
+  });
+});
+
+describe('toJsonSchema on deeply nested schemas (issue #50)', () => {
+  /** Follow `step` from `schema` `times` times, without recursing */
+  const descend = (schema: any, times: number, step: (node: any) => any): any => {
+    let node = schema;
+    for (let i = 0; i < times; i++) node = step(node);
+    return node;
+  };
+
+  it('converts an allOf chain of any length — allOf members do not consume maxDepth', () => {
+    let schema: any = { type: 'object', properties: { id: { type: 'string', nullable: true } } };
+    for (let i = 0; i < 20000; i++) schema = { allOf: [schema], description: `level ${i}` };
+
+    const result = toJsonSchema(schema, { maxDepth: 10 });
+
+    const leaf = descend(result, 20000, (node) => node.allOf[0]);
+    expect(leaf).toEqual({ type: 'object', properties: { id: { type: ['string', 'null'] } } });
+  });
+
+  it('converts a schema of any depth when maxDepth is unbounded, normalizing every level', () => {
+    let schema: any = { type: 'integer', example: 7, xml: { name: 'n' } };
+    for (let i = 0; i < 20000; i++) {
+      schema = { type: 'object', nullable: i % 2 === 1, properties: { next: { type: 'array', items: schema } } };
+    }
+
+    const result = toJsonSchema(schema);
+
+    // Odd levels, the outermost among them, are nullable
+    expect(result.type).toEqual(['object', 'null']);
+    expect(result.properties!.next).toMatchObject({ items: { type: 'object' } });
+    const leaf = descend(result, 20000, (node) => node.properties.next.items);
+    expect(leaf).toEqual({ type: 'integer', examples: [7] });
+  });
+
+  it('still cuts a deep chain at maxDepth and reuses a shared subschema below it', () => {
+    const shared = { type: 'object', properties: { a: { type: 'string' } } };
+    let schema: any = shared;
+    for (let i = 0; i < 20000; i++) schema = { allOf: [schema, shared] };
+
+    // The chain is walked to its end, yet `shared` converts once
+    const result = toJsonSchema(schema, { maxDepth: 1, maxNodes: 60005 });
+
+    const leaf = descend(result, 20000, (node) => node.allOf[0]);
+    expect(leaf).toEqual({ type: 'object', properties: { a: { type: 'string' } } });
+    expect(result.allOf![1]).toBe(leaf);
+  });
+});
+
+describe('toJsonSchema charges every keyword it copies (issue #50)', () => {
+  const { SchemaError } = require('../errors');
+
+  it('charges a converted schema one node per keyword, on top of its visit', () => {
+    const schema = { type: 'string', format: 'uuid', description: 'id' };
+
+    expect(toJsonSchema(schema, { maxNodes: 4 })).toEqual(schema);
+    expect(() => toJsonSchema(schema, { maxNodes: 3 })).toThrow(/node budget of 3 /);
+  });
+
+  it('charges each hole of a schema list, rejecting a long list before walking it', () => {
+    // The root and its keyword (2), the hole (1), the member and its keyword (2)
+    // eslint-disable-next-line no-sparse-arrays
+    const schema = { allOf: [, { type: 'string' }] } as any;
+    expect(() => toJsonSchema(schema, { maxNodes: 5 })).not.toThrow();
+    expect(() => toJsonSchema(schema, { maxNodes: 4 })).toThrow(/node budget of 4 /);
+    expect(() => toJsonSchema({ items: new Array(1e9) } as any, { maxNodes: 1000 })).toThrow(/node budget of 1000 /);
+  });
+
+  it('stops a schema with many keywords that a cycle makes it convert once per path', () => {
+    // Seven levels of four properties, then a schema with 500 keywords that
+    // leads back to the top: everything is on one cycle, so nothing is
+    // reused, and the wide schema is converted once per path — 4^7 times
+    const top: any = { type: 'object', properties: {} };
+    let level = top;
+    for (let i = 1; i < 7; i++) {
+      const next: any = { type: 'object', properties: {} };
+      for (const p of ['a', 'b', 'c', 'd']) level.properties[p] = next;
+      level = next;
+    }
+    const wide: any = { type: 'object', properties: { back: top } };
+    for (let k = 0; k < 500; k++) wide[`x-k${k}`] = k;
+    for (const p of ['a', 'b', 'c', 'd']) level.properties[p] = wide;
+
+    expect(() => toJsonSchema(top, { maxDepth: 10, maxNodes: 100000 })).toThrow(SchemaError);
   });
 });

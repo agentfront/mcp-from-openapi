@@ -1,5 +1,6 @@
 import type { JSONSchema } from 'zod/v4/core';
 import { SchemaError } from './errors';
+import { chargeBudget, copyJsonValue, mapSlots, type CopyBudget } from './json-copy';
 
 /** JSON Schema type from Zod v4 */
 type JsonSchema = JSONSchema.JSONSchema;
@@ -7,7 +8,10 @@ type JsonSchema = JSONSchema.JSONSchema;
 /** Options for {@link SchemaBuilder.truncateDepth} */
 export interface TruncateDepthOptions {
   /**
-   * Maximum number of schema nodes in the truncated tree; a `SchemaError` is
+   * Maximum number of nodes in the truncated tree — every JSON value in it:
+   * schema objects, each of their keywords' values, and everything inside
+   * those (`default`, `examples`, `enum`, `required`, `x-*`, ...), a hole in
+   * an array counting as the `null` it serializes as; a `SchemaError` is
    * thrown as soon as it would contain more. Unbounded when omitted.
    */
   maxNodes?: number;
@@ -49,6 +53,11 @@ export function resolveSchemaLimits(options: { maxSchemaDepth?: number; maxSchem
           ? Infinity
           : Math.max(1, Math.floor(nodes)),
   };
+}
+
+/** An object or array (a JSON container) */
+function isObject(value: unknown): value is object {
+  return value !== null && typeof value === 'object';
 }
 
 /**
@@ -389,16 +398,27 @@ export class SchemaBuilder {
    * (type, description, format, ...) but have their child schemas stripped and
    * a truncation note appended to the description.
    *
-   * The result is a fresh tree: it shares no schema object with the input or
-   * with itself, even when the input reuses one subschema in several places.
-   * `options.maxNodes` caps the size of that tree — a `SchemaError` is thrown
-   * as soon as it would contain more nodes (unbounded when omitted).
+   * The result is a fresh tree: it shares no object with the input or with
+   * itself, even when the input reuses one subschema — or one value, such as a
+   * `default` that a `$ref` resolved — in several places. `options.maxNodes`
+   * caps the size of that tree — a `SchemaError` is thrown as soon as it would
+   * contain more nodes (unbounded when omitted). A value nested more than 1000
+   * levels deep, or circular, cannot be a JSON value: it throws, or (a cycle)
+   * loses the reference back.
    */
   static truncateDepth(schema: JsonSchema, maxDepth: number, options: TruncateDepthOptions = {}): JsonSchema {
-    const { maxNodes } = options;
-    const budget = {
-      count: 0,
-      maxNodes: maxNodes !== undefined && Number.isFinite(maxNodes) ? Math.max(1, Math.floor(maxNodes)) : Infinity,
+    const { maxNodes: limit } = options;
+    const maxNodes = limit !== undefined && Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : Infinity;
+    const budget: CopyBudget = {
+      maxNodes,
+      nodes: 0,
+      exceeded: () => {
+        throw new SchemaError(
+          `Schema exceeds the node budget of ${maxNodes} (maxSchemaNodes) after depth truncation: shared or ` +
+            `recursive $refs expand into more schema nodes than allowed. Lower maxSchemaDepth or raise maxSchemaNodes.`,
+          { maxNodes },
+        );
+      },
     };
     return this.truncateDepthRecursive(schema, 0, normalizeDepthBound(maxDepth), budget);
   }
@@ -430,6 +450,13 @@ export class SchemaBuilder {
   /** Keys whose value is an array of schemas */
   private static readonly TRUNCATE_LIST_KEYS = ['allOf', 'anyOf', 'oneOf', 'prefixItems'] as const;
 
+  /** The keys that hold child schemas, by the shape of their value */
+  private static readonly TRUNCATE_KEY_KINDS = new Map<string, 'map' | 'schema' | 'list'>([
+    ...SchemaBuilder.TRUNCATE_MAP_KEYS.map((key) => [key, 'map'] as const),
+    ...SchemaBuilder.TRUNCATE_SCHEMA_KEYS.map((key) => [key, 'schema'] as const),
+    ...SchemaBuilder.TRUNCATE_LIST_KEYS.map((key) => [key, 'list'] as const),
+  ]);
+
   // Copy-on-walk: never mutates the input and copies every node it keeps, so
   // shared subschemas come out as independent copies. Because the walk is
   // depth-bounded it terminates even on circular schema graphs (which
@@ -439,74 +466,70 @@ export class SchemaBuilder {
     node: JsonSchema,
     depth: number,
     maxDepth: number,
-    budget: { count: number; maxNodes: number },
+    budget: CopyBudget,
   ): JsonSchema {
-    /* c8 ignore next -- guard for boolean/degenerate schemas in recursive traversal */
-    if (!node || typeof node !== 'object') return node;
-
-    if (++budget.count > budget.maxNodes) {
-      throw new SchemaError(
-        `Schema exceeds the node budget of ${budget.maxNodes} (maxSchemaNodes) after depth truncation: shared or ` +
-          `recursive $refs expand into more schema nodes than allowed. Lower maxSchemaDepth or raise maxSchemaNodes.`,
-        { maxNodes: budget.maxNodes },
-      );
+    if (!node || typeof node !== 'object') {
+      // A boolean schema (`properties: { a: true }`) is one value
+      chargeBudget(budget);
+      return node;
+    }
+    // A tuple-of-tuples `items` element is an array, not a schema: a value
+    if (Array.isArray(node)) {
+      return copyJsonValue(node, budget, { label: 'An array in place of a schema' }) as JsonSchema;
     }
 
-    const record = node as Record<string, unknown>;
-    const childKeys = [...this.TRUNCATE_MAP_KEYS, ...this.TRUNCATE_SCHEMA_KEYS, ...this.TRUNCATE_LIST_KEYS];
-    const hasChildren = childKeys.some((key) => {
-      const value = record[key];
-      return value !== null && typeof value === 'object';
-    });
-
-    // (A tuple-of-tuples `items` element is an array, not a schema — kept as is)
-    if (!hasChildren) return Array.isArray(node) ? node : { ...node };
-
+    chargeBudget(budget);
     const copy = { ...node } as JsonSchema;
     const copyRecord = copy as Record<string, unknown>;
+    const kinds = this.TRUNCATE_KEY_KINDS;
 
     if (depth >= maxDepth) {
-      for (const key of childKeys) {
-        const value = copyRecord[key];
-        if (value !== null && typeof value === 'object') {
+      let stripped = false;
+      for (const key of Object.keys(copyRecord)) {
+        if (kinds.has(key) && isObject(copyRecord[key])) {
           delete copyRecord[key];
+          stripped = true;
         }
       }
-      // `required` refers to stripped properties; drop it alongside them
-      delete copyRecord['required'];
-      const note = '[Truncated: nested schema exceeds maxSchemaDepth]';
-      copy.description = copy.description ? `${copy.description} ${note}` : note;
-      return copy;
+      if (stripped) {
+        // `required` refers to stripped properties; drop it alongside them
+        delete copyRecord['required'];
+        const note = '[Truncated: nested schema exceeds maxSchemaDepth]';
+        copy.description = copy.description ? `${copy.description} ${note}` : note;
+      }
     }
 
-    for (const key of this.TRUNCATE_MAP_KEYS) {
+    // Every keyword value counts: a schema with thousands of keywords, shared
+    // by many parents, is copied once per occurrence like any other
+    const childDepth = depth + 1;
+    for (const key of Object.keys(copyRecord)) {
       const value = copyRecord[key];
-      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      if (!isObject(value)) {
+        chargeBudget(budget);
+        continue;
+      }
+      const kind = depth < maxDepth ? kinds.get(key) : undefined;
+      if (kind === 'map' && !Array.isArray(value)) {
+        chargeBudget(budget);
         const mapped: Record<string, JsonSchema> = {};
         for (const [name, sub] of Object.entries(value as Record<string, JsonSchema>)) {
-          mapped[name] = this.truncateDepthRecursive(sub, depth + 1, maxDepth, budget);
+          mapped[name] = this.truncateDepthRecursive(sub, childDepth, maxDepth, budget);
         }
         copyRecord[key] = mapped;
+      } else if (kind === 'schema' && !Array.isArray(value)) {
+        copyRecord[key] = this.truncateDepthRecursive(value as JsonSchema, childDepth, maxDepth, budget);
+      } else if (kind === 'schema' || (kind === 'list' && Array.isArray(value))) {
+        // A list of schemas — or `items` as a tuple array (pre-2020-12 style)
+        copyRecord[key] = mapSlots(value as JsonSchema[], budget, (member) =>
+          this.truncateDepthRecursive(member, childDepth, maxDepth, budget),
+        );
+      } else {
+        // Any other object value (`default`, `examples`, `enum`, `x-*`, ...)
+        // is copied too, so the tree shares nothing — and counted, as a `$ref`
+        // resolved inside a value can expand like a schema can
+        copyRecord[key] = copyJsonValue(value, budget, { label: `The \`${key}\` value of a schema` });
       }
     }
-
-    for (const key of this.TRUNCATE_SCHEMA_KEYS) {
-      const value = copyRecord[key];
-      if (value !== null && typeof value === 'object') {
-        // `items` may be a tuple array (pre-2020-12 style)
-        copyRecord[key] = Array.isArray(value)
-          ? value.map((item) => this.truncateDepthRecursive(item as JsonSchema, depth + 1, maxDepth, budget))
-          : this.truncateDepthRecursive(value as JsonSchema, depth + 1, maxDepth, budget);
-      }
-    }
-
-    for (const key of this.TRUNCATE_LIST_KEYS) {
-      const value = copyRecord[key];
-      if (Array.isArray(value)) {
-        copyRecord[key] = value.map((member) => this.truncateDepthRecursive(member as JsonSchema, depth + 1, maxDepth, budget));
-      }
-    }
-
     return copy;
   }
 
