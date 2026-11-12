@@ -905,6 +905,23 @@ describe('toJsonSchema shared references and limits (issue #48)', () => {
     expect(() => toJsonSchema(deep, { maxNodes: 0.5 })).toThrow(/node budget of 1 /);
   });
 
+  it('keeps holes in sparse schema arrays, as before', () => {
+    // `[, x]` has a hole at index 0
+    const result: any = toJsonSchema({
+      allOf: [, { type: 'string' }],
+      items: [, { type: 'integer' }],
+      prefixItems: [, { type: 'boolean' }],
+    } as any);
+
+    for (const key of ['allOf', 'items', 'prefixItems']) {
+      expect(result[key]).toHaveLength(2);
+      expect(0 in result[key]).toBe(false);
+    }
+    expect(result.allOf[1]).toEqual({ type: 'string' });
+    expect(result.items[1]).toEqual({ type: 'integer' });
+    expect(result.prefixItems[1]).toEqual({ type: 'boolean' });
+  });
+
   it('treats boolean and reference subschemas as leaves', () => {
     expect(toJsonSchema({ type: 'array', items: true } as any)).toEqual({ type: 'array', items: {} });
     expect(toJsonSchema(true as any)).toEqual({});

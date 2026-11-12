@@ -401,10 +401,11 @@ function findCyclicNodes(root: object, maxDepth: number, maxNodes: number): Set<
 }
 
 function convertSchemaInner(schema: SchemaObject, depth: number, state: ConversionState): JsonSchema {
-  const recurse = (value: SchemaObject | ReferenceObject): JsonSchema => convertSchema(value, depth + 1, state);
-  // allOf members merge into their parent (request-body flattening hoists
-  // them), so they don't consume depth — see SchemaConversionOptions.maxDepth
-  const recurseMember = (value: SchemaObject | ReferenceObject): JsonSchema => convertSchema(value, depth, state);
+  // Children are converted with direct calls and plain loops — no closures or
+  // `.map` callbacks — so each nesting level costs two stack frames. allOf
+  // chains are walked to their end (they don't consume depth), so this keeps
+  // the nesting a conversion can handle at least as deep as dereferencing's.
+  const childDepth = depth + 1;
 
   // Handle OpenAPI 3.0 boolean exclusiveMaximum/exclusiveMinimum
   // by converting them to JSON Schema Draft 7 numeric format
@@ -490,31 +491,49 @@ function convertSchemaInner(schema: SchemaObject, depth: number, state: Conversi
   if (result['properties'] && typeof result['properties'] === 'object') {
     const props: Record<string, JsonSchema> = {};
     for (const [key, value] of Object.entries(result['properties'] as Record<string, SchemaObject | ReferenceObject>)) {
-      props[key] = recurse(value);
+      props[key] = convertSchema(value, childDepth, state);
     }
     result['properties'] = props;
   }
 
-  if (result['items']) {
-    if (Array.isArray(result['items'])) {
-      result['items'] = (result['items'] as (SchemaObject | ReferenceObject)[]).map(recurse);
+  const items = result['items'];
+  if (items) {
+    if (Array.isArray(items)) {
+      // Holes stay holes, as with `.map`
+      const converted: JsonSchema[] = new Array(items.length);
+      for (let i = 0; i < items.length; i++) {
+        if (i in items) converted[i] = convertSchema(items[i], childDepth, state);
+      }
+      result['items'] = converted;
     } else {
-      result['items'] = recurse(result['items'] as SchemaObject | ReferenceObject);
+      result['items'] = convertSchema(items as SchemaObject | ReferenceObject, childDepth, state);
     }
   }
 
   if (result['additionalProperties'] && typeof result['additionalProperties'] === 'object') {
-    result['additionalProperties'] = recurse(result['additionalProperties'] as SchemaObject | ReferenceObject);
+    result['additionalProperties'] = convertSchema(
+      result['additionalProperties'] as SchemaObject | ReferenceObject,
+      childDepth,
+      state,
+    );
   }
 
   for (const key of ['allOf', 'anyOf', 'oneOf'] as const) {
-    if (result[key] && Array.isArray(result[key])) {
-      result[key] = (result[key] as (SchemaObject | ReferenceObject)[]).map(key === 'allOf' ? recurseMember : recurse);
+    const members = result[key];
+    if (members && Array.isArray(members)) {
+      // allOf members merge into their parent (request-body flattening hoists
+      // them), so they don't consume depth — see SchemaConversionOptions.maxDepth
+      const memberDepth = key === 'allOf' ? depth : childDepth;
+      const converted: JsonSchema[] = new Array(members.length);
+      for (let i = 0; i < members.length; i++) {
+        if (i in members) converted[i] = convertSchema(members[i], memberDepth, state);
+      }
+      result[key] = converted;
     }
   }
 
   if (result['not']) {
-    result['not'] = recurse(result['not'] as SchemaObject | ReferenceObject);
+    result['not'] = convertSchema(result['not'] as SchemaObject | ReferenceObject, childDepth, state);
   }
 
   // Remaining JSON Schema 2020-12 structural keywords, so nested `nullable`/
@@ -525,7 +544,7 @@ function convertSchemaInner(schema: SchemaObject, depth: number, state: Conversi
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       const mapped: Record<string, JsonSchema> = {};
       for (const [name, sub] of Object.entries(value as Record<string, SchemaObject | ReferenceObject>)) {
-        mapped[name] = recurse(sub);
+        mapped[name] = convertSchema(sub, childDepth, state);
       }
       result[key] = mapped;
     }
@@ -534,12 +553,17 @@ function convertSchemaInner(schema: SchemaObject, depth: number, state: Conversi
   for (const key of SCHEMA_SINGLE_KEYWORDS) {
     const value = result[key];
     if (value && typeof value === 'object') {
-      result[key] = recurse(value as SchemaObject | ReferenceObject);
+      result[key] = convertSchema(value as SchemaObject | ReferenceObject, childDepth, state);
     }
   }
   // Array-of-schemas keyword:
-  if (Array.isArray(result['prefixItems'])) {
-    result['prefixItems'] = (result['prefixItems'] as (SchemaObject | ReferenceObject)[]).map(recurse);
+  const prefixItems = result['prefixItems'];
+  if (Array.isArray(prefixItems)) {
+    const converted: JsonSchema[] = new Array(prefixItems.length);
+    for (let i = 0; i < prefixItems.length; i++) {
+      if (i in prefixItems) converted[i] = convertSchema(prefixItems[i], childDepth, state);
+    }
+    result['prefixItems'] = converted;
   }
 
   if (wrapNullable) {
