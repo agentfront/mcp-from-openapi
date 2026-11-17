@@ -39,11 +39,11 @@ A flat input schema can't have three properties all named `id`. This library det
 ## How It Works
 
 1. **Merge** the path item's parameters with the operation's: an operation-level parameter overrides a path-level one with the same name and location (see [Same Name and Location](#same-name-and-location-the-operation-wins))
-2. **Collect** all parameters from path, query, header, cookie, and request body
+2. **Collect** all parameters from path, query, header, cookie, and request body, leaving out a header parameter the HTTP client, a credential or a proxy sets (`Accept`, `Content-Type`, `Authorization`, `Host`, `X-Forwarded-*`, ...) and one sent where a credential of the operation is sent (each is a `PARAMETER_IGNORED` diagnostic)
 3. **Group** parameters by name
 4. **Detect** names that appear in more than one location
-5. **Rename** conflicted parameters using a naming strategy
-6. **Build** the input schema with unique property names
+5. **Rename** conflicted parameters using a naming strategy; a renamed key another input already uses gets a number (`headerId2`)
+6. **Build** the input schema with unique property names, security inputs last (a scheme whose name is taken gets a number too)
 7. **Create** mapper entries that map renamed keys back to original names and locations
 
 ---

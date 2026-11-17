@@ -591,6 +591,8 @@ const UNPROCESSED_CODES: ReadonlySet<string> = new Set([
   // an operation that fails to build, and a parameter, request body or response left as a reference not read
   'TOOL_GENERATION_FAILED',
   'UNRESOLVED_REFERENCE',
+  // a parameter left out of the tool: a header the client or a credential sets, or where a credential is sent
+  'PARAMETER_IGNORED',
   // `$self` (src/base-uri.ts): ignored, so the references of the document resolve as if it were absent
   // (against the retrieval URI, or the working directory when there is none): not a string or a URI reference
   // without a fragment, a form the library refuses to use as a base, a relative one with nothing to resolve it against

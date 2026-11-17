@@ -337,6 +337,8 @@ export class ParameterResolver {
   ): {
     inputSchema: JsonSchema;
     mapper: ParameterMapper[];
+    /** Parameters left out of the tool, and why */
+    ignored: IgnoredParameter[];
   } {
     const analysis = analyzeParameters(pathParameters ?? [], operation.parameters ?? []);
     if (analysis.querystring) {
@@ -350,12 +352,24 @@ export class ParameterResolver {
 
     const requestBody = operation.requestBody as RequestBodyObject | undefined;
 
+    const credentials = this.securityEntries(securityRequirements ?? [], includeSecurityInInput ?? false);
+    const credentialWireNames = new Set(credentials.map(({ entry }) => wireName(entry.type, entry.key)));
+    const ignored: IgnoredParameter[] = [];
+
     // Collect all parameter names and detect conflicts
     const parametersByName = new Map<string, ParameterInfo[]>();
 
     // Process standard parameters
     for (const { parameter } of analysis.effective) {
       const param = parameter as ParameterObject;
+      if (param.in === 'header' && isIgnoredHeaderParameter(param.name)) {
+        ignored.push({ name: param.name, in: param.in, reason: 'the HTTP client, a credential or a proxy sets this header' });
+        continue;
+      }
+      if (credentialWireNames.has(wireName(param.in, param.name))) {
+        ignored.push({ name: param.name, in: param.in, reason: 'a credential of the operation is sent there' });
+        continue;
+      }
       const info = this.parameterInfo(param);
 
       if (!parametersByName.has(param.name)) {
@@ -387,11 +401,14 @@ export class ParameterResolver {
     const required: string[] = [];
     const mapper: ParameterMapper[] = [];
 
+    // A name used once keeps it; one used in several locations is renamed, never onto another input's key
+    const taken = new Set([...parametersByName].filter(([, params]) => params.length === 1).map(([name]) => name));
     for (const [originalName, params] of parametersByName.entries()) {
-      // A name used once keeps it; one used in several locations is renamed
       params.forEach((param, index) => {
         const inputKey =
-          params.length === 1 ? originalName : this.namingStrategy.conflictResolver(originalName, param.location, index);
+          params.length === 1
+            ? originalName
+            : uniqueKey(this.namingStrategy.conflictResolver(originalName, param.location, index), taken);
 
         properties[inputKey] = this.buildParameterSchema(param);
         if (param.required) {
@@ -402,15 +419,13 @@ export class ParameterResolver {
       });
     }
 
-    // Process security requirements
-    if (securityRequirements && securityRequirements.length > 0) {
-      this.processSecurityRequirements(
-        securityRequirements,
-        properties,
-        required,
-        mapper,
-        includeSecurityInInput ?? false,
-      );
+    for (const { entry, schema } of credentials) {
+      const inputKey = uniqueKey(entry.inputKey, taken);
+      mapper.push({ ...entry, inputKey });
+      if (schema) {
+        properties[inputKey] = schema;
+        required.push(inputKey);
+      }
     }
 
     const inputSchema: JsonSchema = {
@@ -420,7 +435,7 @@ export class ParameterResolver {
       additionalProperties: false,
     };
 
-    return { inputSchema, mapper };
+    return { inputSchema, mapper, ignored };
   }
 
   /**
@@ -627,18 +642,18 @@ export class ParameterResolver {
     return contentType;
   }
 
-  /**
-   * Process security requirements and add to mapper/inputSchema
-   */
-  private processSecurityRequirements(
+  /** The mapper entry of each scheme the requirements name, with its input schema when the scheme is an input */
+  private securityEntries(
     securityRequirements: SecurityRequirement[],
-    properties: Record<string, JsonSchema>,
-    required: string[],
-    mapper: ParameterMapper[],
     includeInInput: boolean | string[],
-  ): void {
+  ): Array<{ entry: ParameterMapper; schema?: JsonSchema }> {
+    const entries: Array<{ entry: ParameterMapper; schema?: JsonSchema }> = [];
+    const seen = new Set<string>();
     for (const secReq of securityRequirements) {
       const { scheme, type, name: apiKeyName, in: apiKeyIn, scopes } = secReq;
+      // A scheme named in several alternative requirements is one credential
+      if (seen.has(scheme)) continue;
+      seen.add(scheme);
 
       // Build security parameter info
       const securityInfo: SecurityParameterInfo = {
@@ -707,27 +722,75 @@ export class ParameterResolver {
         continue;
       }
 
-      // Add to mapper (always)
-      mapper.push({
-        inputKey,
-        type: paramLocation,
-        key: headerKey,
-        required: true,
-        security: securityInfo,
-      });
-
-      // Add to inputSchema: everything when `true`, per-scheme when an array
-      // (all schemes stay in the mapper either way)
+      // In the input schema: every scheme when `true`, the listed ones when an array; always in the mapper
       const schemeInInput = includeInInput === true || (Array.isArray(includeInInput) && includeInInput.includes(scheme));
-      if (schemeInInput) {
-        if (paramLocation === 'header') {
-          (schema as any)['x-mcp-header'] = headerKey;
-        }
-        properties[inputKey] = schema;
-        required.push(inputKey);
+      if (schemeInInput && paramLocation === 'header') {
+        (schema as any)['x-mcp-header'] = headerKey;
       }
+      entries.push({
+        entry: { inputKey, type: paramLocation, key: headerKey, required: true, security: securityInfo },
+        ...(schemeInInput && { schema }),
+      });
     }
+    return entries;
   }
+}
+
+/** A parameter `resolve` leaves out of the tool */
+export interface IgnoredParameter {
+  /** The parameter's `name` */
+  name: string;
+  /** The parameter's `in` */
+  in: string;
+  /** Why it is not an input */
+  reason: string;
+}
+
+/**
+ * Header parameters a tool never takes: those OpenAPI says to ignore (`Accept`, `Content-Type`, `Authorization`)
+ * and those that frame, route or forward a request, which the HTTP client, a credential or a proxy sets
+ */
+const IGNORED_HEADER_PARAMETERS: ReadonlySet<string> = new Set([
+  'accept',
+  'content-type',
+  'authorization',
+  'cookie',
+  'host',
+  'content-length',
+  'transfer-encoding',
+  'connection',
+  'keep-alive',
+  'upgrade',
+  'te',
+  'trailer',
+  'expect',
+  'proxy-authorization',
+  'proxy-authenticate',
+  'proxy-connection',
+  'forwarded',
+  'x-original-url',
+  'x-rewrite-url',
+  'x-http-method-override',
+  'x-http-method',
+  'x-method-override',
+]);
+
+function isIgnoredHeaderParameter(name: string): boolean {
+  const lowerCaseName = name.toLowerCase();
+  return IGNORED_HEADER_PARAMETERS.has(lowerCaseName) || lowerCaseName.startsWith('x-forwarded-');
+}
+
+/** Where a value goes on the wire; header names compare in any case */
+function wireName(location: string, name: string): string {
+  return `${location}:${location === 'header' ? name.toLowerCase() : name}`;
+}
+
+/** `base`, or `base` with the first number from 2 that makes it a key not in `taken`; the key is then taken */
+function uniqueKey(base: string, taken: Set<string>): string {
+  let key = base;
+  for (let suffix = 2; taken.has(key); suffix++) key = `${base}${suffix}`;
+  taken.add(key);
+  return key;
 }
 
 /**

@@ -114,6 +114,7 @@ import {
   findRelativeReference,
   findSelfReferences,
   fragmentPointerTokens,
+  normalizeEscapes,
   parseDocumentUri,
   pointerTargetProblem,
   redactUserInfo,
@@ -869,8 +870,10 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`${pattern}$`);
 }
 
+/** A path key is matched as a client sends it: `%61` is `a`, and an escape of another character upper-cased */
 function matchesAnyGlob(path: string, globs: string[]): boolean {
-  return globs.some((glob) => globToRegExp(glob).test(path));
+  const canonicalPath = normalizeEscapes(path);
+  return globs.some((glob) => globToRegExp(glob).test(canonicalPath));
 }
 
 /**
@@ -2753,8 +2756,18 @@ export class OpenAPIToolGenerator {
         }).resolve(resolvedOperation, pathParameters, securityRequirements, options.includeSecurityInInput),
       (resolved) => resolved.inputSchema,
     );
-    const { inputSchema, mapper } = input.converted;
+    const { inputSchema, mapper, ignored } = input.converted;
     for (const diagnostic of this.requiredInputDiagnostics(pathStr, entry, inputSchema)) this.addDiagnostic(diagnostic);
+    for (const parameter of ignored) {
+      this.addDiagnostic({
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.PARAMETER_IGNORED,
+        message:
+          `${operationLabel(entry.method, pathStr)}: the ${parameter.in} parameter ${describeValue(parameter.name)} ` +
+          `is not an input of the tool: ${parameter.reason}`,
+        path: operationPointer(pathStr, entry),
+      });
+    }
 
     // Build response schema, and the streamed response's item schema (OpenAPI
     // 3.2 `itemSchema`), which is reported in metadata, never as outputSchema
@@ -3049,17 +3062,13 @@ export class OpenAPIToolGenerator {
       }
     }
 
-    // Read-only safety switch: effective annotations must say read-only.
-    // Uses inference + extension overrides even when inferAnnotations is off —
-    // the filter's semantics must not depend on output formatting options.
-    if (options.readOnlyOnly) {
-      const effective = {
-        ...inferAnnotationsFromMethod(method),
-        ...extractExtensionSettings(operation).annotations,
-      };
-      if (effective.readOnlyHint !== true) {
-        return false;
-      }
+    // Read-only safety switch: the method must be safe, and an extension can only take an operation out
+    if (
+      options.readOnlyOnly &&
+      (inferAnnotationsFromMethod(method).readOnlyHint !== true ||
+        extractExtensionSettings(operation).annotations?.readOnlyHint === false)
+    ) {
+      return false;
     }
 
     // Custom filter

@@ -99,7 +99,7 @@ export interface DocumentBase {
 }
 
 /** `%7e` becomes `~` (unreserved, RFC 3986 section 6.2.2.2) and `%2f` becomes `%2F` (section 6.2.2.1). */
-function normalizeEscapes(text: string): string {
+export function normalizeEscapes(text: string): string {
   return text.replace(/%[0-9A-Fa-f]{2}/g, (escape) => {
     const character = String.fromCharCode(parseInt(escape.slice(1), 16));
     return /^[A-Za-z0-9\-._~]$/.test(character) ? character : escape.toUpperCase();

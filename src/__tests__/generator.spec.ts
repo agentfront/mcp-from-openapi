@@ -3728,7 +3728,7 @@ describe('Curation filtering (Tier 2)', () => {
     expect(await namesFor({ readOnlyOnly: true })).toEqual(['getSettings', 'health', 'listUsers', 'getUser']);
   });
 
-  it('readOnlyOnly honors extension overrides in both directions', async () => {
+  it('readOnlyOnly lets an extension take a safe method out, never put an unsafe one in', async () => {
     const spec: any = {
       openapi: '3.0.0',
       info: { title: 'RO API', version: '1.0.0' },
@@ -3749,12 +3749,13 @@ describe('Curation filtering (Tier 2)', () => {
             responses: { '200': { description: 'OK' } },
           },
         },
+        '/status': { get: { operationId: 'status', responses: { '200': { description: 'OK' } } } },
       },
     };
     const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
     const names = (await generator.generateTools({ readOnlyOnly: true })).map((t) => t.name);
 
-    expect(names).toEqual(['searchReports']);
+    expect(names).toEqual(['status']);
   });
 
   it('combines filters (intersection semantics)', async () => {
@@ -7641,7 +7642,7 @@ describe('OpenAPI 3.2 parameters and responses: review fixes (issue #55)', () =>
         ),
       );
       const [tool] = await generator.generateTools();
-      expect(tool.mapper.map((m) => m.inputKey)).toEqual(['q', 'key', 'hdr', 'key', 'other']);
+      expect(tool.mapper.map((m) => m.inputKey)).toEqual(['q', 'key', 'hdr', 'other']);
       expect(generator.getDiagnostics()).toEqual([
         {
           severity: 'warning',
