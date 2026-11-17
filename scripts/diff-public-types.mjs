@@ -30,9 +30,13 @@
  *   instance type) and its value meaning `typeof Name` (function, const, enum object, class constructor
  *   with its statics). Namespace exports are walked, so their members are facets `NS.Member`.
  * - For each facet present on both sides, the two types are walked together: properties, index
- *   signatures (`.*`), array and tuple elements (`[]`, `[i]`), parameters (`(name)`), return types
- *   (`()`), construct signatures (`.new(name)`), overloads (`#2(name)`), awaited values (`.await`) and
- *   the arguments of other shared generic types (`<i>`).
+ *   signatures (`.*` for a string key, else `[number]`, `[symbol]`, `` [`x-${string}`] ``, matched by key
+ *   type), array and tuple elements (`[]`, `[i]`), parameters (`(name)`), return types (`()`), construct
+ *   signatures (`.new(name)`), overloads (`#2(name)`), awaited values (`.await`) and the arguments of
+ *   other shared generic types (`<i>`). Parameters are compared argument by argument: a rest tuple is
+ *   expanded into its elements (`(label)`, or `(args_0)` for an unlabeled one, as the compiler names
+ *   it), and a rest array, a tuple's trailing rest element included, is one position `(...name)` typed
+ *   as its element, which also meets every further argument of the other side.
  * - A position reports one of these kinds:
  *     not-assignable           the old type there is not assignable to the new one (direction
  *                              baseline-to-candidate) or the new to the old (candidate-to-baseline);
@@ -40,13 +44,19 @@
  *                              of the position itself, so at a parameter it is the parameter's types
  *     property-removed         a property of the old type is gone, optional or not
  *     property-added-required  the new type requires a property the old one did not have
+ *     index-signature-removed  an index signature of the old type has no signature with the same key type
+ *                              in the new one (`bag['key']` no longer compiles)
+ *     index-signature-added    the new type has an index signature whose key type the old one had none for
  *     became-any, no-longer-any            one side is `any` and the other is not
  *     became-readonly, no-longer-readonly  a property, index signature, array or tuple changed
+ *     became-rest, no-longer-rest          a parameter the baseline requires is a rest parameter in the candidate
+ *                                          (calls need fewer arguments), or the other way round (calls need more)
  *     export-removed           the facet is gone (an added facet is listed and never fails)
  *     truncated                an export with more than 400 positions keeps the first 400, or a walk
  *                              inside one named type stopped after 20000 steps
- *   The last four see what assignability cannot: an optional property removed, `any` coming or going,
- *   readonly changes.
+ *   The structural kinds see what assignability cannot: an optional property removed, an index signature
+ *   of type `any` removed or added (any object is assignable to `{ [key: string]: any }`, and back),
+ *   `any` coming or going, readonly changes, a rest parameter against a required one.
  * - A position is named from the nearest enclosing type declared in the candidate (an alias, generic
  *   ones included, an interface or a class): its exported name (`OAS30.SchemaObject.type`), else its
  *   declared name (`SpecMap.*`). A change inside a shared type is therefore one position, listed with
@@ -69,18 +79,32 @@
  *   with the candidate's dependencies, its peer dependencies at the repo's dev ranges and Node's types,
  *   and gets a copy of the candidate's declarations as `node_modules/candidate`. Whatever the old
  *   declarations import arrives as a dependency of that old release; this repository never names it.
- *   Any type error in either package's declarations is an environment error, so an unresolved import
- *   can never turn a type into a silent `any`.
+ *   Any type error in either package's declarations is an environment error. So is, in every other
+ *   declaration file of the program except the compiler's default libs (dependencies of either package,
+ *   Node's types), a syntax error or an error that leaves a type silently `any` (UNRESOLVED below: a
+ *   name, module, file, export, global, namespace or type definition that cannot be found, a module
+ *   without declarations, a default import of a module with no default export, a name used with the
+ *   wrong meaning, a generic type with the wrong number of type arguments, a circular alias, a missing
+ *   property in a `typeof` query). A list of codes cannot be complete, so the result itself is checked
+ *   too: every type of every shared export, both sides, is walked through its members, parameters,
+ *   returns, type arguments and constituents, and one that resolves to the compiler's error type (the
+ *   intrinsic `any` named "error") is an environment error that names the export and the path. An
+ *   unresolved import therefore never turns a type into a silent `any`, in this package or in a
+ *   dependency type it re-exports; other errors in a dependency's declarations that no export reaches
+ *   say nothing about this package's types and are ignored.
  *
  * Known limits: union members are paired by similarity, so a position inside a union may name a
- * different member than a reader would, and the structural checks (removed optional property, any,
- * readonly) see only members paired as mutual closest matches; parameters are positions like any other,
- * even where method bivariance keeps the export assignable; generic signatures, overload sets of
- * different sizes, a tuple's length and a list against an object are compared as a whole; a property
- * keyed by a well-known symbol is not a position of its own; private members and the protected modifier
- * are not compared; a generic type is checked at one instantiation only; readonly is read from
- * declarations, so readonly added through a mapped type (`Readonly<T>`) is seen only by assignability;
- * results hold for one compiler configuration (strict, NodeNext, lib es2022).
+ * different member than a reader would, and the structural checks (removed optional property, index
+ * signature, any, readonly) see only members paired as mutual closest matches; parameters are positions
+ * like any other, even where method bivariance keeps the export assignable; generic signatures, overload
+ * sets of different sizes, a tuple's length, a list against an object, and the arguments from a rest
+ * parameter onward when it is neither an array nor a tuple whose only rest element is its last (a union
+ * of tuples, a variadic element) are compared as a whole; a property keyed by a well-known symbol is not
+ * a position of its own; private members and the protected modifier are not compared; a generic type is
+ * checked at one instantiation only; readonly is read from declarations, so readonly added through a
+ * mapped type (`Readonly<T>`) is seen only by assignability; a dependency's declarations are trusted
+ * apart from syntax and UNRESOLVED errors, so an `any` written there is compared as written; results
+ * hold for one compiler configuration (strict, NodeNext, lib es2022).
  */
 
 import { execFileSync } from 'node:child_process';
@@ -99,10 +123,14 @@ const KINDS = [
   'not-assignable',
   'property-removed',
   'property-added-required',
+  'index-signature-removed',
+  'index-signature-added',
   'became-any',
   'no-longer-any',
   'became-readonly',
   'no-longer-readonly',
+  'became-rest',
+  'no-longer-rest',
   'export-removed',
   'truncated',
 ];
@@ -117,6 +145,25 @@ const BASELINE_PATTERN = /^(?:\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?|[A-Za-z][A-Za-z0
 // Namespace import names in the probe; unlikely to be shadowed by a type parameter.
 const NS = { baseline: '__baseline', candidate: '__candidate' };
 const DIAGNOSTIC_LINES = 4;
+// Errors that leave a type silently `any` (TypeScript 5.9 codes); outside the two packages, only these
+// (and syntax errors) are environment errors.
+const UNRESOLVED = new Set([
+  // a name that cannot be found
+  2304, 2552, 2580, 2581, 2582, 2583, 2584, 2591, 2592, 2593, 2662, 2663, 2867, 2868,
+  // a module or file that cannot be found, is not a module, or has no declarations
+  2307, 2306, 2732, 2792, 7016,
+  // a missing export or member
+  2305, 2459, 2460, 2614, 2694, 2724,
+  // a missing global, namespace, type definition or lib
+  2318, 2468, 2503, 2688, 2726, 2727, 2833,
+  // a default import of a module with no default export
+  1192, 1259, 2613,
+  // a name used with the wrong meaning
+  2708, 2709, 2749, 2693, 2702,
+  // a type that cannot be formed: wrong number of type arguments, a type that is not generic, a missing property
+  // (`typeof x.nope`), a circular alias or base type, an instantiation that is too deep
+  2314, 2315, 2339, 2456, 2310, 2506, 2589,
+]);
 
 class UsageError extends Error {}
 class EnvironmentError extends Error {}
@@ -354,6 +401,7 @@ function install(dir, baselineSpec, candidateDir, repoPkg) {
 }
 
 function compare(ts, dir) {
+  assertErrorTypeIsDetectable(ts);
   const options = {
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.NodeNext,
@@ -383,13 +431,18 @@ function compare(ts, dir) {
     return parsed.get(file);
   };
 
-  // Program 1: enumerate both entrypoints.
+  // Program 1: enumerate both entrypoints. Every declaration file but the default libs is checked: any
+  // error in the two packages, and a syntax error or an UNRESOLVED one anywhere else (a re-exported
+  // dependency type would otherwise compare as `any` against `any`).
   let program = ts.createProgram({ rootNames: [probeFile], options, host });
   const broken = [
     ...program.getOptionsDiagnostics(),
-    ...program
-      .getSourceFiles()
-      .flatMap((sf) => (isPackageFile(sf.fileName) ? program.getSemanticDiagnostics(sf) : [])),
+    ...program.getSourceFiles().flatMap((sf) => {
+      if (!sf.isDeclarationFile || program.isSourceFileDefaultLibrary(sf)) return [];
+      const syntax = program.getSyntacticDiagnostics(sf);
+      const semantic = program.getSemanticDiagnostics(sf);
+      return [...syntax, ...(isPackageFile(sf.fileName) ? semantic : semantic.filter((d) => UNRESOLVED.has(d.code)))];
+    }),
     ...program.getGlobalDiagnostics(),
   ];
   if (broken.length) {
@@ -441,6 +494,19 @@ function compare(ts, dir) {
     probe.statements.filter(ts.isTypeAliasDeclaration).map((s) => [s.name.text, checker.getTypeFromTypeNode(s.type)]),
   );
 
+  // Whatever the code list missed: a type that resolved to the compiler's error type compares as `any`, and the same
+  // error type on both sides is not even a difference.
+  rejectErrorTypes(
+    ts,
+    program,
+    checker,
+    common.flatMap((id, i) => [
+      ['baseline', id, types.get(`__b${i}`)],
+      ['candidate', id, types.get(`__c${i}`)],
+    ]),
+    dir,
+  );
+
   const walker = createWalker(ts, checker, probe, dir, exportNames);
   const tuples = [...baseline.keys()]
     .filter((id) => !candidate.has(id))
@@ -456,6 +522,91 @@ function compare(ts, dir) {
   });
   const added = [...candidate.keys()].filter((id) => !baseline.has(id)).sort();
   return { compared: common.length, added, tuples };
+}
+
+/** The compiler's error type: an intrinsic `any` named "error" (or "unresolved"); not part of its typings, but a stable intrinsic. */
+function isErrorType(ts, t) {
+  return (t.flags & ts.TypeFlags.Any) !== 0 && (t.intrinsicName === 'error' || t.intrinsicName === 'unresolved');
+}
+
+/**
+ * A canary: a type that cannot be resolved must be recognized as the error type by this TypeScript, else the check below
+ * would silently find nothing (a future compiler that renames the intrinsic).
+ */
+function assertErrorTypeIsDetectable(ts) {
+  const file = '/__canary__/canary.ts';
+  const host = ts.createCompilerHost({ noLib: true });
+  const getSourceFile = host.getSourceFile;
+  host.getSourceFile = (name, languageVersion, ...rest) =>
+    name === file ? ts.createSourceFile(name, 'type Canary = DoesNotExist;', languageVersion) : getSourceFile.call(host, name, languageVersion, ...rest);
+  const program = ts.createProgram({ rootNames: [file], options: { noLib: true, noEmit: true }, host });
+  const checker = program.getTypeChecker();
+  const alias = program.getSourceFile(file).statements.find(ts.isTypeAliasDeclaration);
+  if (!isErrorType(ts, checker.getTypeFromTypeNode(alias.type))) {
+    throw new EnvironmentError(
+      `this TypeScript (${ts.version}) no longer exposes the unresolved type as an intrinsic "error" any: update isErrorType in diff-public-types.mjs`,
+    );
+  }
+}
+
+/**
+ * Throws an EnvironmentError naming every (side, export, path) at which a type of a shared export is the compiler's error
+ * type, which the comparison would treat as `any`. `roots` is [side, facet id, type]. Types are walked once each through
+ * their properties, signatures (parameters, return), index signatures, type arguments (generic references and aliases) and
+ * union or intersection members; the members of a type declared in a default lib or in Node's typings are not entered
+ * (their type arguments are), and the walk stops after NODE_LIMIT types.
+ */
+function rejectErrorTypes(ts, program, checker, roots, dir) {
+  const NODE_LIMIT = 2_000_000;
+  const seen = new Set();
+  const hits = [];
+  const external = (t) => {
+    const file = (t.aliasSymbol ?? t.symbol)?.declarations?.[0]?.getSourceFile();
+    return file !== undefined && (program.isSourceFileDefaultLibrary(file) || file.fileName.includes('/node_modules/@types/node/'));
+  };
+  let visited = 0;
+  for (const [side, id, root] of roots) {
+    const stack = [[root, id]];
+    while (stack.length) {
+      const [t, at] = stack.pop();
+      // The error type is one object for the whole program: every place that reaches it is a hit of its own.
+      if (isErrorType(ts, t)) {
+        hits.push(`${side}: ${readable(at, dir)}`);
+        continue;
+      }
+      if (seen.has(t)) continue;
+      seen.add(t);
+      if (++visited > NODE_LIMIT) throw new EnvironmentError(`more than ${NODE_LIMIT} types are reachable from the exports; the error-type check cannot finish`);
+      const push = (type, segment) => type && stack.push([type, at + segment]);
+      for (const [i, arg] of (t.aliasTypeArguments ?? []).entries()) push(arg, `<${i}>`);
+      if (t.flags & ts.TypeFlags.UnionOrIntersection) {
+        for (const member of t.types) push(member, t.flags & ts.TypeFlags.Union ? '|' : '&');
+        continue;
+      }
+      if (!(t.flags & ts.TypeFlags.Object)) continue;
+      if (t.objectFlags & ts.ObjectFlags.Reference) for (const [i, arg] of checker.getTypeArguments(t).entries()) push(arg, `<${i}>`);
+      if (external(t)) continue;
+      for (const p of checker.getPropertiesOfType(t)) if (!p.name.startsWith('__@')) push(checker.getTypeOfSymbol(p), `.${p.name}`);
+      for (const info of checker.getIndexInfosOfType(t)) push(info.type, '.*');
+      for (const [kind, prefix] of [
+        [ts.SignatureKind.Call, ''],
+        [ts.SignatureKind.Construct, '.new'],
+      ]) {
+        for (const sig of checker.getSignaturesOfType(t, kind)) {
+          for (const param of sig.parameters) push(checker.getTypeOfSymbol(param), `${prefix}(${param.name})`);
+          push(checker.getReturnTypeOfSignature(sig), `${prefix}()`);
+        }
+      }
+    }
+  }
+  if (hits.length) {
+    const shown = hits.slice(0, 10).map((h) => `  ${h}`);
+    const more = hits.length > 10 ? [`  ... ${hits.length - 10} more`] : [];
+    throw new EnvironmentError(
+      `${hits.length} type(s) resolve to the compiler's error type (an unresolved or invalid type that silently behaves as \`any\`; ` +
+        `look for an error in a dependency's declarations):\n${[...shown, ...more].join('\n')}`,
+    );
+  }
 }
 
 /**
@@ -514,6 +665,45 @@ function createWalker(ts, checker, probe, dir, exportNames) {
     return declaration && (exportNames.get(declaration) ?? symbol.name);
   };
   const propertySegment = (name) => (/^[A-Za-z_$][\w$]*$/.test(name) ? `.${name}` : `[${JSON.stringify(name)}]`);
+
+  /**
+   * The argument positions of a signature: `{ name, type, required }`, typed as the compiler types the
+   * argument there (an optional one includes `undefined`). A rest tuple is expanded into its elements,
+   * named by their labels, else `args_0`, `args_1`, ... as the compiler names them. A rest array, a
+   * tuple's trailing rest element included, is one position `...name` typed as its element, marked
+   * `spread`. Any other rest (a union of tuples, a tuple with a variadic or a leading rest element) is
+   * one position `...name` marked `whole`, with the rest type itself.
+   */
+  const argumentsOf = (sig) => {
+    const list = [];
+    sig.parameters.forEach((p, i) => {
+      const d = p.valueDeclaration && ts.isParameter(p.valueDeclaration) ? p.valueDeclaration : undefined;
+      if (!d?.dotDotDotToken) {
+        const required = !(d && checker.isOptionalParameter(d));
+        list.push({ name: p.name, type: checker.getParameterType(sig, i), required });
+        return;
+      }
+      const rest = checker.getTypeOfSymbol(p);
+      if (checker.isArrayType(rest)) {
+        list.push({ name: `...${p.name}`, type: checker.getParameterType(sig, i), spread: true });
+        return;
+      }
+      const flags = checker.isTupleType(rest) ? rest.target.elementFlags : undefined;
+      const variable = (f, k) => f & ts.ElementFlags.Variadic || (f & ts.ElementFlags.Rest && k !== flags.length - 1);
+      if (!flags || flags.some(variable)) {
+        list.push({ name: `...${p.name}`, type: rest, whole: true });
+        return;
+      }
+      flags.forEach((f, k) => {
+        const label = rest.target.labeledElementDeclarations?.[k]?.name;
+        const name = label && ts.isIdentifier(label) ? label.text : `${p.name}_${k}`;
+        const type = checker.getParameterType(sig, i + k);
+        if (f & ts.ElementFlags.Rest) list.push({ name: `...${name}`, type, spread: true });
+        else list.push({ name, type, required: (f & ts.ElementFlags.Required) !== 0 });
+      });
+    });
+    return list;
+  };
 
   const owner = (b, c, directions, name) => {
     const key = `${pairKey(b, c)}:${directions.join()}`;
@@ -702,13 +892,26 @@ function createWalker(ts, checker, probe, dir, exportNames) {
       add('property-added-required', undefined, rel + propertySegment(name), detail);
       explained.add(BC);
     }
-    const cIndexes = checker.getIndexInfosOfType(c);
-    for (const bi of checker.getIndexInfosOfType(b)) {
-      const ci = cIndexes.find((i) => i.keyType === bi.keyType);
-      if (!ci) continue;
-      const at = bi.keyType.flags & ts.TypeFlags.String ? `${rel}.*` : `${rel}[${text(bi.keyType)}]`;
+    // Index signatures, matched by key type: string, number, symbol or a template literal pattern.
+    const indexes = (t) => new Map(checker.getIndexInfosOfType(t).map((info) => [text(info.keyType), info]));
+    const indexSegment = (info) =>
+      info.keyType.flags & ts.TypeFlags.String ? `${rel}.*` : `${rel}[${text(info.keyType)}]`;
+    const [bIndexes, cIndexes] = [indexes(b), indexes(c)];
+    for (const [key, bi] of bIndexes) {
+      const ci = cIndexes.get(key);
+      const at = indexSegment(bi);
+      if (!ci) {
+        add('index-signature-removed', undefined, at, `baseline: ${text(bi.type)}`);
+        if (!isAny(bi.type)) explained.add(CB); // any object is assignable to an index signature of `any`
+        continue;
+      }
       readonlyChange(bi.isReadonly, ci.isReadonly, at);
       child(bi.type, ci.type, at);
+    }
+    for (const [key, ci] of cIndexes) {
+      if (bIndexes.has(key)) continue;
+      add('index-signature-added', undefined, indexSegment(ci), `candidate: ${text(ci.type)}`);
+      if (!isAny(ci.type)) explained.add(BC);
     }
     for (const [kind, prefix] of [
       [ts.SignatureKind.Call, ''],
@@ -720,15 +923,24 @@ function createWalker(ts, checker, probe, dir, exportNames) {
         const cSig = cs[k];
         if (bSig.typeParameters?.length || cSig.typeParameters?.length) return; // compared as a whole
         const tag = prefix + (bs.length > 1 ? `#${k + 1}` : '');
-        const required = (p) => {
-          const d = p.valueDeclaration;
-          return !(d && ts.isParameter(d) && (d.dotDotDotToken || checker.isOptionalParameter(d)));
-        };
-        for (let i = 0; i < Math.max(bSig.parameters.length, cSig.parameters.length); i++) {
-          const [bp, cp] = [bSig.parameters[i], cSig.parameters[i]];
+        const [bArgs, cArgs] = [argumentsOf(bSig), argumentsOf(cSig)];
+        // A rest array takes every further argument, so it meets the other side's remaining positions.
+        const spread = (list) => (list.at(-1)?.spread ? list.at(-1) : undefined);
+        for (let i = 0; i < Math.max(bArgs.length, cArgs.length); i++) {
+          const [bp, cp] = [bArgs[i] ?? spread(bArgs), cArgs[i] ?? spread(cArgs)];
           const at = `${rel}${tag}(${(cp ?? bp).name})`;
-          if (bp && cp) child(checker.getParameterType(bSig, i), checker.getParameterType(cSig, i), at, true);
-          else if (required(bp ?? cp)) {
+          if (bp?.whole || cp?.whole) {
+            if (bp?.whole && cp?.whole) child(bp.type, cp.type, at, true);
+            break; // the arguments from here on are compared as a whole
+          }
+          if (bp && cp) {
+            child(bp.type, cp.type, at, true);
+            // A rest parameter takes any number of arguments, a required one needs one: assignability sees no
+            // difference (a function with more required parameters is assignable to one with a rest parameter),
+            // a caller does.
+            if (bp.spread && cp.required) add('no-longer-rest', undefined, at, `baseline: ${bp.name}; candidate: required ${cp.name}`);
+            else if (cp.spread && bp.required) add('became-rest', undefined, at, `baseline: required ${bp.name}; candidate: ${cp.name}`);
+          } else if ((bp ?? cp).required) {
             const direction = bp ? BC : CB; // a required parameter only one side has
             add('not-assignable', direction, at, `required parameter only in the ${bp ? 'baseline' : 'candidate'}`);
             explained.add(direction);
