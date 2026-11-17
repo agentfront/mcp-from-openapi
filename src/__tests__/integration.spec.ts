@@ -912,3 +912,86 @@ describe('Integration: OpenAPI 3.2 documents (issue #55)', () => {
     expect(lib.getOperation(pathItem, 'link')).toBeUndefined();
   });
 });
+
+describe('Integration: a multi-file OpenAPI 3.2 description (issue #55)', () => {
+  const entry = (selfRef: string, extra: Record<string, unknown> = {}) => ({
+    openapi: '3.2.0',
+    info: { title: 'Pets', version: '1' },
+    servers: [{ url: 'https://api.example.com' }],
+    // A scheme named by URI: this document, relative to its own location
+    security: [{ './openapi.yaml#/components/securitySchemes/token': [] }],
+    paths: {
+      '/pets/{id}': { $ref: 'paths/pet.yaml' },
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          // A reference to this document by its own URI stays local
+          requestBody: { content: { 'application/json': { schema: { $ref: selfRef } } } },
+          responses: { 201: { description: 'created' } },
+        },
+      },
+    },
+    components: {
+      schemas: { Pet: { $ref: 'schemas/pet.yaml' } },
+      securitySchemes: { token: { type: 'http', scheme: 'bearer' } },
+    },
+    ...extra,
+  });
+  const others = {
+    'paths/pet.yaml': {
+      get: {
+        operationId: 'getPet',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: {
+            description: 'ok',
+            // Back to the entry document, relative to this file
+            content: { 'application/json': { schema: { $ref: '../openapi.yaml#/components/schemas/Pet' } } },
+          },
+        },
+      },
+    },
+    'schemas/pet.yaml': { type: 'object', properties: { name: { type: 'string', maxLength: 42 } } },
+  };
+
+  it('loads it from files next to each other, whatever the working directory, reading nothing else', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-from-openapi-integration-'));
+    try {
+      const { pathToFileURL } = await import('url');
+      const entryPath = path.join(dir, 'openapi.yaml');
+      const write = (name: string, content: unknown) => {
+        fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+        fs.writeFileSync(path.join(dir, name), yaml.stringify(content));
+      };
+      for (const [name, content] of Object.entries(others)) write(name, content);
+      write('openapi.yaml', entry(`${pathToFileURL(entryPath).href}#/components/schemas/Pet`));
+
+      const generator = await OpenAPIToolGenerator.fromFile(entryPath, { refResolution: { allowedProtocols: ['file'] } });
+      expect(await generator.validate()).toEqual({ valid: true });
+      const tools = await generator.generateTools();
+      expect(tools.map((t) => t.name)).toEqual(['createPet', 'getPet']);
+      for (const tool of tools) expect(tool.metadata.security?.map((s) => s.scheme)).toEqual(['token']);
+      expect(JSON.stringify(tools[0].inputSchema)).toContain('"maxLength":42');
+      expect(JSON.stringify(tools[1].outputSchema)).toContain('"maxLength":42');
+      expect(generator.getDiagnostics()).toEqual([]);
+
+      // With $self naming the published location, the document is known by that URI too (a $ref to
+      // it stays local), but its relative references are still read next to the file: nothing is
+      // fetched, and only `file` is needed
+      write(
+        'openapi.yaml',
+        entry('https://specs.example.com/pets/openapi.yaml#/components/schemas/Pet', {
+          $self: 'https://specs.example.com/pets/openapi.yaml',
+        }),
+      );
+      const published = await OpenAPIToolGenerator.fromFile(entryPath, { refResolution: { allowedProtocols: ['file'] } });
+      expect(await published.validate()).toEqual({ valid: true });
+      const publishedTools = await published.generateTools();
+      expect(publishedTools.map((t) => t.name)).toEqual(['createPet', 'getPet']);
+      expect(JSON.stringify(publishedTools[0].inputSchema)).toContain('"maxLength":42');
+      expect(published.getDiagnostics()).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

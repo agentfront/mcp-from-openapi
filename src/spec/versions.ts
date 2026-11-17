@@ -495,6 +495,10 @@ const FEATURES = {
   tagKind: { since: '3.2', label: 'Tag `kind`' },
   // 3.2 schema #/$defs/security-scheme/properties/deprecated
   securitySchemeDeprecated: { since: '3.2', label: 'Security Scheme `deprecated`' },
+  // 3.2 spec text, Security Requirement Object: a name "MUST either correspond to a security scheme
+  // declared in the Security Schemes under the Components Object, or be the URI of a Security Scheme
+  // Object" (the schema is unchanged: the keys were always free strings)
+  securitySchemeUri: { since: '3.2', label: 'A security scheme named by URI' },
   // 3.2 schema #/$defs/security-scheme/$defs/type-oauth2/then/properties/oauth2MetadataUrl
   oauth2MetadataUrl: { since: '3.2', label: 'Security Scheme `oauth2MetadataUrl`' },
   // 3.2 schema #/$defs/oauth-flows/properties/deviceAuthorization

@@ -13,6 +13,7 @@ import type {
   GenerateOptions,
   HTTPMethod,
   JsonSchema,
+  LoadOptions,
   MediaTypeObject,
   OAS30,
   OAS31,
@@ -23,6 +24,7 @@ import type {
   ParameterLocation,
   ParameterMapper,
   ParameterObject,
+  ParseError,
   ReferenceObject,
   ResponseHints,
   ResponseObject,
@@ -37,6 +39,8 @@ import type {
   SpecVersionStatus,
   StandardMethod,
   ToolMetadata,
+  ValidationErrorDetail,
+  ValidationResult,
   buildHttpRequest,
   resolveOperationLayout,
 } from 'mcp-from-openapi';
@@ -424,6 +428,48 @@ export type DiagnosticCodes = [
   >,
   Expect<Equal<(typeof DIAGNOSTIC_CODES)['MULTIPLE_QUERYSTRING_PARAMETERS'], 'MULTIPLE_QUERYSTRING_PARAMETERS'>>,
   Expect<Equal<(typeof DIAGNOSTIC_CODES)['UNSUPPORTED_STREAMING_REQUEST_BODY'], 'UNSUPPORTED_STREAMING_REQUEST_BODY'>>,
+  // `$self` (OpenAPI 3.2): invalid, refused as a base, or relative with nothing to resolve it against
+  Expect<Extends<'INVALID_SELF' | 'REFUSED_SELF' | 'UNRESOLVABLE_SELF', DiagnosticCode>>,
+  Expect<Equal<(typeof DIAGNOSTIC_CODES)['INVALID_SELF'], 'INVALID_SELF'>>,
+  Expect<Equal<(typeof DIAGNOSTIC_CODES)['REFUSED_SELF'], 'REFUSED_SELF'>>,
+  Expect<Equal<(typeof DIAGNOSTIC_CODES)['UNRESOLVABLE_SELF'], 'UNRESOLVABLE_SELF'>>,
+  // a retrieval URI past 2,048 characters, and the validation error `validate()` returns for a reference it cannot read
+  Expect<Extends<'BASE_URI_TOO_LONG' | 'UNREADABLE_REFERENCE', DiagnosticCode>>,
+  Expect<Equal<(typeof DIAGNOSTIC_CODES)['BASE_URI_TOO_LONG'], 'BASE_URI_TOO_LONG'>>,
+  Expect<Equal<(typeof DIAGNOSTIC_CODES)['UNREADABLE_REFERENCE'], 'UNREADABLE_REFERENCE'>>,
+];
+
+/**
+ * What `validate()` returns. A reference it cannot read is an error of the result (`code` `UNREADABLE_REFERENCE`),
+ * not a throw; `code` is a plain optional string (the errors of older rules may have none), so it is compared with the
+ * registry's values rather than narrowed to `DiagnosticCode`.
+ */
+export type ValidateResult = [
+  Expect<Equal<Awaited<ReturnType<OpenAPIToolGenerator['validate']>>, ValidationResult>>,
+  Expect<Equal<RequiredKeys<ValidationResult>, 'valid'>>,
+  Expect<Equal<OptionalKeys<ValidationResult>, 'errors' | 'warnings'>>,
+  Expect<Equal<ValidationResult['errors'], ValidationErrorDetail[] | undefined>>,
+  Expect<Equal<RequiredKeys<ValidationErrorDetail>, 'message'>>,
+  Expect<Equal<OptionalKeys<ValidationErrorDetail>, 'path' | 'code'>>,
+  Expect<Equal<ValidationErrorDetail['code'], string | undefined>>,
+  Expect<Equal<ValidationErrorDetail['path'], string | undefined>>,
+  Expect<Not<Extends<string | undefined, DiagnosticCode>>>,
+];
+
+/**
+ * The URI a document was retrieved from is an option, never required (`fromURL` and `fromFile` know it), and a
+ * plain string. A reference that cannot be read fails with a `ParseError`, whose `context` is free-form: the
+ * `reference`, `base`, `resolved` and `rule` it holds are not typed fields.
+ */
+export type DocumentUriOption = [
+  Expect<Has<LoadOptions, 'documentUri'>>,
+  Expect<Equal<LoadOptions['documentUri'], string | undefined>>,
+  Expect<Extends<'documentUri', OptionalKeys<LoadOptions>>>,
+  Expect<Not<Extends<'documentUri', RequiredKeys<LoadOptions>>>>,
+  // not the API's address (`baseUrl`): two options, both strings
+  Expect<Extends<'baseUrl' | 'documentUri', keyof LoadOptions>>,
+  Expect<Equal<ParseError['context'], Record<string, any> | undefined>>,
+  Expect<Not<Has<ParseError, 'reference'>>>,
 ];
 
 /** Which operations a version defines: the layout `listOperations` and `getOperation` take. */

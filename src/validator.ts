@@ -6,6 +6,7 @@ import {
   readParameterContent,
   type ParameterSlot,
 } from './parameter-resolver';
+import { readSelfField } from './base-uri';
 import {
   LATEST_SPEC_FAMILY,
   SPEC_DIAGNOSTIC_CODES,
@@ -346,6 +347,12 @@ export function duplicateParameterDiagnostic(
  * - Warnings, as generation copes with them: a parameter's `content` that
  *   does not hold exactly one media type (`INVALID_PARAMETER_CONTENT`), and
  *   a parameter list repeating a `name` and `in` (`DUPLICATE_PARAMETER`).
+ * - `$self` (3.2 and later) must be a string in the form of a URI reference,
+ *   without a fragment (`INVALID_SELF`, an error). In a 3.0 or 3.1 document
+ *   it is a `FEATURE_NEWER_THAN_DECLARED_VERSION` warning. The rules the
+ *   generator adds before using it as a base (no user information, an http,
+ *   https or file scheme, ...) depend on where the document was read from,
+ *   which the validator does not know: they are generator diagnostics.
  * - `errors` and `warnings` each keep at most `MAX_DIAGNOSTICS` entries, then
  *   one `DIAGNOSTICS_TRUNCATED` entry.
  *
@@ -375,6 +382,12 @@ export class Validator {
     const versionProblem = versionError(version);
     if (versionProblem !== undefined) errors.push(versionProblem);
     warnings.push(...version.diagnostics.map(toFinding));
+
+    // `$self` (3.2 and later): a URI reference without a fragment. In an
+    // older document it is not read, which the generator reports too
+    const self = readSelfField(document, version);
+    if (self.kind === 'invalid') errors.push(toError(self.diagnostic));
+    else if (self.kind === 'not-read' && self.diagnostic !== undefined) warnings.push(toFinding(self.diagnostic));
 
     // Check info
     if (!doc.info) {

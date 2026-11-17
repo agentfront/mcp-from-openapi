@@ -5,9 +5,10 @@ import { ResponseBuilder } from '../response-builder';
 import { ParseError, LoadError, SchemaError, GenerationError } from '../errors';
 import { Validator } from '../validator';
 import { DIAGNOSTIC_CODES, MAX_DIAGNOSTICS } from '../types';
-import type { GenerateOptions, OpenAPIDocument } from '../types';
+import type { GenerateOptions, LoadOptions, McpOpenAPITool, OpenAPIDocument } from '../types';
 import { createLoopbackServer, type LoopbackHandler } from './helpers/loopback';
 import { makePinnedLookup } from '../ssrf';
+import { describeValue } from '../spec';
 import dns from 'node:dns';
 
 describe('OpenAPIToolGenerator', () => {
@@ -2150,7 +2151,8 @@ describe('SSRF Prevention - $ref resolution security', () => {
     await generator.generateTools();
 
     const options = derefSpy.mock.calls[0][1];
-    expect(options?.resolve?.file).toBeUndefined(); // not blocked
+    // Not blocked: `$RefParser`'s own file resolver, its `read` wrapped to report failures in order
+    expect(options?.resolve?.file).toEqual({ read: expect.any(Function) });
   });
 
   it('should restrict to allowedHosts when configured', async () => {
@@ -6148,7 +6150,8 @@ describe('OpenAPI 3.2 operations, versions and diagnostics (issue #55)', () => {
           code: 'UNRESOLVED_SECURITY_SCHEME',
           message:
             'Security Requirement names scheme "otherapi#/components/securitySchemes/generic_auth", which ' +
-            'components.securitySchemes does not define (a scheme named by URI is not resolved yet); the requirement ' +
+            'components.securitySchemes does not define, and read as a URI it cannot be resolved: the document has ' +
+            'no base URI (load it with fromURL or fromFile, or pass LoadOptions.documentUri); the requirement ' +
             'cannot be satisfied and is dropped with every scheme it combines',
           path: '/paths/~1pets/put/security/1/otherapi#~1components~1securitySchemes~1generic_auth',
         },
@@ -7295,6 +7298,1368 @@ describe('OpenAPI 3.2 parameters and responses: review fixes (issue #55)', () =>
       );
       expect(await generator.generateTools()).toHaveLength(4);
       expect(generator.getDiagnostics()).toEqual([]);
+    });
+  });
+});
+
+describe('Base URI, $self and references to other documents', () => {
+  const fs = require('fs') as typeof import('fs');
+  const os = require('os') as typeof import('os');
+  const path = require('path') as typeof import('path');
+  const { pathToFileURL } = require('url') as typeof import('url');
+  const refParser = () => require('@apidevtools/json-schema-ref-parser').default;
+
+  const info = { title: 'Pets', version: '1' };
+  const servers = [{ url: 'https://api.example.com' }];
+  const pet = { type: 'object', properties: { name: { type: 'string', maxLength: 42 } } };
+  const ok = { 200: { description: 'ok' } };
+  /** A document whose one operation takes a body of schema `$ref: petRef`. */
+  const entry = (petRef: string, extra: Record<string, unknown> = {}, openapi = '3.0.3') => ({
+    openapi,
+    info,
+    servers,
+    paths: {
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          requestBody: { content: { 'application/json': { schema: { $ref: petRef } } } },
+          responses: ok,
+        },
+      },
+    },
+    components: { schemas: { Pet: pet } },
+    ...extra,
+  });
+  /** Whether the tool's input carries the Pet schema (its `maxLength: 42`). */
+  const hasPet = (tool: { inputSchema: unknown }) => JSON.stringify(tool.inputSchema).includes('"maxLength":42');
+  const codes = (generator: OpenAPIToolGenerator) => generator.getDiagnostics().map((d) => d.code);
+  const rejection = async (promise: Promise<unknown>): Promise<ParseError> => {
+    try {
+      await promise;
+    } catch (error) {
+      return error as ParseError;
+    }
+    throw new Error('expected a rejection');
+  };
+
+  /** Runs `run` with `files` written under a fresh temp directory, removed afterwards (that directory only). */
+  const withFiles = async (files: Record<string, unknown>, run: (dir: string) => Promise<void>): Promise<void> => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-from-openapi-base-uri-'));
+    try {
+      for (const [name, content] of Object.entries(files)) {
+        const file = path.join(dir, name);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, typeof content === 'string' ? content : JSON.stringify(content));
+      }
+      await run(dir);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  /** A loopback server answering from a path → body (or status) table, recording every request. */
+  const routes: Record<string, unknown> = {};
+  const loopback = createLoopbackServer(() => (req, res) => {
+    const route = routes[req.url ?? ''];
+    if (route === undefined) {
+      res.writeHead(404, 'Not Found');
+      res.end();
+    } else if (typeof route === 'function') {
+      (route as LoopbackHandler)(req, res, Buffer.alloc(0));
+    } else {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(typeof route === 'string' ? route : JSON.stringify(route));
+    }
+  });
+  let origin: string;
+  const internal = { allowInternalIPs: true };
+  const requested = () => loopback.requests.map((r) => r.url);
+
+  beforeAll(async () => {
+    origin = await loopback.listen();
+  });
+
+  afterAll(async () => {
+    await loopback.close();
+  });
+
+  beforeEach(() => {
+    for (const key of Object.keys(routes)) delete routes[key];
+    loopback.reset();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  describe('files', () => {
+    const files = {
+      'api/openapi.yaml': {
+        ...entry('schemas/pet.yaml'),
+        paths: {
+          ...entry('schemas/pet.yaml').paths,
+          '/owners': { $ref: 'paths/owners.yaml' },
+          // An operation kept in its own file, as some large APIs do
+          '/pets/{id}': { get: { $ref: 'operations/get-pet.yaml' } },
+        },
+      },
+      'api/operations/get-pet.yaml': {
+        operationId: 'getPet',
+        parameters: [{ $ref: '../parameters.yaml#/PetId' }],
+        responses: { 200: { $ref: '../responses.yaml#/Pet' } },
+      },
+      'api/schemas/pet.yaml': pet,
+      'api/paths/owners.yaml': { get: { operationId: 'listOwners', responses: ok } },
+      'api/parameters.yaml': { PetId: { name: 'id', in: 'path', required: true, schema: { type: 'string' } } },
+      'api/responses.yaml': {
+        Pet: { description: 'ok', content: { 'application/json': { schema: { $ref: 'schemas/pet.yaml' } } } },
+      },
+    };
+    const allowFile = { refResolution: { allowedProtocols: ['file'] } };
+
+    it('resolves relative refs next to the file, whatever the working directory', async () => {
+      await withFiles(files, async (dir) => {
+        expect(process.cwd()).not.toBe(path.join(dir, 'api'));
+        const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'api/openapi.yaml'), allowFile);
+        const tools = await generator.generateTools();
+        expect(tools.map((t) => t.name)).toEqual(['listOwners', 'createPet', 'getPet']);
+        expect(hasPet(tools[1])).toBe(true);
+        expect(JSON.stringify(tools[2].outputSchema)).toContain('"maxLength":42');
+        expect(tools[2].mapper.map((m) => `${m.type}:${m.key}`)).toEqual(['path:id']);
+        expect(generator.getDiagnostics()).toEqual([]);
+      });
+    });
+
+    it('refuses them when file is not allowed, naming the reference, the base, the rule and the option', async () => {
+      await withFiles(files, async (dir) => {
+        const entryPath = path.join(dir, 'api/openapi.yaml');
+        const generator = await OpenAPIToolGenerator.fromFile(entryPath);
+        const error = await rejection(generator.generateTools());
+        expect(error).toBeInstanceOf(ParseError);
+        expect(error.message).toBe(
+          `Failed to dereference OpenAPI document: Cannot read $ref "schemas/pet.yaml" at ` +
+            `"#/paths/~1pets/post/requestBody/content/application~1json/schema" resolved against ${JSON.stringify(entryPath)} ` +
+            `to ${JSON.stringify(path.join(dir, 'api/schemas/pet.yaml'))}: it is read as a local file, and ` +
+            `refResolution.allowedProtocols ("http", "https") does not include "file"; add "file" to ` +
+            `refResolution.allowedProtocols to read it`,
+        );
+        expect(error.context).toMatchObject({
+          reference: 'schemas/pet.yaml',
+          base: entryPath,
+          resolved: path.join(dir, 'api/schemas/pet.yaml'),
+          rule: 'protocol',
+        });
+        expect(error.context).toEqual({
+          rule: 'protocol',
+          reference: 'schemas/pet.yaml',
+          base: entryPath,
+          resolved: path.join(dir, 'api/schemas/pet.yaml'),
+          path: '/paths/~1pets/post/requestBody/content/application~1json/schema',
+        });
+        // validate() reads what generation reads; an unreadable reference is a result, not a throw
+        expect(await generator.validate()).toEqual({
+          valid: false,
+          errors: [
+            {
+              code: 'UNREADABLE_REFERENCE',
+              message: error.message.slice('Failed to dereference OpenAPI document: '.length),
+              path: '/paths/~1pets/post/requestBody/content/application~1json/schema',
+            },
+          ],
+        });
+      });
+    });
+
+    it('resolves a $ref cycle across two files', async () => {
+      const cyclic = {
+        'openapi.json': {
+          ...entry('nodes.json#/Node'),
+          components: { schemas: { Root: { type: 'object', properties: { child: { $ref: 'nodes.json#/Node' } } } } },
+        },
+        'nodes.json': {
+          Node: {
+            type: 'object',
+            properties: {
+              parent: { $ref: 'openapi.json#/components/schemas/Root' },
+              next: { $ref: '#/Node' },
+              label: { type: 'string', maxLength: 42 },
+            },
+          },
+        },
+      };
+      await withFiles(cyclic, async (dir) => {
+        const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+        const tools = await generator.generateTools();
+        expect(tools.map((t) => t.name)).toEqual(['createPet']);
+        expect(hasPet(tools[0])).toBe(true);
+        expect(JSON.stringify(tools[0].inputSchema)).toContain('"parent"');
+      });
+    });
+
+    it('keeps resolving against the working directory without a base URI, and says so', async () => {
+      await withFiles(files, async (dir) => {
+        const document = JSON.parse(fs.readFileSync(path.join(dir, 'api/openapi.yaml'), 'utf8'));
+        const cwdBase = `${process.cwd()}${path.sep}`;
+        // Refused: the message says why relative references land in the working directory
+        const refused = await rejection((await OpenAPIToolGenerator.fromJSON(document)).generateTools());
+        expect(refused.message).toContain(`resolved against ${JSON.stringify(cwdBase)}`);
+        expect(refused.message).toContain(
+          '(the document has no base URI, so its relative references resolve against the working directory: ' +
+            'load it with fromFile or fromURL, or pass LoadOptions.documentUri)',
+        );
+        expect(refused.context).toMatchObject({ reference: 'schemas/pet.yaml', base: cwdBase, rule: 'protocol' });
+        // Allowed: read from the working directory, as in earlier releases
+        const missing = await rejection((await OpenAPIToolGenerator.fromJSON(document, allowFile)).generateTools());
+        expect(missing.message).toContain(
+          `resolved against ${JSON.stringify(cwdBase)} to ${JSON.stringify(path.join(process.cwd(), 'schemas/pet.yaml'))}: ` +
+            'the file cannot be read (ENOENT)',
+        );
+        expect(missing.context).toMatchObject({ rule: 'file-error' });
+      });
+    });
+
+    it('resolves them against LoadOptions.documentUri in fromJSON and fromYAML', async () => {
+      await withFiles(files, async (dir) => {
+        const documentUri = pathToFileURL(path.join(dir, 'api/openapi.yaml')).href;
+        const text = fs.readFileSync(path.join(dir, 'api/openapi.yaml'), 'utf8');
+        for (const generator of [
+          await OpenAPIToolGenerator.fromJSON(JSON.parse(text), { ...allowFile, documentUri }),
+          await OpenAPIToolGenerator.fromYAML(text, { ...allowFile, documentUri }),
+        ]) {
+          expect((await generator.generateTools()).map((t) => t.name)).toEqual(['listOwners', 'createPet', 'getPet']);
+        }
+      });
+    });
+
+    it('lets LoadOptions.documentUri replace the file a document was read from', async () => {
+      await withFiles({ ...files, 'copy/openapi.yaml': files['api/openapi.yaml'] }, async (dir) => {
+        const copy = path.join(dir, 'copy/openapi.yaml');
+        await expect((await OpenAPIToolGenerator.fromFile(copy, allowFile)).generateTools()).rejects.toThrow(
+          'the file cannot be read (ENOENT)',
+        );
+        const documentUri = pathToFileURL(path.join(dir, 'api/openapi.yaml')).href;
+        const generator = await OpenAPIToolGenerator.fromFile(copy, { ...allowFile, documentUri });
+        expect(await generator.generateTools()).toHaveLength(3);
+      });
+    });
+
+    it('refuses a file documentUri that names a host (a network share)', async () => {
+      await expect(
+        OpenAPIToolGenerator.fromJSON(entry('schemas/pet.yaml'), {
+          ...allowFile,
+          documentUri: 'file://fileserver/share/openapi.yaml',
+        }),
+      ).rejects.toThrow('LoadOptions.documentUri must not name a host in a file URI');
+    });
+
+    it('validates a multi-file document as generation reads it', async () => {
+      await withFiles(files, async (dir) => {
+        const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'api/openapi.yaml'), allowFile);
+        // As written, the operation is in another file: the raw document has an operation without
+        // responses, and a path template without its parameter
+        const raw = await new Validator().validate(generator.getDocument());
+        expect(raw.valid).toBe(false);
+        expect(raw.errors?.map((e) => e.code)).toEqual(['NO_RESPONSES', 'MISSING_PATH_PARAMETER']);
+
+        const spy = jest.spyOn(refParser(), 'dereference');
+        expect(await generator.validate()).toEqual({ valid: true });
+        // Generation reuses the dereferenced document: one dereference in all
+        expect(await generator.generateTools()).toHaveLength(3);
+        expect(await generator.validate()).toEqual({ valid: true });
+        expect(spy).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('shares one dereference between concurrent callers, and retries one that failed', async () => {
+      await withFiles(files, async (dir) => {
+        const missing = path.join(dir, 'api/schemas/pet.yaml');
+        fs.renameSync(missing, `${missing}.bak`);
+        const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'api/openapi.yaml'), allowFile);
+        const failed = await generator.validate();
+        expect(failed.errors?.map((e) => [e.code, e.path])).toEqual([
+          ['UNREADABLE_REFERENCE', '/paths/~1pets/post/requestBody/content/application~1json/schema'],
+        ]);
+        expect(failed.errors?.[0].message).toContain('the file cannot be read (ENOENT)');
+        await expect(generator.generateTools()).rejects.toThrow('the file cannot be read (ENOENT)');
+        fs.renameSync(`${missing}.bak`, missing);
+
+        const spy = jest.spyOn(refParser(), 'dereference');
+        const [validation, tools, lint] = await Promise.all([
+          generator.validate(),
+          generator.generateTools(),
+          generator.lint(),
+        ]);
+        expect(validation.valid).toBe(true);
+        expect(tools).toHaveLength(3);
+        expect(lint).toBeDefined();
+        expect(spy).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('validates a document without references to other documents as loaded, reading nothing', async () => {
+      const spy = jest.spyOn(refParser(), 'dereference');
+      // Internal references only, a self-reference by URI, and dereferencing turned off
+      const internalOnly = entry('#/components/schemas/Pet');
+      const selfOnly = entry('https://example.com/api/openapi.json#/components/schemas/Pet');
+      const cases: Array<[object, LoadOptions]> = [
+        [internalOnly, {}],
+        [selfOnly, { documentUri: 'https://example.com/api/openapi.json' }],
+        [{ ...entry('other.json#/Pet'), paths: { '/x/{id}': { get: { responses: ok } } } }, { dereference: false }],
+      ];
+      for (const [document, options] of cases) {
+        const generator = await OpenAPIToolGenerator.fromJSON(document, options);
+        expect(await generator.validate()).toEqual(await new Validator().validate(document));
+      }
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('throws a ParseError, not a TypeError, for a document JSON cannot copy', async () => {
+      const yamlText =
+        'openapi: 3.0.3\ninfo: {title: t, version: "1"}\npaths: {/a: {get: {responses: {"200": {description: ok}}}}}\n' +
+        'components:\n  schemas:\n    A: &a\n      properties:\n        self: *a\n';
+      const generator = await OpenAPIToolGenerator.fromYAML(yamlText);
+      await expect(generator.generateTools()).rejects.toThrow(ParseError);
+      // validate() reads nothing for it, as before
+      expect((await generator.validate()).valid).toBe(true);
+    });
+  });
+
+  describe('URLs', () => {
+    it('resolves relative refs against the spec URL (Appendix F: base URI from the retrieval URI)', async () => {
+      routes['/api/openapis.yaml'] = entry('schemas/foo');
+      routes['/api/schemas/foo'] = pet;
+      const generator = await OpenAPIToolGenerator.fromURL(`${origin}/api/openapis.yaml`, { refResolution: internal });
+      const [tool] = await generator.generateTools();
+      expect(hasPet(tool)).toBe(true);
+      expect(requested()).toEqual(['/api/openapis.yaml', '/api/schemas/foo']);
+    });
+
+    it('uses the final URL after redirects as the base, and never sends spec credentials with a $ref', async () => {
+      routes['/start'] = (_req: unknown, res: import('http').ServerResponse) => {
+        res.writeHead(302, { location: '/v2/openapi.json' });
+        res.end();
+      };
+      routes['/v2/openapi.json'] = entry('schemas/pet.json');
+      routes['/v2/schemas/pet.json'] = pet;
+      const generator = await OpenAPIToolGenerator.fromURL(`${origin}/start`, {
+        headers: { Authorization: 'Bearer SPEC-SECRET' },
+        refResolution: internal,
+      });
+      expect(hasPet((await generator.generateTools())[0])).toBe(true);
+      expect(requested()).toEqual(['/start', '/v2/openapi.json', '/v2/schemas/pet.json']);
+      const auth = loopback.requests.map((r) => r.headers.authorization);
+      expect(auth).toEqual(['Bearer SPEC-SECRET', 'Bearer SPEC-SECRET', undefined]);
+    });
+
+    it('resolves against another origin a redirect lands on, without credentials there', async () => {
+      const cdnRoutes: Record<string, unknown> = { '/v2/openapi.json': entry('schemas/pet.json'), '/v2/schemas/pet.json': pet };
+      const cdn = createLoopbackServer(() => (req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(cdnRoutes[req.url ?? '']));
+      });
+      const cdnOrigin = await cdn.listen();
+      routes['/start'] = (_req: unknown, res: import('http').ServerResponse) => {
+        res.writeHead(302, { location: `${cdnOrigin}/v2/openapi.json` });
+        res.end();
+      };
+      try {
+        const generator = await OpenAPIToolGenerator.fromURL(`${origin}/start`, {
+          headers: { Authorization: 'Bearer SPEC-SECRET' },
+          refResolution: internal,
+        });
+        expect(hasPet((await generator.generateTools())[0])).toBe(true);
+        expect(requested()).toEqual(['/start']);
+        expect(cdn.requests.map((r) => [r.url, r.headers.authorization])).toEqual([
+          ['/v2/openapi.json', undefined],
+          ['/v2/schemas/pet.json', undefined],
+        ]);
+      } finally {
+        await cdn.close();
+      }
+    });
+
+    it('drops user information of the spec URL from the base: it authenticates the spec only', async () => {
+      routes['/api/openapi.json'] = entry('schemas/pet.json');
+      routes['/api/schemas/pet.json'] = pet;
+      const withUser = origin.replace('http://', 'http://user:secret@');
+      const generator = await OpenAPIToolGenerator.fromURL(`${withUser}/api/openapi.json#ignored`, {
+        refResolution: internal,
+      });
+      expect(hasPet((await generator.generateTools())[0])).toBe(true);
+      expect(loopback.requests.map((r) => [r.url, r.headers.authorization])).toEqual([
+        ['/api/openapi.json', `Basic ${Buffer.from('user:secret').toString('base64')}`],
+        ['/api/schemas/pet.json', undefined],
+      ]);
+    });
+
+    it('does not show the query of the spec URL in a refusal: it can hold a token', async () => {
+      routes['/api/openapi.json?token=SPEC-SECRET'] = entry('schemas/pet.json');
+      // `allowedProtocols` gates references only: the spec itself is read over http
+      const generator = await OpenAPIToolGenerator.fromURL(`${origin}/api/openapi.json?token=SPEC-SECRET`, {
+        refResolution: { ...internal, allowedProtocols: ['https'] },
+      });
+      const error = await rejection(generator.generateTools());
+      expect(error.message).toContain(`resolved against "${origin}/api/openapi.json?..." to "${origin}/api/schemas/pet.json"`);
+      expect(JSON.stringify({ message: error.message, ...error.context, originalError: undefined })).not.toContain(
+        'SPEC-SECRET',
+      );
+      expect(error.context).toMatchObject({ base: `${origin}/api/openapi.json?...`, rule: 'protocol' });
+    });
+
+    it('keeps the redirect limit', async () => {
+      for (let hop = 0; hop < 7; hop++) {
+        routes[`/r${hop}`] = (_req: unknown, res: import('http').ServerResponse) => {
+          res.writeHead(302, { location: `/r${hop + 1}` });
+          res.end();
+        };
+      }
+      await expect(OpenAPIToolGenerator.fromURL(`${origin}/r0`, { refResolution: internal })).rejects.toThrow(
+        /Too many redirects/,
+      );
+      expect(requested()).toEqual(['/r0', '/r1', '/r2', '/r3', '/r4', '/r5']);
+    });
+
+    it('keeps a reference to the document itself local, also under secureDefaults', async () => {
+      const spy = jest.spyOn(refParser(), 'dereference');
+      routes['/api/openapi.json'] = {
+        ...entry(`${origin}/api/openapi.json#/components/schemas/Pet`),
+        paths: {
+          ...entry('').paths,
+          '/pets': {
+            post: {
+              operationId: 'createPet',
+              requestBody: {
+                content: { 'application/json': { schema: { $ref: `${origin}/api/openapi.json#/components/schemas/Pet` } } },
+              },
+              responses: { 200: { description: 'ok', content: { 'application/json': { schema: { $ref: './openapi.json#/components/schemas/Pet' } } } } },
+            },
+          },
+        },
+      };
+      for (const options of [{ refResolution: internal }, { secureDefaults: true, refResolution: internal }]) {
+        loopback.reset();
+        const generator = await OpenAPIToolGenerator.fromURL(`${origin}/api/openapi.json`, options);
+        const [tool] = await generator.generateTools();
+        expect(hasPet(tool)).toBe(true);
+        expect(JSON.stringify(tool.outputSchema)).toContain('"maxLength":42');
+        expect(requested()).toEqual(['/api/openapi.json']);
+      }
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    // Appendix F, "Resolving Relative $self and $id"
+    it('resolves references against a relative $self resolved against the retrieval URI', async () => {
+      routes['/api/openapi'] = {
+        openapi: '3.2.0',
+        $self: '/api/openapi',
+        info,
+        servers,
+        paths: {
+          '/foo': {
+            post: { operationId: 'postFoo', requestBody: { $ref: 'shared/foo#/components/requestBodies/Foo' }, responses: ok },
+          },
+        },
+      };
+      routes['/api/shared/foo'] = {
+        openapi: '3.2.0',
+        $self: '/api/shared/foo',
+        info,
+        components: {
+          requestBodies: { Foo: { content: { 'application/json': { schema: { $ref: '../schemas/foo' } } } } },
+        },
+      };
+      routes['/api/schemas/foo'] = pet;
+      const generator = await OpenAPIToolGenerator.fromURL(`${origin}/api/openapi`, { refResolution: internal });
+      expect(hasPet((await generator.generateTools())[0])).toBe(true);
+      expect(requested()).toEqual(['/api/openapi', '/api/shared/foo', '/api/schemas/foo']);
+      expect(generator.getDiagnostics()).toEqual([]);
+    });
+
+    it('resolves a reference cycle back to the entry document without fetching it again', async () => {
+      routes['/api/openapi.json'] = {
+        ...entry('nodes.json#/Node'),
+        components: { schemas: { Root: { type: 'object', properties: { child: { $ref: 'nodes.json#/Node' } } } } },
+      };
+      routes['/api/nodes.json'] = {
+        Node: {
+          type: 'object',
+          properties: { parent: { $ref: 'openapi.json#/components/schemas/Root' }, label: pet.properties.name },
+        },
+      };
+      const generator = await OpenAPIToolGenerator.fromURL(`${origin}/api/openapi.json`, { refResolution: internal });
+      expect(hasPet((await generator.generateTools())[0])).toBe(true);
+      expect(requested()).toEqual(['/api/openapi.json', '/api/nodes.json']);
+    });
+
+    it('leaves references under a schema with its own $id to that $id (OpenAPI 3.1)', async () => {
+      routes['/api/openapi.json'] = entry('#/components/schemas/Foo', {
+        components: {
+          schemas: { Foo: { $id: `${origin}/schemas/foo`, type: 'object', properties: { bar: { $ref: 'bar' } } } },
+        },
+      }, '3.1.0');
+      routes['/schemas/bar'] = pet;
+      const generator = await OpenAPIToolGenerator.fromURL(`${origin}/api/openapi.json`, { refResolution: internal });
+      expect(hasPet((await generator.generateTools())[0])).toBe(true);
+      expect(requested()).toEqual(['/api/openapi.json', '/schemas/bar']);
+    });
+  });
+
+  describe('$self', () => {
+    // Appendix F, "Base URI Within Content": a file document whose $self names a network location.
+    // Identity follows the specification: a reference to the $self URI is this document. Where a
+    // relative reference is read from is an implementation choice the specification leaves open:
+    // the specification resolves it against $self (the network), this library against the file it
+    // was read from, so a local copy reads the files next to it and never reaches the network
+    it('reads the relative references of a file document next to the file, whatever its $self says', async () => {
+      routes['/api/shared/foo'] = { never: 'fetched' };
+      const document = {
+        openapi: '3.2.0',
+        $self: `${origin}/api/openapi`,
+        info,
+        servers,
+        paths: {
+          '/foo': {
+            post: {
+              operationId: 'postFoo',
+              requestBody: { $ref: 'shared/foo#/components/requestBodies/Foo' },
+              responses: {
+                200: { description: 'ok', content: { 'application/json': { schema: { $ref: `${origin}/api/openapi#/components/schemas/Pet` } } } },
+              },
+            },
+          },
+        },
+        components: { schemas: { Pet: pet } },
+      };
+      const shared = {
+        openapi: '3.2.0',
+        info,
+        components: {
+          requestBodies: { Foo: { content: { 'application/json': { schema: { $ref: '../schemas/foo' } } } } },
+        },
+      };
+      await withFiles(
+        { 'src/api/openapi.yaml': document, 'src/api/shared/foo': shared, 'src/api/schemas/foo': pet },
+        async (dir) => {
+          const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'src/api/openapi.yaml'), {
+            refResolution: { ...internal, allowedProtocols: ['file', 'http', 'https'] },
+          });
+          const [tool] = await generator.generateTools();
+          expect(hasPet(tool)).toBe(true);
+          // The reference by $self stayed local
+          expect(JSON.stringify(tool.outputSchema)).toContain('"maxLength":42');
+          expect(requested()).toEqual([]);
+        },
+      );
+    });
+
+    it('lets a mirror serve its own copies: a URL document reads next to where it was read from', async () => {
+      routes['/mirror/openapi.json'] = entry('schemas/pet.json', { $self: 'https://specs.example.com/api/openapi' }, '3.2.0');
+      routes['/mirror/schemas/pet.json'] = pet;
+      const generator = await OpenAPIToolGenerator.fromURL(`${origin}/mirror/openapi.json`, { refResolution: internal });
+      expect(hasPet((await generator.generateTools())[0])).toBe(true);
+      expect(requested()).toEqual(['/mirror/openapi.json', '/mirror/schemas/pet.json']);
+    });
+
+    it('keeps a reference by $self local under secureDefaults: nothing is fetched', async () => {
+      const spy = jest.spyOn(refParser(), 'dereference');
+      const document = entry(`${origin}/api/openapi#/components/schemas/Pet`, { $self: `${origin}/api/openapi` }, '3.2.0');
+      (document.paths['/pets'].post as Record<string, unknown>)['responses'] = {
+        200: { description: 'ok', content: { 'application/json': { schema: { $ref: 'openapi#/components/schemas/Pet' } } } },
+      };
+      for (const options of [{ secureDefaults: true }, {}]) {
+        const generator = await OpenAPIToolGenerator.fromJSON(document, { ...options, refResolution: internal });
+        const [tool] = await generator.generateTools();
+        expect(hasPet(tool)).toBe(true);
+        expect(JSON.stringify(tool.outputSchema)).toContain('"maxLength":42');
+        expect(generator.getDiagnostics()).toEqual([]);
+      }
+      expect(loopback.requests).toHaveLength(0);
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it.each<[string, unknown, string]>([
+      ['user information', `http://user:pw@127.0.0.1:1/x/openapi`, 'REFUSED_SELF'],
+      ['a fragment', '/x/openapi#/info', 'INVALID_SELF'],
+      ['a file URI', 'file:///etc/', 'REFUSED_SELF'],
+      ['a javascript: URI', 'javascript:alert(1)', 'REFUSED_SELF'],
+      ['CR/LF', '/x/openapi\r\nX-Injected: 1', 'INVALID_SELF'],
+      ['a very long value', `/x/${'a'.repeat(9000)}`, 'REFUSED_SELF'],
+      ['a non-string', { href: '/x/openapi' }, 'INVALID_SELF'],
+    ])('ignores a $self with %s, keeping the retrieval URI as the base', async (_what, self, code) => {
+      routes['/api/openapi.json'] = entry('schemas/pet.json', { $self: self }, '3.2.0');
+      routes['/api/schemas/pet.json'] = pet;
+      // `file` is allowed: a file $self, if honoured, would read local files
+      const generator = await OpenAPIToolGenerator.fromURL(`${origin}/api/openapi.json`, {
+        validate: false,
+        refResolution: { ...internal, allowedProtocols: ['http', 'file'] },
+      });
+      expect(hasPet((await generator.generateTools())[0])).toBe(true);
+      expect(requested()).toEqual(['/api/openapi.json', '/api/schemas/pet.json']);
+      expect(codes(generator)).toEqual([code]);
+      const message = generator.getDiagnostics()[0].message;
+      expect(message.length).toBeLessThan(600);
+      expect(message).not.toMatch(/[\r\n]/);
+      expect(message).not.toContain('user:pw');
+    });
+
+    it('rejects an invalid $self when validating', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        entry('#/components/schemas/Pet', { $self: 'https://example.com/api#/info' }, '3.2.0'),
+      );
+      await expect(generator.generateTools()).rejects.toThrow(
+        'Invalid OpenAPI document: `$self` must not contain a fragment, found "https://example.com/api#/info"',
+      );
+      expect((await generator.validate()).errors).toEqual([
+        {
+          message: '`$self` must not contain a fragment, found "https://example.com/api#/info"',
+          path: '/$self',
+          code: 'INVALID_SELF',
+        },
+      ]);
+    });
+
+    it('refuses references resolved against a $self naming an internal address, fetching nothing', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        entry('schemas/pet.json', { $self: 'http://10.0.0.1/api/openapi' }, '3.2.0'),
+      );
+      const error = await rejection(generator.generateTools());
+      expect(error.message).toBe(
+        'Failed to dereference OpenAPI document: Cannot read $ref "schemas/pet.json" at ' +
+          '"#/paths/~1pets/post/requestBody/content/application~1json/schema" resolved against ' +
+          '"http://10.0.0.1/api/openapi" to "http://10.0.0.1/api/schemas/pet.json": its host "10.0.0.1" is an internal ' +
+          'address (loopback, private, link-local or cloud metadata); refResolution.allowInternalIPs would allow it ' +
+          '(unsafe for documents you do not trust)',
+      );
+      expect(error.context).toMatchObject({ rule: 'internal-address', base: 'http://10.0.0.1/api/openapi' });
+    });
+
+    it('refuses references resolved against a $self outside allowedHosts, when $self is the only base', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        entry('schemas/pet.json', { $self: 'http://schemas.example.org/api/openapi' }, '3.2.0'),
+        { refResolution: { allowedHosts: ['example.com'] } },
+      );
+      const error = await rejection(generator.generateTools());
+      expect(error.message).toContain(
+        'to "http://schemas.example.org/api/schemas/pet.json": its host "schemas.example.org" is not in ' +
+          'refResolution.allowedHosts; add the host to refResolution.allowedHosts to read it',
+      );
+      expect(error.context).toMatchObject({ rule: 'host-not-allowed', base: 'http://schemas.example.org/api/openapi' });
+    });
+
+    it('never turns a file document network-bound: with only file allowed, its siblings are read', async () => {
+      await withFiles(
+        {
+          'openapi.json': entry('schemas/pet.json', { $self: 'https://example.com/api/openapi' }, '3.2.0'),
+          'schemas/pet.json': pet,
+        },
+        async (dir) => {
+          const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), {
+            refResolution: { allowedProtocols: ['file'] },
+          });
+          expect(hasPet((await generator.generateTools())[0])).toBe(true);
+          expect(await generator.validate()).toEqual({ valid: true });
+        },
+      );
+    });
+
+    it('ignores $self in a document declaring 3.1', async () => {
+      routes['/api/openapi'] = entry('#/components/schemas/Pet');
+      const document = entry(`${origin}/api/openapi#/components/schemas/Pet`, { $self: `${origin}/api/openapi` }, '3.1.0');
+      const generator = await OpenAPIToolGenerator.fromJSON(document, { refResolution: internal });
+      expect(hasPet((await generator.generateTools())[0])).toBe(true);
+      // Not a self-reference in 3.1: the URL is fetched like any other document
+      expect(requested()).toEqual(['/api/openapi']);
+      expect(codes(generator)).toEqual(['FEATURE_NEWER_THAN_DECLARED_VERSION']);
+    });
+  });
+
+  describe('security schemes named by URI (OpenAPI 3.2)', () => {
+    const schemes = {
+      bearer: { type: 'http', scheme: 'bearer' },
+      foo: { type: 'apiKey', name: 'X-Foo', in: 'header' },
+      oauth: {
+        type: 'oauth2',
+        flows: { clientCredentials: { tokenUrl: 'https://example.com/token', scopes: { a: 'a', b: 'b' } } },
+      },
+      '#/components/securitySchemes/bearer-alias': { type: 'apiKey', name: 'X-Alias', in: 'query' },
+    };
+    const secured = (security: unknown, extra: Record<string, unknown> = {}, openapi = '3.2.0') =>
+      entry('#/components/schemas/Pet', { components: { schemas: { Pet: pet }, securitySchemes: schemes }, security, ...extra }, openapi);
+    const schemesOf = (tool: McpOpenAPITool) => tool.metadata.security?.map((s) => s.scheme);
+
+    it.each<[string, LoadOptions, Record<string, unknown>]>([
+      ['#/components/securitySchemes/bearer', {}, {}],
+      ['openapi.yaml#/components/securitySchemes/bearer', { documentUri: 'https://example.com/api/openapi.yaml' }, {}],
+      ['./openapi.yaml#/components/securitySchemes/bearer', { documentUri: 'https://example.com/api/openapi.yaml' }, {}],
+      [
+        'https://EXAMPLE.com:443/api/./openapi.yaml#/components/securitySchemes/bearer',
+        { documentUri: 'https://example.com/api/openapi.yaml' },
+        {},
+      ],
+      ['https://example.com/api/openapi#/components/securitySchemes/bearer', {}, { $self: 'https://example.com/api/openapi' }],
+    ])('resolves %s to the component it names', async (key, options, extra) => {
+      const generator = await OpenAPIToolGenerator.fromJSON(secured([{ [key]: [] }], extra), options);
+      const [tool] = await generator.generateTools();
+      expect(schemesOf(tool)).toEqual(['bearer']);
+      expect(tool.mapper.filter((m) => m.security).map((m) => [m.inputKey, m.key])).toEqual([['bearer', 'Authorization']]);
+      expect(generator.getDiagnostics()).toEqual([]);
+    });
+
+    it('reads ./foo as another document, and foo as the component', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(secured([{ './foo': [] }, { foo: [] }]), {
+        documentUri: 'https://example.com/api/openapi.yaml',
+      });
+      const [tool] = await generator.generateTools();
+      expect(schemesOf(tool)).toEqual(['foo']);
+      expect(generator.getDiagnostics()).toEqual([
+        {
+          severity: 'warning',
+          code: 'UNRESOLVED_SECURITY_SCHEME',
+          message:
+            'Security Requirement names scheme "./foo", which components.securitySchemes does not define, and read as ' +
+            'a URI it names a scheme in another document, which is not read; the requirement cannot be satisfied ' +
+            'and is dropped with every scheme it combines',
+          path: '/security/0/.~1foo',
+        },
+      ]);
+    });
+
+    it('gives a component name precedence over the URI it looks like', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(secured([{ '#/components/securitySchemes/bearer-alias': [] }]));
+      const [tool] = await generator.generateTools();
+      expect(schemesOf(tool)).toEqual(['#/components/securitySchemes/bearer-alias']);
+      expect(tool.metadata.security?.[0]).toMatchObject({ type: 'apiKey', name: 'X-Alias', in: 'query' });
+    });
+
+    it('counts a scheme named twice in one requirement once, with the scopes of both', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        secured([{ oauth: ['a'], '#/components/securitySchemes/oauth': ['b', 'a'], bearer: [] }]),
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.metadata.security?.map((s) => [s.scheme, s.scopes])).toEqual([
+        ['oauth', ['a', 'b']],
+        ['bearer', []],
+      ]);
+      expect(tool.mapper.filter((m) => m.security).map((m) => m.inputKey)).toEqual(['oauth', 'bearer']);
+    });
+
+    it('keeps the first scopes when a repeated scheme lists none, or the first are not a list', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        secured([{ oauth: 'x', '#/components/securitySchemes/oauth': ['b'], bearer: ['r'], '#/components/securitySchemes/bearer': 'y' }]),
+        { validate: false },
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.metadata.security?.map((s) => [s.scheme, s.scopes])).toEqual([
+        ['oauth', ['b']],
+        ['bearer', ['r']],
+      ]);
+    });
+
+    it.each<[string, string, string, Record<string, unknown>?]>([
+      [
+        '3.1.0',
+        '#/components/securitySchemes/bearer',
+        'components.securitySchemes does not define (a scheme named by URI needs OpenAPI 3.2 or later)',
+      ],
+      [
+        '3.2.0',
+        '#/components/securitySchemes/missing',
+        'names the scheme "missing" of this document by URI, but components.securitySchemes does not define it',
+      ],
+      [
+        '3.2.0',
+        '#/components/schemas/Pet',
+        'components.securitySchemes does not define, and read as a URI it points to "#/components/schemas/Pet" in ' +
+          'this document, which is not under /components/securitySchemes',
+      ],
+      [
+        '3.2.0',
+        'https://example.com/api/openapi.yaml#/components/securitySchemes/bearer',
+        'components.securitySchemes does not define, and read as a URI it cannot be resolved: the document has no ' +
+          'base URI (load it with fromURL or fromFile, or pass LoadOptions.documentUri)',
+      ],
+    ])('leaves an unresolvable key unresolved (%s, %s)', async (openapi, key, problem) => {
+      const generator = await OpenAPIToolGenerator.fromJSON(secured([{ [key]: [] }], {}, openapi));
+      await expect(generator.generateTools()).resolves.toEqual([]);
+      const diagnostics = generator.getDiagnostics().filter((d) => d.code === 'UNRESOLVED_SECURITY_SCHEME');
+      expect(diagnostics.map((d) => d.message)).toEqual([
+        `Security Requirement names scheme ${describeValue(key)}, which ${problem}; the requirement cannot be ` +
+          'satisfied and is dropped with every scheme it combines',
+      ]);
+      expect(codes(generator)).toContain('UNSATISFIABLE_SECURITY');
+    });
+  });
+
+  describe('references that cannot be read', () => {
+    const refusedFor = async (ref: string, options: LoadOptions = {}): Promise<ParseError> =>
+      rejection((await OpenAPIToolGenerator.fromJSON(entry(ref), options)).generateTools());
+
+    it.each<[string, LoadOptions, string, string]>([
+      [
+        'https://example.com/pet.json',
+        { refResolution: { allowedProtocols: ['http'] } },
+        'protocol',
+        'its protocol "https" is not in refResolution.allowedProtocols ("http"); add "https" to refResolution.allowedProtocols to read it',
+      ],
+      [
+        'file:///etc/passwd',
+        {},
+        'protocol',
+        'it is read as a local file, and refResolution.allowedProtocols ("http", "https") does not include "file"; add "file" to refResolution.allowedProtocols to read it',
+      ],
+      [
+        'https://evil.example/pet.json',
+        { refResolution: { allowedHosts: ['schemas.example.com'] } },
+        'host-not-allowed',
+        'its host "evil.example" is not in refResolution.allowedHosts; add the host to refResolution.allowedHosts to read it',
+      ],
+      [
+        'https://evil.example/pet.json',
+        { refResolution: { blockedHosts: ['EVIL.example.'] } },
+        'host-blocked',
+        'its host "evil.example" is in refResolution.blockedHosts',
+      ],
+      [
+        'http://169.254.169.254/latest/meta-data/',
+        {},
+        'internal-address',
+        'its host "169.254.169.254" is an internal address (loopback, private, link-local or cloud metadata); refResolution.allowInternalIPs would allow it (unsafe for documents you do not trust)',
+      ],
+    ])('says why %s is refused', async (ref, options, rule, reason) => {
+      const error = await refusedFor(ref, options);
+      expect(error).toBeInstanceOf(ParseError);
+      expect(error.message).toMatch(/^Failed to dereference OpenAPI document: Cannot read \$ref /);
+      expect(error.message.endsWith(`: ${reason}`)).toBe(true);
+      expect(error.context).toMatchObject({ reference: ref.replace(/#.*/, ''), rule });
+    });
+
+    it('says when an address the host resolves to is refused', async () => {
+      jest.spyOn(dns.promises, 'lookup').mockResolvedValue([{ address: '10.0.0.5', family: 4 }] as never);
+      const error = await refusedFor('http://schemas.internal.example/pet.json');
+      expect(error.message).toContain(
+        'to "http://schemas.internal.example/pet.json": Host "schemas.internal.example" resolves to blocked address 10.0.0.5',
+      );
+      expect(error.context).toMatchObject({ rule: 'resolved-address' });
+    });
+
+    it('says when the server refuses the document', async () => {
+      const error = await refusedFor(`${origin}/missing.json`, { refResolution: internal });
+      expect(error.message.endsWith(': the server answered 404 "Not Found"')).toBe(true);
+      expect(error.context).toMatchObject({ rule: 'response', resolved: `${origin}/missing.json` });
+    });
+
+    it('says when the fetch fails', async () => {
+      const error = await refusedFor('http://127.0.0.1:1/pet.json', { refResolution: internal });
+      expect(error.message).toMatch(/^Failed to dereference OpenAPI document: Cannot read \$ref .*: .*ECONNREFUSED/);
+      expect(error.context).toMatchObject({ rule: 'fetch-failed', resolved: 'http://127.0.0.1:1/pet.json' });
+    });
+
+    it('quotes the document bounded and escaped', async () => {
+      const ref = `https://evil.example/${'x'.repeat(3000)}\u001b[31m\n.json`;
+      const error = await refusedFor(ref, { refResolution: { allowedHosts: ['good.example'] } });
+      expect(error.message.length).toBeLessThan(1200);
+      expect(error.message).not.toMatch(/[\u0000-\u001f]/);
+    });
+
+    it('names the reference alone when the resolver is not told where it came from', async () => {
+      const spy = jest.spyOn(refParser(), 'dereference').mockImplementation(async (doc: unknown) => doc);
+      // A fresh set of resolvers (and read queue) for each call
+      const refusedOf = async (options: LoadOptions = {}) => {
+        spy.mockClear();
+        await (await OpenAPIToolGenerator.fromJSON(entry('https://example.com/pet.json'), options)).generateTools();
+        return (spy.mock.calls[0][1] as any).resolve.refused;
+      };
+      const refused = await refusedOf();
+      expect(refused.canRead({ url: 'http://10.0.0.1/a.json' })).toBe(true);
+      expect(refused.canRead({ url: 'https://example.com/a.json' })).toBe(false);
+      expect(refused.canRead({ url: '/srv/a.json' })).toBe(true);
+      await expect(refused.read({ url: 'http://[zz]/a.json' })).rejects.toThrow(
+        'Cannot read external $ref "http://[zz]/a.json": it is not a valid URL',
+      );
+      // Once a read failed, the reads asked for after it are not started
+      await expect(refused.read({ url: '/srv/a.json' })).rejects.toThrow(
+        'Not read: an earlier reference could not be read',
+      );
+      await expect(
+        (await refusedOf()).read({ url: 'file:///a.json', reference: '/a.json', baseUrl: 'https://example.com/x' }),
+      ).rejects.toThrow(
+        'Cannot read $ref "/a.json" resolved against "https://example.com/x" to "file:///a.json": it is read as a local file',
+      );
+      await expect((await refusedOf()).read({ url: '/srv/a.json', reference: 'a.json' })).rejects.toThrow(
+        /^Cannot read \$ref "a.json" to "\/srv\/a.json": it is read as a local file.*\(the document has no base URI/,
+      );
+      // Where the $ref is: known in the entry document only
+      await expect(
+        (await refusedOf()).read({ url: '/a.json', reference: '/a.json', baseUrl: 'https://example.com/root.json#/x/a%25b~1c' }, undefined, {
+          _root$Ref: { path: 'https://example.com/root.json' },
+        }),
+      ).rejects.toMatchObject({ pointer: '/x/a%b~1c' });
+      const elsewhere = (await rejection(
+        (await refusedOf()).read({ url: '/a.json', reference: '/a.json', baseUrl: 'https://example.com/other.json#/x' }, undefined, {
+          _root$Ref: { path: 'https://example.com/root.json' },
+        }),
+      )) as unknown as { pointer?: string };
+      expect(elsewhere.pointer).toBeUndefined();
+
+      // A local path is the file resolver's when file is allowed
+      expect((await refusedOf({ refResolution: { allowedProtocols: ['file', 'https'] } })).canRead({ url: '/srv/a.json' })).toBe(
+        false,
+      );
+    });
+
+    it('stops looking through causes after a few levels', async () => {
+      let error: Error = new Error('innermost');
+      for (let level = 0; level < 10; level++) error = new Error(`level ${level}`, { cause: error });
+      jest.spyOn(refParser(), 'dereference').mockRejectedValueOnce(error);
+      await expect((await OpenAPIToolGenerator.fromJSON(entry('https://example.com/pet.json'))).generateTools()).rejects.toThrow(
+        'Failed to dereference OpenAPI document: level 9',
+      );
+    });
+  });
+
+  describe('LoadOptions.documentUri', () => {
+    it.each<[string, (options: LoadOptions) => Promise<OpenAPIToolGenerator>]>([
+      ['fromJSON', (options) => OpenAPIToolGenerator.fromJSON(entry('#/components/schemas/Pet'), options)],
+      ['fromYAML', (options) => OpenAPIToolGenerator.fromYAML(JSON.stringify(entry('#/components/schemas/Pet')), options)],
+    ])('is checked by %s with a LoadError', async (_factory, load) => {
+      await expect(load({ documentUri: 'openapi.yaml' })).rejects.toThrow(LoadError);
+      await expect(load({ documentUri: 'https://user:pw@example.com/openapi.yaml' })).rejects.toThrow(
+        'LoadOptions.documentUri must not contain user information',
+      );
+      await expect(load({ documentUri: 'https://example.com/openapi.yaml' })).resolves.toBeInstanceOf(
+        OpenAPIToolGenerator,
+      );
+    });
+
+    it('is checked by fromFile with a LoadError', async () => {
+      await withFiles({ 'openapi.json': entry('#/components/schemas/Pet') }, async (dir) => {
+        await expect(
+          OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), { documentUri: 'ftp://example.com/x' }),
+        ).rejects.toThrow('LoadOptions.documentUri must be an http, https or file URI');
+      });
+    });
+
+    it('never changes servers', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        entry('#/components/schemas/Pet', { servers: [{ url: '/v1' }], $self: 'https://self.example/api' }, '3.2.0'),
+        { documentUri: 'https://docs.example/openapi.yaml' },
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.metadata.servers).toEqual([{ url: '/v1' }]);
+    });
+  });
+
+  describe('deeply nested documents', () => {
+    /** A document whose schema `Deep` nests `depth` levels, as JSON text (JSON.stringify cannot go that deep). */
+    const deepJson = (depth: number, extra = ''): string => {
+      let schema = '{"type":"string"}';
+      for (let level = 0; level < depth; level++) schema = `{"type":"object","properties":{"a":${schema}}}`;
+      return (
+        '{"openapi":"3.0.3","info":{"title":"Deep","version":"1"},"servers":[{"url":"https://api.example.com"}],' +
+        `"paths":{"/a":{"get":{"operationId":"getA","responses":{"200":{"description":"ok"}}}}},` +
+        `"components":{"schemas":{"Deep":${schema}${extra}}}}`
+      );
+    };
+
+    it.each<[string, LoadOptions]>([
+      ['default options', {}],
+      ['secureDefaults', { secureDefaults: true }],
+      ['dereference: false', { dereference: false }],
+    ])('validates a document nested 10,000 deep without a $ref (%s)', async (_label, options) => {
+      await withFiles({ 'deep.json': deepJson(10000) }, async (dir) => {
+        const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'deep.json'), options);
+        const result = await generator.validate();
+        expect(result.valid).toBe(true);
+        expect(result).toEqual(await new Validator().validate(generator.getDocument()));
+      });
+    });
+
+    it('validates one nested 2,500 deep loaded with fromJSON', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(JSON.parse(deepJson(2500)));
+      expect((await generator.validate()).valid).toBe(true);
+    });
+
+    it('still throws, as generation does, for one too deep to be copied that references another document', async () => {
+      await withFiles({ 'deep.json': deepJson(10000, ',"Other":{"$ref":"other.json"}') }, async (dir) => {
+        const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'deep.json'));
+        await expect(generator.validate()).rejects.toThrow(ParseError);
+        await expect(generator.generateTools()).rejects.toThrow(ParseError);
+      });
+    });
+  });
+
+  describe('references to the document itself', () => {
+    const own = 'https://example.com/api/openapi.json';
+    const schemas = {
+      Pet: pet,
+      'A B': pet,
+      '50%': pet,
+      '': pet,
+      Ref: { $ref: '#/components/schemas/Pet', title: 'through' },
+    };
+    /** `entry(petRef)` with more schemas; `extra` adds a reference to another document, read from the loopback */
+    const document = (petRef: string, extra: Record<string, unknown> = {}) =>
+      entry(petRef, { components: { schemas: { ...schemas, ...extra } } });
+    const otherDocument = () => ({ Extra: { $ref: `${origin}/extra.json` } });
+    const paths = [
+      ['the internal dereferencer', {}],
+      ['$RefParser (another document is referenced too)', { other: true }],
+    ] as const;
+
+    it.each(paths)('percent-decodes the fragment, whichever dereferencer runs: %s', async (_label, variant) => {
+      routes['/extra.json'] = { type: 'string' };
+      const spy = jest.spyOn(refParser(), 'dereference');
+      for (const fragment of ['A%20B', '50%25', '', 'Pet']) {
+        const generator = await OpenAPIToolGenerator.fromJSON(
+          document(`${own}#/components/schemas/${fragment}`, 'other' in variant ? otherDocument() : {}),
+          { documentUri: own, refResolution: internal },
+        );
+        expect(hasPet((await generator.generateTools())[0])).toBe(true);
+      }
+      expect(spy).toHaveBeenCalledTimes('other' in variant ? 4 : 0);
+    });
+
+    it.each(paths)('fails the load for a pointer that leads nowhere, whichever dereferencer runs: %s', async (_label, variant) => {
+      routes['/extra.json'] = { type: 'string' };
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        document(`${own}#/components/schemas/Nope`, 'other' in variant ? otherDocument() : {}),
+        { documentUri: own, refResolution: internal },
+      );
+      const error = await rejection(generator.generateTools());
+      expect(error.message).toBe(
+        `Failed to dereference OpenAPI document: Cannot read $ref "${own}#/components/schemas/Nope" at ` +
+          `"#/paths/~1pets/post/requestBody/content/application~1json/schema" resolved against "${own}" to ` +
+          `"${own}#/components/schemas/Nope": it names this document, but "#/components/schemas/Nope" points to ` +
+          'nothing in it',
+      );
+      expect(error.context).toEqual({
+        rule: 'missing-target',
+        reference: `${own}#/components/schemas/Nope`,
+        base: own,
+        resolved: `${own}#/components/schemas/Nope`,
+        path: '/paths/~1pets/post/requestBody/content/application~1json/schema',
+      });
+      expect(await generator.validate()).toEqual({
+        valid: false,
+        errors: [
+          {
+            code: 'UNREADABLE_REFERENCE',
+            message: error.message.slice('Failed to dereference OpenAPI document: '.length),
+            path: '/paths/~1pets/post/requestBody/content/application~1json/schema',
+          },
+        ],
+      });
+      // Nothing was read: the check runs before either dereferencer
+      expect(loopback.requests).toHaveLength(0);
+    });
+
+    it('fails the load for a pointer that goes through another $ref', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(document(`${own}#/components/schemas/Ref/title`), {
+        documentUri: own,
+      });
+      await expect(generator.generateTools()).rejects.toThrow(
+        'it names this document, but its pointer goes through another $ref (at "#/components/schemas/Ref"), which is not followed',
+      );
+    });
+
+    it('leaves a local reference that leads nowhere as it always was', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(document('#/components/schemas/Nope'), { documentUri: own });
+      const [tool] = await generator.generateTools();
+      expect(tool.name).toBe('createPet');
+    });
+
+    it('reads $ref "" as the whole document, with a base URI only', async () => {
+      const whole = { ...entry('#/components/schemas/Pet'), components: { schemas: { Pet: pet, Doc: { $ref: '' } } } };
+      const withBase = await OpenAPIToolGenerator.fromJSON(whole, { documentUri: own });
+      await withBase.lint();
+      const doc = withBase.getDocument() as any;
+      expect(doc.components.schemas.Doc.openapi).toBe('3.0.3');
+      const withoutBase = await OpenAPIToolGenerator.fromJSON(whole);
+      await withoutBase.lint();
+      expect((withoutBase.getDocument() as any).components.schemas.Doc).toEqual({ $ref: '' });
+    });
+
+    it('drops the keywords next to the $ref, as for a local reference', async () => {
+      for (const ref of [`${own}#/components/schemas/Pet`, '#/components/schemas/Pet']) {
+        const withSibling = entry('#/components/schemas/Pet');
+        (withSibling.paths['/pets'].post.requestBody.content['application/json'] as Record<string, unknown>)['schema'] = {
+          $ref: ref,
+          description: 'a sibling keyword',
+        };
+        const generator = await OpenAPIToolGenerator.fromJSON(withSibling, { documentUri: own });
+        await generator.generateTools();
+        const schema = (generator.getDocument() as any).paths['/pets'].post.requestBody.content['application/json'].schema;
+        expect(schema).toEqual(pet);
+      }
+    });
+
+    it('validates what generation reads when the only references are to the document itself', async () => {
+      const spy = jest.spyOn(refParser(), 'dereference');
+      const selfOnly = {
+        ...entry('#/components/schemas/Pet'),
+        paths: { '/pets': { get: { $ref: `${own}#/components/x-operations/listPets` } } },
+        components: { schemas: { Pet: pet }, 'x-operations': { listPets: { operationId: 'listPets', responses: ok } } },
+      };
+      // As written, the operation is a bare $ref: no responses, which OpenAPI 3.0 requires
+      expect((await new Validator().validate(selfOnly)).errors?.map((e) => e.code)).toEqual(['NO_RESPONSES']);
+      const generator = await OpenAPIToolGenerator.fromJSON(selfOnly, { documentUri: own });
+      expect(await generator.validate()).toEqual({ valid: true });
+      expect((await generator.generateTools()).map((t) => t.name)).toEqual(['listPets']);
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('makes 100,000 references to the document local quickly, with a base near the length limit', async () => {
+      const longOwn = `https://example.com/${'p/'.repeat(990)}openapi.json`;
+      expect(longOwn.length).toBeLessThanOrEqual(2048);
+      const many = entry('#/components/schemas/Pet');
+      (many.components as Record<string, unknown>)['x-many'] = Array.from({ length: 100000 }, () => ({
+        $ref: `${longOwn}#/components/schemas/Pet`,
+      }));
+      const spy = jest.spyOn(refParser(), 'dereference');
+      const started = Date.now();
+      const generator = await OpenAPIToolGenerator.fromJSON(many, { documentUri: longOwn });
+      expect((await generator.validate()).valid).toBe(true);
+      expect(await generator.generateTools()).toHaveLength(1);
+      expect(Date.now() - started).toBeLessThan(30000);
+      expect(spy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('URIs too long to be used', () => {
+    const longPath = `/api/openapi.json?sig=${'s'.repeat(3000)}`;
+
+    it('does not use a retrieval URI past the limit: relative references are refused, absolute ones read', async () => {
+      routes['/start'] = (_req: unknown, res: import('http').ServerResponse) => {
+        res.writeHead(302, { location: longPath });
+        res.end();
+      };
+      routes[longPath] = entry('schemas/pet.json');
+      routes['/api/schemas/pet.json'] = pet;
+      const generator = await OpenAPIToolGenerator.fromURL(`${origin}/start`, { refResolution: internal });
+      expect(codes(generator)).toEqual(['BASE_URI_TOO_LONG']);
+      const error = await rejection(generator.generateTools());
+      expect(error.message).toBe(
+        'Failed to dereference OpenAPI document: Cannot read $ref "schemas/pet.json" at ' +
+          '"#/paths/~1pets/post/requestBody/content/application~1json/schema" to "schemas/pet.json": it is relative, ' +
+          'and the URI the document was retrieved from is too long to be used as its base (BASE_URI_TOO_LONG)',
+      );
+      expect(error.context).toMatchObject({ rule: 'base-too-long' });
+      expect(requested()).toEqual(['/start', longPath]);
+
+      loopback.reset();
+      routes[longPath] = entry(`${origin}/api/schemas/pet.json`);
+      const absolute = await OpenAPIToolGenerator.fromURL(`${origin}/start`, { refResolution: internal });
+      expect(hasPet((await absolute.generateTools())[0])).toBe(true);
+    });
+
+    it('still knows the document by an absolute $self, and checks its references', async () => {
+      routes['/start'] = (_req: unknown, res: import('http').ServerResponse) => {
+        res.writeHead(302, { location: longPath });
+        res.end();
+      };
+      const self = 'https://example.com/api/openapi';
+      routes[longPath] = entry(`${self}#/components/schemas/Pet`, { $self: self }, '3.2.0');
+      const generator = await OpenAPIToolGenerator.fromURL(`${origin}/start`, { refResolution: internal });
+      expect(hasPet((await generator.generateTools())[0])).toBe(true);
+
+      routes[longPath] = entry(`${self}#/components/schemas/Nope`, { $self: self }, '3.2.0');
+      const missing = await OpenAPIToolGenerator.fromURL(`${origin}/start`, { refResolution: internal });
+      const error = await rejection(missing.generateTools());
+      expect(error.message).toContain(`Cannot read $ref "${self}#/components/schemas/Nope" at`);
+      expect(error.context).toEqual({
+        rule: 'missing-target',
+        reference: `${self}#/components/schemas/Nope`,
+        resolved: `${self}#/components/schemas/Nope`,
+        path: '/paths/~1pets/post/requestBody/content/application~1json/schema',
+      });
+    });
+
+    it('refuses a documentUri past the limit before reading anything', async () => {
+      await expect(
+        OpenAPIToolGenerator.fromURL(`${origin}/api/openapi.json`, {
+          documentUri: `https://example.com/${'x'.repeat(3000)}`,
+          refResolution: internal,
+        }),
+      ).rejects.toThrow('LoadOptions.documentUri must be at most 2048 characters');
+      expect(loopback.requests).toHaveLength(0);
+    });
+  });
+
+  describe('failures, in order and with accurate rules', () => {
+    const failing = (refs: Record<string, string>, options: LoadOptions = { refResolution: internal }) =>
+      OpenAPIToolGenerator.fromJSON(
+        entry('#/components/schemas/Pet', {
+          components: {
+            schemas: { Pet: pet, ...Object.fromEntries(Object.entries(refs).map(([name, ref]) => [name, { $ref: ref }])) },
+          },
+        }),
+        options,
+      );
+
+    it('reports the first reference in document order that cannot be read, whatever answers first', async () => {
+      const policy = { refResolution: { ...internal, blockedHosts: ['refused.example'] } };
+      routes['/slow.json'] = (_req: unknown, res: import('http').ServerResponse) => {
+        setTimeout(() => {
+          res.writeHead(404, 'Not Found');
+          res.end();
+        }, 150);
+      };
+      for (let run = 0; run < 3; run++) {
+        const generator = await failing(
+          { A: `${origin}/slow.json`, B: 'http://refused.example/refused.json', C: `${origin}/fast-missing.json` },
+          policy,
+        );
+        const error = await rejection(generator.generateTools());
+        expect(error.context).toMatchObject({ rule: 'response', path: '/components/schemas/A', resolved: `${origin}/slow.json` });
+      }
+      const refusedFirst = await rejection(
+        (await failing({ B: 'http://refused.example/refused.json', A: `${origin}/slow.json` }, policy)).generateTools(),
+      );
+      expect(refusedFirst.context).toMatchObject({ rule: 'host-blocked', path: '/components/schemas/B' });
+    });
+
+    it('keeps that order into referenced documents', async () => {
+      routes['/a.json'] = { type: 'object', properties: { x: { $ref: 'slow-missing.json' } } };
+      routes['/b.json'] = { type: 'object', properties: { y: { $ref: 'fast-missing.json' } } };
+      routes['/slow-missing.json'] = (_req: unknown, res: import('http').ServerResponse) => {
+        setTimeout(() => {
+          res.writeHead(404, 'Not Found');
+          res.end();
+        }, 150);
+      };
+      for (let run = 0; run < 3; run++) {
+        const error = await rejection((await failing({ A: `${origin}/a.json`, B: `${origin}/b.json` })).generateTools());
+        expect(error.context).toMatchObject({ reference: 'slow-missing.json', base: `${origin}/a.json` });
+      }
+    });
+
+    it.each<[string, () => void, string, LoadOptions]>([
+      [
+        'a body over the size limit',
+        () => {
+          routes['/huge.json'] = `"${'x'.repeat(11 * 1024 * 1024)}"`;
+        },
+        'too-large',
+        { refResolution: internal },
+      ],
+      [
+        'no answer in time',
+        () => {
+          routes['/huge.json'] = (_req: unknown, res: import('http').ServerResponse) => {
+            setTimeout(() => res.end('{}'), 1500);
+          };
+        },
+        'timeout',
+        { timeout: 200, refResolution: internal },
+      ],
+      [
+        'a document that is not JSON or YAML',
+        () => {
+          routes['/huge.json'] = '{"type": ';
+        },
+        'invalid-document',
+        { refResolution: internal },
+      ],
+    ])('labels %s', async (_label, setUp, rule, options) => {
+      setUp();
+      const error = await rejection((await failing({ A: `${origin}/huge.json` }, options)).generateTools());
+      expect(error.context).toMatchObject({ rule });
+    });
+
+    it('labels a pointer that leads nowhere in another document', async () => {
+      routes['/doc.json'] = { a: 1 };
+      const error = await rejection((await failing({ A: `${origin}/doc.json#/nope` })).generateTools());
+      expect(error.context).toEqual({ rule: 'missing-target' });
+    });
+
+    it('labels a name that does not resolve', async () => {
+      jest.spyOn(dns.promises, 'lookup').mockRejectedValue(new Error('getaddrinfo ENOTFOUND schemas.invalid'));
+      const error = await rejection((await failing({ A: 'http://schemas.invalid/pet.json' }, {})).generateTools());
+      expect(error.context).toMatchObject({ rule: 'dns-failed' });
+    });
+
+    it('labels anything else unreadable', async () => {
+      jest.spyOn(refParser(), 'dereference').mockRejectedValueOnce('string dereference error');
+      const error = await rejection((await failing({ A: 'https://example.com/pet.json' }, {})).generateTools());
+      expect(error.context).toEqual({ rule: 'unreadable' });
+    });
+
+    it('bounds and escapes the context, and hides the query of the URLs', async () => {
+      const ref = `${origin}/${'x'.repeat(3000)}\u001b[31m.json?token=REF-SECRET`;
+      const error = await rejection((await failing({ A: ref })).generateTools());
+      for (const key of ['reference', 'resolved']) {
+        expect((error.context?.[key] as string).length).toBeLessThanOrEqual(259);
+        expect(error.context?.[key]).not.toMatch(/[\u0000-\u001f]/);
+      }
+      const withQuery = await rejection(
+        (await failing({ A: `${origin}/pet.json?token=REF-SECRET` })).generateTools(),
+      );
+      // The reference is quoted as the document wrote it; the URL it resolved to is shown without its query
+      expect(withQuery.context).toMatchObject({
+        rule: 'response',
+        reference: `${origin}/pet.json?token=REF-SECRET`,
+        resolved: `${origin}/pet.json?...`,
+      });
+      expect(withQuery.message).toContain(`to "${origin}/pet.json?..."`);
+    });
+
+    it('locates a failure in another document by the reference alone', async () => {
+      routes['/a.json'] = { type: 'object', properties: { b: { $ref: 'missing.json' } } };
+      const generator = await failing({ A: `${origin}/a.json` });
+      const error = await rejection(generator.generateTools());
+      expect(error.message).toContain(`Cannot read $ref "missing.json" at "#/properties/b" resolved against "${origin}/a.json"`);
+      expect(error.context).toEqual({
+        rule: 'response',
+        reference: 'missing.json',
+        base: `${origin}/a.json`,
+        resolved: `${origin}/missing.json`,
+      });
+      const result = await generator.validate();
+      expect(result.errors).toEqual([{ code: 'UNREADABLE_REFERENCE', message: expect.stringContaining('missing.json') }]);
+    });
+
+    it('returns a 404 from validate() and throws it from generation', async () => {
+      const generator = await failing({ A: `${origin}/missing.json` });
+      const result = await generator.validate();
+      expect(result.errors?.map((e) => [e.code, e.path])).toEqual([['UNREADABLE_REFERENCE', '/components/schemas/A']]);
+      await expect(generator.generateTools()).rejects.toThrow(ParseError);
+    });
+
+    it('throws from validate() for a document JSON cannot copy that references another document', async () => {
+      const yamlText =
+        'openapi: 3.0.3\ninfo: {title: t, version: "1"}\npaths: {/a: {get: {responses: {"200": {description: ok}}}}}\n' +
+        'components:\n  schemas:\n    A: &a\n      properties:\n        self: *a\n    B: {$ref: "other.json"}\n';
+      const generator = await OpenAPIToolGenerator.fromYAML(yamlText);
+      await expect(generator.validate()).rejects.toThrow(ParseError);
+    });
+  });
+
+  describe('LoadOptions.documentUri, checked first', () => {
+    it('is checked before fromURL fetches or fromFile reads', async () => {
+      await expect(
+        OpenAPIToolGenerator.fromURL(`${origin}/api/openapi.json`, { documentUri: 'openapi.json', refResolution: internal }),
+      ).rejects.toThrow('LoadOptions.documentUri must be an absolute URI');
+      expect(loopback.requests).toHaveLength(0);
+      await expect(
+        OpenAPIToolGenerator.fromFile('/nonexistent/openapi.json', { documentUri: 'openapi.json' }),
+      ).rejects.toThrow('LoadOptions.documentUri must be an absolute URI');
+    });
+
+    it('never quotes its user information', async () => {
+      const error = await rejection(
+        OpenAPIToolGenerator.fromJSON(entry('#/components/schemas/Pet'), { documentUri: 'https://admin:hunter2@example.com/x' }),
+      );
+      expect(error).toBeInstanceOf(LoadError);
+      expect(JSON.stringify({ message: error.message, context: error.context })).not.toContain('hunter2');
+    });
+  });
+
+  it('does not confine file reads to the folder of the document (with file allowed, any local file is readable)', async () => {
+    await withFiles({ 'api/openapi.json': entry('../outside/pet.json'), 'outside/pet.json': pet }, async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'api/openapi.json'), {
+        refResolution: { allowedProtocols: ['file'] },
+      });
+      expect(hasPet((await generator.generateTools())[0])).toBe(true);
     });
   });
 });

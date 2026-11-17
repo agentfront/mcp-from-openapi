@@ -17,8 +17,10 @@ import {
 import type {
   ArazzoDocument,
   DiagnosticCode,
+  FromArazzoOptions,
   GenerateOptions,
   HTTPMethod,
+  LoadOptions,
   McpOpenAPITool,
   NamingStrategy,
   OAS30,
@@ -43,6 +45,7 @@ import type {
   ServerObject,
   StandardMethod,
   ToolMetadata,
+  ValidationResult,
 } from 'mcp-from-openapi';
 
 declare const arazzo: ArazzoDocument;
@@ -464,3 +467,26 @@ export function wholeQueryIsNotAlwaysThere(entry: ParameterMapper): true {
 
 // @ts-expect-error a misspelt code is not in the registry
 export const misspeltDiagnosticCode: DiagnosticCode = 'QUERYSTRING_PARAMETER_MISSING_CONTENT';
+
+// ---------------------------------------------------------------------------
+// LoadOptions.documentUri is a string: a URL object is not accepted (it would be a LoadError at runtime)
+// ---------------------------------------------------------------------------
+
+// @ts-expect-error `documentUri` is a string: pass `url.href`, not the URL object
+export const documentUriAsUrlObject: LoadOptions = { documentUri: new URL('https://example.com/specs/openapi.yaml') };
+
+// ---------------------------------------------------------------------------
+// validate() returns an unreadable reference as an error; `code` may be absent
+// ---------------------------------------------------------------------------
+
+export function validationCodeIsOptional(result: ValidationResult): string {
+  // @ts-expect-error `errors` is absent in a valid result and an error may carry no `code`: the value is `string | undefined`
+  return result.errors?.[0]?.code;
+}
+
+// ---------------------------------------------------------------------------
+// One documentUri cannot be shared by the raw sources of an Arazzo document
+// ---------------------------------------------------------------------------
+
+// @ts-expect-error `loadOptions` is shared by every source and has no `documentUri`: load a source with its own and pass the generator
+export const arazzoSharedDocumentUri: FromArazzoOptions = { sources: {}, loadOptions: { documentUri: 'https://example.com/openapi.yaml' } };

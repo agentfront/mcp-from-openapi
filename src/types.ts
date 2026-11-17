@@ -1323,6 +1323,19 @@ export interface RefResolutionOptions {
   /**
    * Protocols allowed for external $ref resolution.
    * Any protocol string is accepted (http, https, ftp, ws, wss, etc.).
+   * A relative `$ref` is retrieved against the document's retrieval URI
+   * (its file for `fromFile`, its final URL for `fromURL`, or
+   * `LoadOptions.documentUri`) whenever one is known; `$self` (OpenAPI 3.2)
+   * is the retrieval base only for `fromJSON`/`fromYAML` without
+   * `documentUri`, and then only when absolute. The result must pass these
+   * rules like an absolute one: a multi-file description on disk needs
+   * `file`. Allowing `file` allows
+   * every local file the process can read: references are not confined to
+   * the document's folder (`../../etc/hosts` is read too), so do not allow
+   * it for documents you do not trust. A `$ref` to the document itself is
+   * resolved locally and needs no protocol. A refused `$ref` fails with a
+   * `ParseError` naming the reference, its base, the rule
+   * (`context.rule`) and the option that would allow it.
    * @default ['http', 'https']
    */
   allowedProtocols?: string[];
@@ -1369,6 +1382,27 @@ export interface LoadOptions {
   baseUrl?: string;
 
   /**
+   * The URI the document was retrieved from. Relative `$ref`s (and a
+   * relative `$self`) are resolved against it to be read, and it names the
+   * document, so a `$ref` to it stays local instead of being fetched. An
+   * absolute `http`, `https` or `file` URI of at most 2,048 characters,
+   * without user information, fragment or (for a file URI) host; anything
+   * else throws a `LoadError` before anything is read (user information is
+   * never quoted back).
+   *
+   * `fromURL` sets it to the final URL of the spec (after redirects, without
+   * user information) and `fromFile` to the file's `file:` URL; passing it
+   * replaces that, for example to resolve a local copy as if it were read
+   * from where it is published. `fromJSON` and `fromYAML` have none unless it
+   * is passed: then relative external `$ref`s resolve against an absolute
+   * `$self` (OpenAPI 3.2), or else against the process working directory, as
+   * in earlier releases. With a retrieval URI, `$self` only names the
+   * document: it never moves where relative references are read from. It is
+   * not `baseUrl`, the API's address, and never changes `servers`.
+   */
+  documentUri?: string;
+
+  /**
    * Custom HTTP headers for loading from URL (e.g. the spec host's
    * `Authorization`). Sent only to the spec URL's origin: if a redirect leaves
    * that origin (host, port, or scheme), they are dropped for every remaining
@@ -1409,8 +1443,10 @@ export interface LoadOptions {
    * Opt into the strictest loading posture in one flag: redirects are not
    * followed and external `$ref` resolution is disabled entirely
    * (`refResolution.allowedProtocols: []`) — the right default when loading
-   * untrusted specs. Explicitly-set `followRedirects`/`refResolution` values
-   * still win over the preset.
+   * untrusted specs. A `$ref` to the document's own URI (its retrieval URI
+   * or `$self`) is not external: it is still resolved, without a fetch.
+   * Explicitly-set `followRedirects`/`refResolution` values still win over
+   * the preset.
    * @default false
    */
   secureDefaults?: boolean;
@@ -1812,7 +1848,9 @@ export const LEGACY_PATH_KEY_MAX_LENGTH = 1024;
 
 /**
  * Every code a diagnostic from `generator.getDiagnostics()` can carry, with
- * what it means. Values never change once released.
+ * what it means, and `UNREADABLE_REFERENCE`, the validation error
+ * `generator.validate()` returns for a reference it cannot read. Values
+ * never change once released.
  */
 export const DIAGNOSTIC_CODES = Object.freeze({
   // Spec layer: the declared version, the Path Item walk, newer features
@@ -1832,11 +1870,51 @@ export const DIAGNOSTIC_CODES = Object.freeze({
   /** Validator warning: the document has security requirements but no security schemes. */
   NO_SECURITY_SCHEMES: 'NO_SECURITY_SCHEMES',
   /**
-   * A Security Requirement names a scheme `components.securitySchemes` does
-   * not define (a scheme named by URI is not resolved yet). The requirement
-   * object cannot be satisfied and is dropped.
+   * A Security Requirement names a scheme that cannot be found: no component
+   * of `components.securitySchemes` has the name, and (OpenAPI 3.2 or later)
+   * read as a URI it does not name a scheme of this document (another
+   * document's schemes are not read). The requirement object cannot be
+   * satisfied and is dropped.
    */
   UNRESOLVED_SECURITY_SCHEME: 'UNRESOLVED_SECURITY_SCHEME',
+  /**
+   * `$self` breaks the specification: it is not a string in the form of a URI
+   * reference, or it has a fragment. It is ignored; a validation error.
+   */
+  INVALID_SELF: 'INVALID_SELF',
+  /**
+   * `$self` is a URI reference this library does not use as a base: it has
+   * user information, its scheme is not http, https or file, it is a file
+   * URI naming a host or in a document retrieved over the network, or it (or
+   * the URI it resolves to) is longer than `MAX_BASE_URI_LENGTH` (2,048)
+   * characters. It is ignored.
+   */
+  REFUSED_SELF: 'REFUSED_SELF',
+  /**
+   * `$self` is a relative reference and the document has no retrieval URI
+   * to resolve it against (loaded with `fromJSON`/`fromYAML` without
+   * `LoadOptions.documentUri`), or only one too long to be used. It is
+   * ignored.
+   */
+  UNRESOLVABLE_SELF: 'UNRESOLVABLE_SELF',
+  /**
+   * The URI the document was retrieved from (the final URL of `fromURL`, a
+   * redirect included, or the file of `fromFile`) is longer than 2,048
+   * characters, so it is not used: a reference to the document by that URI
+   * is not recognised as local, and a relative reference to another
+   * document fails the load (it is never resolved against the working
+   * directory instead). Recorded at load, without a `path`.
+   */
+  BASE_URI_TOO_LONG: 'BASE_URI_TOO_LONG',
+  /**
+   * `generator.validate()` could not read a reference the document holds
+   * (refused by a `refResolution` rule, missing, not JSON or YAML, a pointer
+   * that leads nowhere, ...): the validation error it returns instead of
+   * throwing. The message is the one the `ParseError` of generation carries;
+   * `path` locates the `$ref` when it is in the document itself. Never a
+   * `getDiagnostics()` entry.
+   */
+  UNREADABLE_REFERENCE: 'UNREADABLE_REFERENCE',
   /** A Security Requirement is not an object; it is dropped. */
   INVALID_SECURITY_REQUIREMENT: 'INVALID_SECURITY_REQUIREMENT',
   /**

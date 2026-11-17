@@ -17,7 +17,7 @@ import { SchemaBuilder, resolveSchemaLimits } from './schema-builder';
 import { applyClientTarget } from './client-targets';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { emitToolTypeScript } from './type-signature';
-import { toJsonSchema } from './types';
+import { DIAGNOSTIC_CODES, toJsonSchema } from './types';
 import {
   detectSpecVersion,
   getOperation,
@@ -36,6 +36,7 @@ import type {
   JsonSchema,
   LoadOptions,
   McpOpenAPITool,
+  OpenAPIDocument,
   SchemaObject,
   SecurityRequirement,
 } from './types';
@@ -89,6 +90,13 @@ export interface FromArazzoOptions {
    * Source description name → resolved OpenAPI document or pre-built
    * generator. Source URLs are NEVER fetched — the caller supplies resolved
    * documents for every source the workflows use.
+   *
+   * A source whose path items or operations are `$ref`s to other documents (a
+   * multi-file description) is indexed as the generator generates from it,
+   * dereferenced: the references are read here, once, by the generator that
+   * holds them and under its own `refResolution`, so there is no need to
+   * generate tools first. A reference that cannot be read is an
+   * `ArazzoError` carrying the reason.
    */
   sources: Record<string, object | OpenAPIToolGenerator>;
 
@@ -100,6 +108,12 @@ export interface FromArazzoOptions {
 
   /**
    * Load options for internally-constructed generators (raw documents only).
+   * They are shared by every raw source, so they cannot carry
+   * `documentUri`, which names one document: a source that needs its own
+   * URI (for relative references, or references to itself) is loaded with
+   * `OpenAPIToolGenerator.fromJSON(document, { documentUri })` (or
+   * `fromURL`/`fromFile`) and passed in `sources` as a generator. A
+   * `documentUri` here throws an `ArazzoError`.
    */
   loadOptions?: Pick<LoadOptions, 'dereference' | 'validate' | 'baseUrl' | 'overlays'>;
 }
@@ -482,7 +496,60 @@ function operationLayout(document: object) {
   return resolveOperationLayout(detectSpecVersion(document));
 }
 
+/** Whether `value` is a `$ref` object (a string `$ref`, as dereferencing reads it). */
+function isReference(value: unknown): boolean {
+  return typeof ownProperty(value, '$ref') === 'string';
+}
+
+/**
+ * The document `generator` generates from, which is where a step finds its
+ * operation. A path item or an operation that is a `$ref` to another document
+ * (a multi-file description) holds its operations in that document, so until
+ * the generator dereferences them they are not in `getDocument()`. The
+ * generator does that on first use; this is where it is needed first, so
+ * `validate()` does it now: for a document that references other documents it
+ * dereferences once (the result is kept for generation) and, unlike
+ * generation, reports a reference that cannot be read as a result instead of
+ * throwing, so the failure is the real one rather than an operation missing
+ * from an index that never saw it. A document with no such reference is
+ * returned as it is, without any work.
+ */
+async function documentToIndex(
+  doc: ArazzoDocument,
+  name: string,
+  generator: OpenAPIToolGenerator,
+): Promise<OpenAPIDocument> {
+  const document = generator.getDocument();
+  const layout = operationLayout(document);
+  const holdsReference = Object.values(document.paths ?? {}).some(
+    (pathItem) =>
+      isReference(pathItem) ||
+      listOperations(pathItem, { layout }).operations.some(({ operation }) => isReference(operation)),
+  );
+  if (!holdsReference) return document;
+
+  const unreadable = (await generator.validate()).errors?.find(
+    (error) => error.code === DIAGNOSTIC_CODES.UNREADABLE_REFERENCE,
+  );
+  if (unreadable !== undefined) {
+    err(
+      `Failed to dereference source "${name}": ${unreadable.message}`,
+      `/sourceDescriptions/${doc.sourceDescriptions.findIndex((source) => source.name === name)}`,
+      { source: name, ...(unreadable.path !== undefined && { sourcePath: unreadable.path }) },
+    );
+  }
+  return generator.getDocument();
+}
+
 async function prepareSources(doc: ArazzoDocument, options: FromArazzoOptions): Promise<SourceContext> {
+  // One URI for every raw source would make each one's references to another's URL local to itself
+  if (ownProperty(options.loadOptions, 'documentUri') !== undefined) {
+    err(
+      'loadOptions.documentUri would give every source the same URI; load a source with its own documentUri ' +
+        '(OpenAPIToolGenerator.fromJSON(document, { documentUri })) and pass the generator in options.sources',
+      '',
+    );
+  }
   const declared = new Map(doc.sourceDescriptions.map((s) => [s.name, s]));
   const generators = new Map<string, OpenAPIToolGenerator>();
   const sourceTypes = new Map<string, 'openapi' | 'arazzo'>();
@@ -505,7 +572,7 @@ async function prepareSources(doc: ArazzoDocument, options: FromArazzoOptions): 
 
   const operationIndex: SourceContext['operationIndex'] = new Map();
   for (const [name, generator] of generators) {
-    const document = generator.getDocument();
+    const document = await documentToIndex(doc, name, generator);
     const layout = operationLayout(document);
     for (const [pathStr, pathItem] of Object.entries(document.paths ?? {})) {
       for (const { method, operation } of listOperations(pathItem, { layout }).operations) {

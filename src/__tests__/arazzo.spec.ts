@@ -3,6 +3,9 @@ import { fromArazzo } from '../arazzo';
 import { collectPayloadExpressions, parseExpressionValue, parseRuntimeExpression } from '../arazzo-expressions';
 import { ArazzoError } from '../errors';
 import { OpenAPIToolGenerator } from '../generator';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as yaml from 'yaml';
 import type { OperationStepIR, NestedWorkflowStepIR } from '../arazzo-types';
 
@@ -658,6 +661,19 @@ describe('fromArazzo source and operation resolution', () => {
       fromArazzo(arazzoWith([simpleWorkflow()]), { sources: {} }),
       /not found in any supplied source/,
     );
+  });
+
+  it('refuses one documentUri for every source, and takes a source loaded with its own', async () => {
+    const shared = { documentUri: 'https://example.com/pets/openapi.json' } as never;
+    await expectArazzoError(
+      fromArazzo(arazzoWith([simpleWorkflow()]), { sources: sources(), loadOptions: shared }),
+      /loadOptions\.documentUri would give every source the same URI/,
+    );
+    const pets = await OpenAPIToolGenerator.fromJSON(petstoreDoc(), {
+      documentUri: 'https://example.com/pets/openapi.json',
+    });
+    const [tool] = await fromArazzo(arazzoWith([simpleWorkflow()]), { sources: { ...sources(), pets } });
+    expect(tool).toBeDefined();
   });
 
   it('rejects steps resolving into arazzo-typed sources', async () => {
@@ -1864,5 +1880,208 @@ describe('fromArazzo location-less parameters through resolution', () => {
       { components: { parameters: { p: { name: 'dup', value: 1 } as any } } },
     );
     await expectArazzoError(fromArazzo(dupInless, { sources: sources() }), /Duplicate parameter "dup"/);
+  });
+});
+
+describe('fromArazzo over a source that references other documents', () => {
+  const ok = { '200': { description: 'OK' } };
+  const allowFile = { refResolution: { allowedProtocols: ['file'] } };
+
+  /** A description in several files: a path item and an operation that are each a `$ref` to a sibling file. */
+  const files = (): Record<string, unknown> => ({
+    'openapi.json': {
+      openapi: '3.0.0',
+      info: { title: 'Pets', version: '1.0.0' },
+      servers: [{ url: 'https://pets.example.com' }],
+      paths: {
+        '/pets': { $ref: 'paths/pets.json' },
+        '/pets/{petId}': { get: { $ref: 'operations/get-pet.json' } },
+      },
+    },
+    'paths/pets.json': { get: { operationId: 'listPets', responses: ok } },
+    'operations/get-pet.json': {
+      operationId: 'getPet',
+      parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+      responses: ok,
+    },
+  });
+
+  /** Runs `run` with `tree` written under a fresh temp directory, removed afterwards (that directory only). */
+  const withFiles = async (tree: Record<string, unknown>, run: (dir: string) => Promise<void>): Promise<void> => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-from-openapi-arazzo-'));
+    try {
+      for (const [name, content] of Object.entries(tree)) {
+        const file = path.join(dir, name);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify(content));
+      }
+      await run(dir);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  const workflowOf = (...steps: any[]): any => arazzoWith([simpleWorkflow({ outputs: undefined, steps })]);
+  const rejection = async (promise: Promise<unknown>): Promise<ArazzoError> => {
+    try {
+      await promise;
+    } catch (error) {
+      return error as ArazzoError;
+    }
+    throw new Error('expected a rejection');
+  };
+
+  it('resolves operationIds of a multi-file generator without generating tools first', async () => {
+    await withFiles(files(), async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      // Not dereferenced yet: the path item and the operation are still the references that name their files
+      expect(generator.getDocument().paths['/pets']).toEqual({ $ref: 'paths/pets.json' });
+
+      const doc = workflowOf(
+        { stepId: 'list', operationId: 'listPets' },
+        { stepId: 'read', operationId: '$sourceDescriptions.pets.getPet', parameters: [{ name: 'petId', in: 'path', value: 'x' }] },
+      );
+      const [tool] = await fromArazzo(doc, { sources: { pets: generator } });
+
+      const [list, read] = tool.metadata.workflow!.steps as OperationStepIR[];
+      expect([list.source, list.path, list.method, list.operationId]).toEqual(['pets', '/pets', 'get', 'listPets']);
+      expect([read.source, read.path, read.method, read.operationId]).toEqual(['pets', '/pets/{petId}', 'get', 'getPet']);
+      // The operations as the referenced files describe them
+      expect(list.operation.mapper).toEqual([]);
+      expect(read.operation.mapper).toEqual([expect.objectContaining({ inputKey: 'petId', type: 'path' })]);
+      // The generator is left dereferenced, the state generation reuses
+      expect(generator.getDocument().paths['/pets']).toEqual({ get: expect.objectContaining({ operationId: 'listPets' }) });
+    });
+  });
+
+  it('resolves operationPaths of a multi-file generator without generating tools first', async () => {
+    await withFiles(files(), async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      const doc = workflowOf(
+        { stepId: 'list', operationPath: '{$sourceDescriptions.pets.url}#/paths/~1pets/get' },
+        {
+          stepId: 'read',
+          operationPath: '{$sourceDescriptions.pets.url}#/paths/~1pets~1{petId}/get',
+          parameters: [{ name: 'petId', in: 'path', value: 'x' }],
+        },
+      );
+      const [tool] = await fromArazzo(doc, { sources: { pets: generator } });
+
+      const [list, read] = tool.metadata.workflow!.steps as OperationStepIR[];
+      expect([list.path, list.method, list.operation.mapper]).toEqual(['/pets', 'get', []]);
+      expect([read.path, read.method, read.operation.mapper.map((entry) => entry.inputKey)]).toEqual([
+        '/pets/{petId}',
+        'get',
+        ['petId'],
+      ]);
+    });
+  });
+
+  it('builds the same workflow as when the generator generated its tools first', async () => {
+    await withFiles(files(), async (dir) => {
+      const doc = workflowOf({ stepId: 'list', operationId: 'listPets' });
+      const fresh = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      const generated = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      await generated.generateTools();
+
+      expect(await fromArazzo(doc, { sources: { pets: fresh } })).toEqual(
+        await fromArazzo(doc, { sources: { pets: generated } }),
+      );
+    });
+  });
+
+  it('reads each file once, however the source is used afterwards', async () => {
+    await withFiles(files(), async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      const validate = jest.spyOn(generator, 'validate');
+      await fromArazzo(workflowOf({ stepId: 'list', operationId: 'listPets' }), { sources: { pets: generator } });
+      expect(validate).toHaveBeenCalledTimes(1);
+
+      // Dereferenced now: indexing it again needs nothing
+      await fromArazzo(workflowOf({ stepId: 'list', operationId: 'listPets' }), { sources: { pets: generator } });
+      expect(validate).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('leaves a source without a path item or operation reference as it is, without validating it', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(petstoreDoc());
+    const validate = jest.spyOn(generator, 'validate');
+
+    await fromArazzo(arazzoWith([simpleWorkflow()]), { sources: { pets: generator, orders: ordersDoc() } });
+
+    expect(validate).not.toHaveBeenCalled();
+  });
+
+  it('does not read what a generator that does not dereference holds, and finds none of its operations', async () => {
+    await withFiles(files(), async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), {
+        ...allowFile,
+        dereference: false,
+      });
+      await expectArazzoError(
+        fromArazzo(workflowOf({ stepId: 'list', operationId: 'listPets' }), { sources: { pets: generator } }),
+        /operationId "listPets" not found in any supplied source \(pets\)/,
+      );
+    });
+  });
+
+  it('names the reference that cannot be read, not a missing operation', async () => {
+    const tree = files();
+    delete tree['paths/pets.json'];
+    await withFiles(tree, async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      const error = await rejection(
+        fromArazzo(workflowOf({ stepId: 'list', operationId: 'listPets' }), { sources: { pets: generator } }),
+      );
+
+      expect(error).toBeInstanceOf(ArazzoError);
+      expect(error.message).toMatch(/^Failed to dereference source "pets": /);
+      expect(error.message).toContain('paths/pets.json');
+      expect(error.message).not.toMatch(/not found in any supplied source/);
+      expect(error.path).toBe('/sourceDescriptions/0');
+      expect(error.context).toMatchObject({ source: 'pets', sourcePath: '/paths/~1pets' });
+      // The generator reports the same reference when it generates
+      await expect(generator.generateTools()).rejects.toThrow(error.message.replace(/^Failed to dereference source "pets": /, ''));
+    });
+  });
+
+  it('names a reference that cannot be read in a file the source references', async () => {
+    const tree = files();
+    tree['paths/pets.json'] = { get: { operationId: 'listPets', responses: { '200': { $ref: '../responses/missing.json' } } } };
+    await withFiles(tree, async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      const error = await rejection(
+        fromArazzo(workflowOf({ stepId: 'list', operationId: 'listPets' }), { sources: { pets: generator } }),
+      );
+
+      expect(error).toBeInstanceOf(ArazzoError);
+      expect(error.message).toMatch(/^Failed to dereference source "pets": /);
+      expect(error.message).toContain('responses/missing.json');
+      // Not in the source's own document: no JSON Pointer into it
+      expect(error.context).toEqual({ path: '/sourceDescriptions/0', source: 'pets' });
+    });
+  });
+
+  it('names the rule that refuses a reference of a raw source, at the source that holds it', async () => {
+    const raw = { ...ordersDoc(), paths: { '/orders': { $ref: './orders/paths.json' } } };
+    const doc = arazzoWith([simpleWorkflow({ outputs: undefined, steps: [{ stepId: 's', operationId: 'getOrder' }] })]);
+    const error = await rejection(fromArazzo(doc, { sources: { pets: petstoreDoc(), orders: raw } }));
+
+    expect(error).toBeInstanceOf(ArazzoError);
+    expect(error.message).toMatch(/^Failed to dereference source "orders": Cannot read \$ref "\.\/orders\/paths\.json"/);
+    expect(error.path).toBe('/sourceDescriptions/1');
+    expect(error.context).toMatchObject({ source: 'orders', sourcePath: '/paths/~1orders' });
+  });
+
+  it('indexes a document that dereferences but that validation would reject, leaving the rejection to generation', async () => {
+    const tree = files();
+    (tree['openapi.json'] as any).info = undefined;
+    await withFiles(tree, async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      await expectArazzoError(
+        fromArazzo(workflowOf({ stepId: 'list', operationId: 'listPets' }), { sources: { pets: generator } }),
+        /Failed to resolve GET \/pets from source "pets": Invalid OpenAPI document/,
+      );
+    });
   });
 });

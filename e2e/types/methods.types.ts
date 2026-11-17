@@ -9,16 +9,22 @@
 import {
   DIAGNOSTIC_CODES,
   MAX_DIAGNOSTICS,
+  OpenAPIToolGenerator as Generator,
+  ParseError,
   detectSpecVersion,
+  fromArazzo,
   getOperation,
   isStandardMethod,
   listOperations,
   resolveOperationLayout,
 } from 'mcp-from-openapi';
 import type {
+  ArazzoDocument,
   DiagnosticCode,
+  FromArazzoOptions,
   GenerateOptions,
   HTTPMethod,
+  LoadOptions,
   McpOpenAPITool,
   NamingStrategy,
   OpenAPIDocument,
@@ -31,6 +37,8 @@ import type {
   SpecVersionInfo,
   SpecVersionStatus,
   StandardMethod,
+  ValidationErrorDetail,
+  ValidationResult,
 } from 'mcp-from-openapi';
 
 type Expect<T extends true> = T;
@@ -223,6 +231,99 @@ export async function readDiagnostics(): Promise<string[]> {
 export const specCode: DiagnosticCode = DIAGNOSTIC_CODES.NEWER_OPENAPI_VERSION;
 export const generatorCode: DiagnosticCode = DIAGNOSTIC_CODES.UNSATISFIABLE_SECURITY;
 export const knownCodeAsString: string = specCode;
+
+/**
+ * `$self` (OpenAPI 3.2) is ignored with one of three codes, and a 3.0 or 3.1 document that has it gets the
+ * code of any newer feature: all four come from the one registry and can be told apart by comparison.
+ */
+export const selfCodes: DiagnosticCode[] = [
+  DIAGNOSTIC_CODES.INVALID_SELF,
+  DIAGNOSTIC_CODES.REFUSED_SELF,
+  DIAGNOSTIC_CODES.UNRESOLVABLE_SELF,
+  DIAGNOSTIC_CODES.FEATURE_NEWER_THAN_DECLARED_VERSION,
+];
+export const literalSelfCode: DiagnosticCode = 'REFUSED_SELF';
+/** A retrieval URI past 2,048 characters is not used: recorded at load, without a `path`. */
+export const tooLongCode: DiagnosticCode = DIAGNOSTIC_CODES.BASE_URI_TOO_LONG;
+
+export function selfWasIgnored(diagnostics: SpecDiagnostic[]): boolean {
+  return diagnostics.some(({ code, path }) => path === '/$self' && selfCodes.includes(code as DiagnosticCode));
+}
+
+// ---------------------------------------------------------------------------
+// LoadOptions.documentUri: the URI the document was retrieved from
+// ---------------------------------------------------------------------------
+
+/** An optional string, accepted by every factory that takes load options. */
+export const documentUriOnly: LoadOptions = { documentUri: 'https://example.com/specs/openapi.yaml' };
+export const fileDocumentUri: LoadOptions = { documentUri: 'file:///srv/specs/openapi.yaml' };
+export const withReferencePolicy: LoadOptions = {
+  documentUri: 'https://example.com/specs/openapi.yaml',
+  refResolution: { allowedProtocols: ['https'], allowedHosts: ['example.com'] },
+  secureDefaults: true,
+};
+export const withoutDocumentUri: LoadOptions = {};
+
+export async function loadWithDocumentUri(): Promise<number> {
+  const options: LoadOptions = { documentUri: 'https://example.com/specs/openapi.yaml' };
+  const fromObject: OpenAPIToolGenerator = await Generator.fromJSON(openApiDocument, options);
+  const fromText: OpenAPIToolGenerator = await Generator.fromYAML('openapi: 3.2.0', options);
+  const fromUrl: OpenAPIToolGenerator = await Generator.fromURL('https://example.com/specs/openapi.yaml', options);
+  const fromPath: OpenAPIToolGenerator = await Generator.fromFile('./specs/openapi.yaml', options);
+  const uri: string | undefined = options.documentUri;
+  return [fromObject, fromText, fromUrl, fromPath].length + (uri?.length ?? 0);
+}
+
+/**
+ * `validate()` does not throw for a reference it cannot read: it returns `valid: false` with an error whose `code`
+ * is `UNREADABLE_REFERENCE`, whose `message` is the one the `ParseError` of generation carries, and whose `path`
+ * locates the `$ref` when it is in the document. The code is read like any other, from the same registry.
+ */
+export async function readUnreadableReference(): Promise<string | undefined> {
+  const result: ValidationResult = await generator.validate();
+  if (result.valid) return undefined;
+  const unreadable: ValidationErrorDetail | undefined = result.errors?.find(
+    ({ code }) => code === DIAGNOSTIC_CODES.UNREADABLE_REFERENCE,
+  );
+  const code: string | undefined = unreadable?.code;
+  const message: string | undefined = unreadable?.message;
+  const path: string | undefined = unreadable?.path;
+  return `${code ?? ''} ${message ?? ''} ${path ?? ''}`;
+}
+export const unreadableCode: DiagnosticCode = DIAGNOSTIC_CODES.UNREADABLE_REFERENCE;
+
+/**
+ * A raw Arazzo source takes the options of the generators `fromArazzo` builds for them, shared by every source:
+ * none of them can carry one `documentUri`. A source that needs its own is loaded with it and passed as a generator.
+ */
+declare const arazzoDocument: ArazzoDocument;
+declare const multiFileSource: OpenAPIToolGenerator;
+export async function arazzoWithOwnDocumentUri(): Promise<number> {
+  const sharedOptions: FromArazzoOptions = { sources: { registry: multiFileSource }, loadOptions: { dereference: true } };
+  const own: OpenAPIToolGenerator = await Generator.fromJSON(openApiDocument, { documentUri: 'https://example.com/specs/openapi.yaml' });
+  const tools = await fromArazzo(arazzoDocument, { ...sharedOptions, sources: { registry: own } });
+  return tools.length;
+}
+
+/**
+ * A reference that cannot be read fails with a `ParseError`; what the failure says about the reference is read
+ * from its free-form `context`, so nothing needs narrowing first.
+ */
+export async function explainRefusedReference(): Promise<string> {
+  try {
+    await generator.generateTools();
+    return 'read';
+  } catch (error) {
+    if (error instanceof ParseError) {
+      const reference: unknown = error.context?.['reference'];
+      const base: unknown = error.context?.['base'];
+      const resolved: unknown = error.context?.['resolved'];
+      const rule = error.context?.['rule'] as 'protocol' | 'host-not-allowed' | undefined;
+      return `${String(reference)} ${String(base)} ${String(resolved)} ${rule ?? ''}`;
+    }
+    throw error;
+  }
+}
 
 /** The list keeps at most `MAX_DIAGNOSTICS` findings, then one `DIAGNOSTICS_TRUNCATED` entry. */
 export function wasTruncated(diagnostics: SpecDiagnostic[]): boolean {

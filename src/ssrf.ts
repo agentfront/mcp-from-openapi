@@ -57,6 +57,26 @@ export interface ResolvedSsrfOptions {
   allowInternalIPs: boolean;
 }
 
+/**
+ * Why the guard refused a URL, in `SsrfError.context.reason`: `invalid-url`,
+ * `protocol`, `host-not-allowed`, `host-blocked`, `internal-address` (the
+ * host is an internal name or literal address), `dns-failed`,
+ * `resolved-address` (the name resolves to an internal address), `too-large`
+ * (the response body exceeds the limit), `too-many-redirects`,
+ * `no-transport`.
+ */
+export type SsrfRefusalReason =
+  | 'invalid-url'
+  | 'protocol'
+  | 'host-not-allowed'
+  | 'host-blocked'
+  | 'internal-address'
+  | 'dns-failed'
+  | 'resolved-address'
+  | 'too-large'
+  | 'too-many-redirects'
+  | 'no-transport';
+
 /** Resolved DNS address shape (subset of Node's `dns.LookupAddress`). */
 export interface ResolvedAddress {
   address: string;
@@ -322,28 +342,31 @@ export async function assertUrlSafe(
   try {
     parsed = new URL(url);
   } catch {
-    throw new SsrfError(`Invalid spec URL: ${url}`, { url });
+    throw new SsrfError(`Invalid spec URL: ${url}`, { url, reason: 'invalid-url' });
   }
 
   const protocol = parsed.protocol.replace(/:$/, '');
   if (protocol !== 'http' && protocol !== 'https') {
-    throw new SsrfError(`Protocol "${protocol}" is not allowed for network spec loading (only http/https)`, { url });
+    throw new SsrfError(`Protocol "${protocol}" is not allowed for network spec loading (only http/https)`, {
+      url,
+      reason: 'protocol',
+    });
   }
 
   const hostname = parsed.hostname;
   if (ssrf.allowedHosts.length > 0 && !hostListIncludes(ssrf.allowedHosts, hostname)) {
-    throw new SsrfError(`Host "${hostname}" is not in the allowed-hosts list`, { url });
+    throw new SsrfError(`Host "${hostname}" is not in the allowed-hosts list`, { url, reason: 'host-not-allowed' });
   }
 
   if (ssrf.allowInternalIPs) {
     if (hostListIncludes(ssrf.blockedHosts, hostname)) {
-      throw new SsrfError(`Host "${hostname}" is blocked`, { url });
+      throw new SsrfError(`Host "${hostname}" is blocked`, { url, reason: 'host-blocked' });
     }
     return [];
   }
 
   if (isBlockedHostname(hostname, ssrf)) {
-    throw new SsrfError(`Host "${hostname}" maps to a blocked internal address`, { url });
+    throw new SsrfError(`Host "${hostname}" maps to a blocked internal address`, { url, reason: 'internal-address' });
   }
 
   // Literal IPs are already fully decided by isBlockedHostname above, and the
@@ -363,16 +386,22 @@ export async function assertUrlSafe(
       return [];
     }
     const message = error instanceof Error ? error.message : String(error);
-    throw new SsrfError(`Host "${hostname}" could not be resolved for SSRF validation: ${message}`, { url });
+    throw new SsrfError(`Host "${hostname}" could not be resolved for SSRF validation: ${message}`, {
+      url,
+      reason: 'dns-failed',
+    });
   }
 
   if (addresses.length === 0) {
-    throw new SsrfError(`Host "${hostname}" did not resolve to any address`, { url });
+    throw new SsrfError(`Host "${hostname}" did not resolve to any address`, { url, reason: 'dns-failed' });
   }
 
   for (const { address } of addresses) {
     if (isBlockedAddress(address)) {
-      throw new SsrfError(`Host "${hostname}" resolves to blocked address ${address}`, { url });
+      throw new SsrfError(`Host "${hostname}" resolves to blocked address ${address}`, {
+        url,
+        reason: 'resolved-address',
+      });
     }
   }
 
@@ -497,7 +526,7 @@ export function nodePinnedTransport(modules: NodeHttpModules): SsrfTransport {
           received += chunk.length;
           if (received > limit) {
             request.destroy();
-            reject(new SsrfError(`Response body exceeds ${limit} bytes`, { url }));
+            reject(new SsrfError(`Response body exceeds ${limit} bytes`, { url, reason: 'too-large' }));
             return;
           }
           chunks.push(chunk);
@@ -541,7 +570,10 @@ async function selectTransport(opts: SafeFetchOptions, url: string): Promise<Ssr
     if (typeof platformFetch === 'function') {
       return fetchTransport(platformFetch);
     }
-    throw new SsrfError('No fetch implementation available to load OpenAPI spec from URL', { url });
+    throw new SsrfError('No fetch implementation available to load OpenAPI spec from URL', {
+      url,
+      reason: 'no-transport',
+    });
   }
   /* c8 ignore stop */
   return nodePinnedTransport(modules);
@@ -557,6 +589,26 @@ async function selectTransport(opts: SafeFetchOptions, url: string): Promise<Ssr
  * caller checks `response.ok` / reads the body).
  */
 export async function safeFetch(url: string, opts: SafeFetchOptions): Promise<Response> {
+  return (await safeFetchWithFinalUrl(url, opts)).response;
+}
+
+/** The result of {@link safeFetchWithFinalUrl}. */
+export interface SafeFetchResult {
+  response: Response;
+  /**
+   * The URL `response` came from: `url` itself, or the last redirect hop
+   * followed (each one validated like `url`). A Node-built `Response` has no
+   * `url` of its own, so this is the only record of it.
+   */
+  url: string;
+}
+
+/**
+ * {@link safeFetch}, also returning the URL the response came from (the
+ * final hop after redirects), which a fetched document needs as its base URI.
+ * Same checks, same redirect and header rules.
+ */
+export async function safeFetchWithFinalUrl(url: string, opts: SafeFetchOptions): Promise<SafeFetchResult> {
   const { headers, timeoutMs = 30000, followRedirects = true, maxRedirects = 5, ssrf, lookup } = opts;
   const transport = await selectTransport(opts, url);
 
@@ -582,12 +634,12 @@ export async function safeFetch(url: string, opts: SafeFetchOptions): Promise<Re
     const status = typeof response.status === 'number' ? response.status : 0;
     const isRedirect = status >= 300 && status < 400 && status !== 304;
     if (!isRedirect || !followRedirects) {
-      return response;
+      return { response, url: current };
     }
 
     const location = response.headers?.get?.('location') ?? undefined;
     if (!location) {
-      return response; // malformed redirect — let the caller treat it as non-ok
+      return { response, url: current }; // malformed redirect — let the caller treat it as non-ok
     }
     const next = new URL(location, current);
     // The caller's headers authenticate to the origin it asked for. Like fetch
@@ -601,5 +653,8 @@ export async function safeFetch(url: string, opts: SafeFetchOptions): Promise<Re
     // Loop re-validates + re-pins `current` via assertUrlSafe before the next fetch.
   }
 
-  throw new SsrfError(`Too many redirects while loading OpenAPI spec (max ${maxRedirects})`, { url });
+  throw new SsrfError(`Too many redirects while loading OpenAPI spec (max ${maxRedirects})`, {
+    url,
+    reason: 'too-many-redirects',
+  });
 }

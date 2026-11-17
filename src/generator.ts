@@ -35,6 +35,7 @@ import {
   describeValue,
   detectSpecVersion,
   getOperation,
+  isFeatureAvailable,
   isSpecObject,
   jsonPointer,
   listOperations,
@@ -84,10 +85,27 @@ import {
   skippedOperationDiagnostics,
   versionError,
 } from './validator';
-import { GenerationError, LoadError, OverlayError, ParseError, SchemaError } from './errors';
+import { GenerationError, LoadError, OverlayError, ParseError, SchemaError, SsrfError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { emitToolTypeScript } from './type-signature';
-import { hostListIncludes, isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
+import {
+  hostListIncludes,
+  isBlockedHostname,
+  normalizeSsrfOptions,
+  safeFetch,
+  safeFetchWithFinalUrl,
+} from './ssrf';
+import {
+  findRelativeReference,
+  findSelfReferences,
+  fragmentPointerTokens,
+  parseDocumentUri,
+  pointerTargetProblem,
+  resolveDocumentBase,
+  resolveSecuritySchemeUri,
+  retrievalUriOf,
+  type DocumentBase,
+} from './base-uri';
 import { copyJsonValue, type CopyBudget } from './json-copy';
 import { classifyMediaType } from './media-type';
 
@@ -197,6 +215,318 @@ function applySecureDefaults(options: LoadOptions): LoadOptions {
       ...options.refResolution,
       allowedProtocols: options.refResolution?.allowedProtocols ?? [],
     },
+  };
+}
+
+/** What `$RefParser` tells a resolver about a document it needs (a subset of its `FileInfo`). */
+interface RefTarget {
+  /** The resolved URL, without fragment; a local path when it has no `<scheme>://` */
+  url: string;
+  /** The `$ref` as written, without fragment */
+  reference?: string;
+  /** What `reference` was resolved against; may end with the JSON Pointer of the `$ref` */
+  baseUrl?: string;
+}
+
+/** The part of `$RefParser`'s `$Refs` a resolver reads: where the entry document is. */
+interface RefParserRefs {
+  _root$Ref?: { path?: string };
+}
+
+/** Longest stretch of a reference, base or URL quoted in a dereference error. */
+const REF_TEXT_MAX_LENGTH = 256;
+
+/** Longest dereference failure quoted in a `ParseError` message. */
+const DEREFERENCE_ERROR_MAX_LENGTH = 2048;
+
+/** How every dereference failure's `ParseError` message starts. */
+const DEREFERENCE_ERROR_PREFIX = 'Failed to dereference OpenAPI document: ';
+
+/**
+ * Whether `$RefParser` reads `url` as a local file: it has no
+ * `<scheme>://` prefix (of two or more characters), or its scheme is
+ * `file`. Mirrors the resolver's own test, so the decision of which
+ * resolver reads a reference stays the one it always was.
+ */
+function isLocalFileRef(url: string): boolean {
+  const scheme = /^(\w{2,}):\/\//.exec(url);
+  return scheme === null || scheme[1].toLowerCase() === 'file';
+}
+
+/**
+ * Why a reference could not be read: `ParseError.context.rule` of a failed
+ * dereference, one of
+ *
+ * - refused before any request: `protocol` (not in
+ *   `refResolution.allowedProtocols`; a local path counts as `file`),
+ *   `host-not-allowed` (not in `allowedHosts`), `host-blocked` (in
+ *   `blockedHosts`), `internal-address` (an internal name or literal address);
+ * - while fetching: `resolved-address` (the name resolves to an internal
+ *   address), `dns-failed`, `too-large` (the body exceeds the limit),
+ *   `timeout`, `response` (an HTTP error status), `fetch-failed` (anything
+ *   else, such as a refused connection);
+ * - while reading a file: `file-error`;
+ * - in a document: `missing-target` (a pointer that leads nowhere),
+ *   `invalid-document` (a referenced document that is not JSON or YAML),
+ *   `base-too-long` (a relative reference in a document whose retrieval URI
+ *   is too long to be used);
+ * - `unreadable`: any other failure.
+ */
+type RefRule =
+  | 'protocol'
+  | 'host-not-allowed'
+  | 'host-blocked'
+  | 'internal-address'
+  | 'resolved-address'
+  | 'dns-failed'
+  | 'too-large'
+  | 'timeout'
+  | 'response'
+  | 'fetch-failed'
+  | 'file-error'
+  | 'missing-target'
+  | 'invalid-document'
+  | 'base-too-long'
+  | 'unreadable';
+
+/** Why a reference cannot be read, for `ExternalRefError`. */
+interface RefRefusal {
+  /** Which rule refused it */
+  rule: RefRule;
+  /** What is wrong, in a sentence fragment */
+  reason: string;
+  /** The option that would allow it, when one would */
+  allow?: string;
+}
+
+/** The ref policy `explainUnreadableRef` reads. */
+interface RefPolicy {
+  allowedProtocols: ReadonlySet<string>;
+  allowedHosts: string[];
+  blockedHosts: string[];
+  allowInternalIPs: boolean;
+}
+
+/**
+ * Why no resolver may read `url`: its protocol is not in
+ * `allowedProtocols` (a local path counts as `file`), its host is not in
+ * `allowedHosts`, it is in `blockedHosts`, or it is an internal address.
+ */
+function explainUnreadableRef(url: string, policy: RefPolicy): RefRefusal {
+  const allowed = [...policy.allowedProtocols].map((protocol) => describeValue(protocol, 32)).join(', ');
+  const scheme = /^(\w{2,}):\/\//.exec(url);
+  const protocol = scheme === null ? 'file' : scheme[1].toLowerCase();
+  if (!policy.allowedProtocols.has(protocol)) {
+    return {
+      rule: 'protocol',
+      reason:
+        protocol === 'file'
+          ? `it is read as a local file, and refResolution.allowedProtocols (${allowed}) does not include "file"`
+          : `its protocol ${describeValue(protocol, 32)} is not in refResolution.allowedProtocols (${allowed})`,
+      allow: `add ${describeValue(protocol, 32)} to refResolution.allowedProtocols to read it`,
+    };
+  }
+  // An allowed `file` reference is the file resolver's, never refused
+  const parsed = parseUrl(url);
+  if (parsed === undefined) return { rule: 'unreadable', reason: 'it is not a valid URL' };
+  const host = describeValue(parsed.hostname, REF_TEXT_MAX_LENGTH);
+  if (policy.allowedHosts.length > 0 && !hostListIncludes(policy.allowedHosts, parsed.hostname)) {
+    return {
+      rule: 'host-not-allowed',
+      reason: `its host ${host} is not in refResolution.allowedHosts`,
+      allow: 'add the host to refResolution.allowedHosts to read it',
+    };
+  }
+  if (hostListIncludes(policy.blockedHosts, parsed.hostname)) {
+    return { rule: 'host-blocked', reason: `its host ${host} is in refResolution.blockedHosts` };
+  }
+  // The http resolver's canRead refuses an allowed protocol for no other reason
+  /* c8 ignore next 3 -- defensive */
+  if (!isBlockedHostname(parsed.hostname, policy)) {
+    return { rule: 'unreadable', reason: 'no resolver can read it' };
+  }
+  return {
+    rule: 'internal-address',
+    reason: `its host ${host} is an internal address (loopback, private, link-local or cloud metadata)`,
+    allow: 'refResolution.allowInternalIPs would allow it (unsafe for documents you do not trust)',
+  };
+}
+
+/** The rule of each `SsrfError.context.reason` the guard can give while fetching a reference. */
+const SSRF_REASON_RULES: ReadonlyMap<unknown, RefRule> = new Map<unknown, RefRule>([
+  ['protocol', 'protocol'],
+  ['host-not-allowed', 'host-not-allowed'],
+  ['host-blocked', 'host-blocked'],
+  ['internal-address', 'internal-address'],
+  ['resolved-address', 'resolved-address'],
+  ['dns-failed', 'dns-failed'],
+  ['too-large', 'too-large'],
+]);
+
+/** Why fetching a reference failed, from the error the fetch threw. */
+function fetchFailure(error: unknown, timeoutMs: number): RefRefusal {
+  // By name and fields: Node's own errors can come from another realm, where `instanceof Error` is false
+  const { name, message } = Object(error) as { name?: unknown; message?: unknown };
+  if (error instanceof SsrfError) {
+    // Every reason the guard gives for an allowed URL has a rule; the others cannot happen here
+    const rule = SSRF_REASON_RULES.get(error.context?.['reason']);
+    /* c8 ignore next */
+    return { rule: rule ?? 'fetch-failed', reason: messageText(error.message, REF_TEXT_MAX_LENGTH) };
+  }
+  if (name === 'AbortError') {
+    return { rule: 'timeout', reason: `no answer within ${timeoutMs} ms (LoadOptions.timeout)` };
+  }
+  return { rule: 'fetch-failed', reason: messageText(String(message), REF_TEXT_MAX_LENGTH) };
+}
+
+/** `new URL(url)`, or `undefined` when it does not parse. */
+function parseUrl(url: string): URL | undefined {
+  try {
+    return new URL(url);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `url` with its query shown as `?...`: a spec URL can carry a token there,
+ * and a relative reference never inherits it. The fragment is kept.
+ */
+function withoutQuery(url: string): string {
+  return url.replace(/\?[^#]*/s, '?...');
+}
+
+/**
+ * An external reference that cannot be read, thrown from a `$RefParser`
+ * resolver (and carried out as the `cause` of its error) or before it runs:
+ * its message names the reference, where it is, the base it was resolved
+ * against, the URL it resolved to, the rule that refused it and the option
+ * that would allow it. A document controls all of it, so each is quoted
+ * bounded and escaped, in the message and in `details`; the query of a base
+ * or resolved URL is not shown.
+ */
+class ExternalRefError extends Error {
+  /** For `ParseError.context`: every string bounded and escaped */
+  readonly details: { rule: RefRule; reference?: string; base?: string; resolved: string };
+  /** JSON Pointer of the `$ref` when it is in the entry document, for `validate()` */
+  readonly pointer?: string;
+
+  constructor(
+    target: RefTarget,
+    refusal: RefRefusal,
+    options: { documentHasBase: boolean; location?: readonly string[] },
+  ) {
+    const hash = target.baseUrl?.indexOf('#') ?? -1;
+    const at =
+      options.location !== undefined
+        ? `#${jsonPointer(...options.location)}`
+        : hash === -1
+          ? ''
+          : (target.baseUrl as string).slice(hash);
+    const base = (hash === -1 ? target.baseUrl : target.baseUrl?.slice(0, hash))?.replace(/\?.*$/s, '?...');
+    const resolved = withoutQuery(target.url);
+    const quote = (text: string): string => describeValue(text, REF_TEXT_MAX_LENGTH);
+    const what =
+      target.reference === undefined
+        ? `external $ref ${quote(resolved)}`
+        : `$ref ${quote(target.reference)}${at === '' || at === '#' ? '' : ` at ${quote(at)}`}` +
+          `${base === undefined ? '' : ` resolved against ${quote(base)}`} to ${quote(resolved)}`;
+    // A relative reference of a document that has no base URI resolves against the working directory
+    const relative = target.reference !== undefined && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(target.reference);
+    const hint =
+      !options.documentHasBase && relative
+        ? ' (the document has no base URI, so its relative references resolve against the working directory: ' +
+          'load it with fromFile or fromURL, or pass LoadOptions.documentUri)'
+        : '';
+    super(`Cannot read ${what}: ${refusal.reason}${refusal.allow === undefined ? '' : `; ${refusal.allow}`}${hint}`);
+    this.name = 'ExternalRefError';
+    const bounded = (text: string): string => messageText(text, REF_TEXT_MAX_LENGTH);
+    this.details = {
+      rule: refusal.rule,
+      ...(target.reference === undefined ? {} : { reference: bounded(target.reference) }),
+      ...(base === undefined ? {} : { base: bounded(base) }),
+      resolved: bounded(resolved),
+    };
+    if (options.location !== undefined) this.pointer = jsonPointer(...options.location);
+  }
+}
+
+/** The error classes of `$RefParser` that `dereferenceError` tells apart. */
+interface RefParserErrorClasses {
+  ParserError?: new (...args: never[]) => Error;
+  MissingPointerError?: new (...args: never[]) => Error;
+  InvalidPointerError?: new (...args: never[]) => Error;
+}
+
+/**
+ * The `ParseError` for a failed dereference: `Failed to dereference OpenAPI
+ * document: <why>`, cut and escaped (it can quote the document), with
+ * `context.rule` (see `RefRule`). An `ExternalRefError` anywhere in the
+ * `cause` chain gives the message and the rest of `context` (`reference`,
+ * `base`, `resolved`, and `path`, the JSON Pointer of the `$ref` when it is
+ * in the entry document), each bounded and escaped; no raw error is kept.
+ */
+function dereferenceError(error: unknown, classes: RefParserErrorClasses = {}): ParseError {
+  let refError: ExternalRefError | undefined;
+  for (let cause: unknown = error, depth = 0; cause instanceof Error && depth < 8; depth++) {
+    if (cause instanceof ExternalRefError) {
+      refError = cause;
+      break;
+    }
+    cause = cause.cause;
+  }
+  if (refError !== undefined) {
+    return new ParseError(`${DEREFERENCE_ERROR_PREFIX}${messageText(refError.message, DEREFERENCE_ERROR_MAX_LENGTH)}`, {
+      ...refError.details,
+      ...(refError.pointer === undefined ? {} : { path: refError.pointer }),
+    });
+  }
+  const is = (kind: RefParserErrorClasses[keyof RefParserErrorClasses]): boolean =>
+    kind !== undefined && error instanceof kind;
+  const rule: RefRule = is(classes.ParserError)
+    ? 'invalid-document'
+    : is(classes.MissingPointerError) || is(classes.InvalidPointerError)
+      ? 'missing-target'
+      : 'unreadable';
+  const detail = error instanceof Error ? error.message : String(error);
+  return new ParseError(`${DEREFERENCE_ERROR_PREFIX}${messageText(detail, DEREFERENCE_ERROR_MAX_LENGTH)}`, { rule });
+}
+
+/** The copy of a document that is dereferenced (see `OpenAPIToolGenerator.prepare`). */
+interface PreparedDocument {
+  copy: OpenAPIDocument;
+  /** Whether a `$ref` to another document remains */
+  external: boolean;
+  /** Each reference to the document's own URI, by its `$ref` object: the reference tokens of its target */
+  exact: ReadonlyMap<object, readonly string[]>;
+}
+
+/** Waits for the next turn of the event loop, after every pending promise reaction has run. */
+const nextTurn = (): Promise<void> =>
+  /* c8 ignore next -- `$RefParser` runs on Node, which has setImmediate */
+  new Promise((resolve) => (typeof setImmediate === 'function' ? setImmediate(resolve) : setTimeout(resolve, 0)));
+
+/**
+ * Wraps the reads of one dereference so their results are delivered in the
+ * order they were asked for, one per turn of the event loop, while the reads
+ * themselves run in parallel. `$RefParser` asks in document order (the entry
+ * document's references depth-first, then each document's as it is parsed),
+ * so the first reference that cannot be read is always the one reported,
+ * whatever order the network or the disk answers in. Once one fails, reads
+ * asked for later are not started.
+ */
+function orderedReads(): <T>(read: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
+  let failed = false;
+  return <T>(read: () => Promise<T>): Promise<T> => {
+    const started = failed ? Promise.reject(new Error('Not read: an earlier reference could not be read')) : read();
+    started.catch(() => undefined);
+    const delivered = tail.then(() => started);
+    delivered.catch(() => {
+      failed = true;
+    });
+    tail = delivered.then(nextTurn, nextTurn);
+    return delivered;
   };
 }
 
@@ -471,9 +801,23 @@ export function normalizeToolName(raw: string, maxLength: number, fallbackSeed: 
 export class OpenAPIToolGenerator {
   private document: OpenAPIDocument;
   private dereferencedDocument?: OpenAPIDocument;
-  private options: Required<Omit<LoadOptions, 'overlays'>> & Pick<LoadOptions, 'overlays'>;
+  /** The dereference in progress, so concurrent callers share one (and its fetches) */
+  private dereferencing?: Promise<void>;
+  /**
+   * The copy of the document that is dereferenced, its self-references made
+   * local, made once per generator (kept for a retry until a dereference
+   * succeeds)
+   */
+  private prepared?: PreparedDocument;
+  private options: Required<Omit<LoadOptions, 'overlays' | 'documentUri'>> & Pick<LoadOptions, 'overlays'>;
   /** The version the document declares, read once after overlays apply */
   private readonly specVersion: SpecVersionInfo;
+  /**
+   * The document's URIs (retrieval URI, `$self`), read once after overlays
+   * apply; `undefined` when it has none, and then references resolve as in
+   * earlier releases (relative ones against the working directory)
+   */
+  private readonly documentBase?: DocumentBase;
   /** The operation fields read: those the declared version defines (`resolveOperationLayout`) */
   private readonly operationLayout: OperationLayout;
   /** Validation of the (dereferenced) document: the document never changes after load, so it runs once */
@@ -486,11 +830,15 @@ export class OpenAPIToolGenerator {
   private readonly walkedPaths = new Set<string>();
 
   /**
-   * Private constructor - use static factory methods to create instances
+   * Private constructor - use static factory methods to create instances.
+   * `retrievalUri` is where the factory read the document (absolute, without
+   * user information or fragment); `LoadOptions.documentUri` replaces it.
    */
-  private constructor(document: OpenAPIDocument, rawOptions: LoadOptions = {}) {
+  private constructor(document: OpenAPIDocument, rawOptions: LoadOptions = {}, retrievalUri?: string) {
     this.document = document;
     const options = applySecureDefaults(rawOptions);
+    // Checked before anything else: a bad option fails the load, whatever the document
+    const documentUri = options.documentUri === undefined ? retrievalUri : parseDocumentUri(options.documentUri);
     this.options = {
       dereference: options.dereference ?? true,
       baseUrl: options.baseUrl ?? '',
@@ -522,6 +870,12 @@ export class OpenAPIToolGenerator {
     for (const diagnostic of this.specVersion.diagnostics) this.addDiagnostic(diagnostic);
     const problem = versionError(this.specVersion);
     if (problem !== undefined) this.addDiagnostic(fromValidationWarning(problem));
+
+    // The base URI: `$self` (3.2+) resolved against the retrieval URI, or the
+    // retrieval URI; why `$self` is not used, when it is not
+    const base = resolveDocumentBase(this.document, this.specVersion, documentUri);
+    this.documentBase = base.base;
+    for (const diagnostic of base.diagnostics) this.addDiagnostic(diagnostic);
   }
 
   /**
@@ -548,7 +902,12 @@ export class OpenAPIToolGenerator {
    * 1. at load: the declared version (`NEWER_OPENAPI_VERSION` for a 3.x minor
    *    newer than 3.2, `CONFLICTING_VERSION_FIELDS`, and
    *    `INVALID_OPENAPI_VERSION` / `MISSING_OPENAPI_VERSION` for a version that
-   *    validation rejects — useful with `validate: false`);
+   *    validation rejects — useful with `validate: false`), and why `$self`
+   *    is not used when it is present and ignored (`INVALID_SELF`,
+   *    `REFUSED_SELF`, `UNRESOLVABLE_SELF`, or
+   *    `FEATURE_NEWER_THAN_DECLARED_VERSION` in a 3.0 or 3.1 document), and
+   *    `BASE_URI_TOO_LONG` when the URI the document was retrieved from is
+   *    too long to be used;
    * 2. at the first generation with validation on: the validator's warnings
    *    (`NO_OPERATION_ID`, `NO_SERVERS`, `FEATURE_NEWER_THAN_DECLARED_VERSION`,
    *    ...). Validation errors never reach it: they throw `ParseError`.
@@ -566,10 +925,10 @@ export class OpenAPIToolGenerator {
    *      read only from 3.2 on, so they make no tool;
    *    - `UNRESOLVED_SECURITY_SCHEME` / `INVALID_SECURITY_REQUIREMENT`: a
    *      Security Requirement that cannot be satisfied (it names a scheme
-   *      `components.securitySchemes` does not define, a scheme named by URI
-   *      included, or it is not an object) is dropped; when every requirement
-   *      of an operation is dropped, `UNSATISFIABLE_SECURITY` and the
-   *      operation makes no tool;
+   *      `components.securitySchemes` does not define, or by URI a scheme
+   *      that is not one of this document's, or it is not an object) is
+   *      dropped; when every requirement of an operation is dropped,
+   *      `UNSATISFIABLE_SECURITY` and the operation makes no tool;
    *    - `UNSUPPORTED_PARAMETER_LOCATION`: an operation has a parameter in a
    *      location the generator does not map (a Swagger-style `body`, a
    *      missing `in`); the operation makes no tool;
@@ -627,15 +986,21 @@ export class OpenAPIToolGenerator {
   }
 
   /**
-   * Create generator from a URL
+   * Create generator from a URL. The document's base URI (what relative
+   * `$ref`s resolve against) is the URL it was finally read from, after
+   * redirects, without user information or fragment: `LoadOptions.headers`
+   * and credentials in `url` are used for the spec itself only, never for a
+   * `$ref`.
    */
   static async fromURL(url: string, rawOptions: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
     const options = applySecureDefaults(rawOptions);
     try {
+      // A bad option fails before anything is fetched
+      if (options.documentUri !== undefined) parseDocumentUri(options.documentUri);
       // SECURITY: validate the spec URL — and every redirect hop — against the
       // SSRF guard before fetching (resolves DNS and rejects internal targets),
       // instead of letting the HTTP client follow 3xx blindly. See ssrf.ts.
-      const response = await safeFetch(url, {
+      const { response, url: finalUrl } = await safeFetchWithFinalUrl(url, {
         headers: options.headers,
         timeoutMs: options.timeout ?? 30000,
         followRedirects: options.followRedirects ?? true,
@@ -659,7 +1024,7 @@ export class OpenAPIToolGenerator {
         document = JSON.parse(text);
       }
 
-      return new OpenAPIToolGenerator(document, options);
+      return new OpenAPIToolGenerator(document, options, retrievalUriOf(finalUrl));
     } catch (error: unknown) {
       if (error instanceof LoadError || error instanceof OverlayError) {
         throw error;
@@ -673,12 +1038,19 @@ export class OpenAPIToolGenerator {
   }
 
   /**
-   * Create generator from a file path
+   * Create generator from a file path. The document's base URI (what
+   * relative `$ref`s resolve against) is the file's `file:` URL, so they
+   * resolve next to the file, whatever the working directory and whatever
+   * `$self` says. Reading them still needs `file` in
+   * `refResolution.allowedProtocols`, which allows any local file the
+   * process can read: references are not confined to the file's folder.
    */
   static async fromFile(filePath: string, options: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
     try {
+      // A bad option fails before anything is read
+      if (options.documentUri !== undefined) parseDocumentUri(options.documentUri);
       // Lazy-load Node builtins so the module is importable off-Node (Workers).
-      const [path, fs] = await Promise.all([import('path'), import('fs/promises')]);
+      const [path, fs, url] = await Promise.all([import('path'), import('fs/promises'), import('url')]);
       /* c8 ignore next -- both branches tested but V8 source-map misaligns ternary */
       const absolutePath = path.isAbsolute(filePath) ? filePath : path.resolve(process.cwd(), filePath);
       const content = await fs.readFile(absolutePath, 'utf-8');
@@ -698,9 +1070,9 @@ export class OpenAPIToolGenerator {
         }
       }
 
-      return new OpenAPIToolGenerator(document, options);
+      return new OpenAPIToolGenerator(document, options, url.pathToFileURL(absolutePath).href);
     } catch (error: unknown) {
-      if (error instanceof OverlayError) {
+      if (error instanceof OverlayError || error instanceof LoadError) {
         throw error;
       }
       /* c8 ignore next */
@@ -720,7 +1092,8 @@ export class OpenAPIToolGenerator {
       const document = yaml.parse(yamlString);
       return new OpenAPIToolGenerator(document, options);
     } catch (error: unknown) {
-      if (error instanceof OverlayError) {
+      // An overlay or `documentUri` problem is not a YAML one
+      if (error instanceof OverlayError || error instanceof LoadError) {
         throw error;
       }
       /* c8 ignore next */
@@ -742,7 +1115,8 @@ export class OpenAPIToolGenerator {
 
   /**
    * Get the OpenAPI document: dereferenced once generation or linting has
-   * run, as loaded (after overlays) before that. It is the generator's own
+   * run (or `validate()`, for a document that references other documents),
+   * as loaded (after overlays) before that. It is the generator's own
    * object, not a copy. Validation runs once per generator, so changing this
    * document afterwards is not re-validated, and neither the declared
    * version (`getSpecVersion()`) nor `getDiagnostics()` is recomputed.
@@ -752,10 +1126,55 @@ export class OpenAPIToolGenerator {
   }
 
   /**
-   * Validate the OpenAPI document
+   * Validate the document with the rules of the version it declares.
+   *
+   * A document holding a `$ref` that does not start with `#` is validated as
+   * generation reads it: with `dereference` on (the default), it is
+   * dereferenced first and the result is validated, so the two agree. A
+   * reference to the document's own URI is made local and needs nothing
+   * read; a reference to another document is read, so `validate()` can read
+   * files and make network requests, with exactly the `refResolution` gates,
+   * SSRF protections and redirect rules of generation, at most once per
+   * generator (generation reuses the result, and the reverse).
+   *
+   * A reference that cannot be read (refused by a rule, missing, not JSON or
+   * YAML, a pointer that leads nowhere, ...) does not throw: the result is
+   * `{ valid: false, errors: [{ code: 'UNREADABLE_REFERENCE', message, path }] }`,
+   * `message` being the `ParseError` message generation throws (without its
+   * `Failed to dereference OpenAPI document:` prefix), bounded and escaped,
+   * and `path` the JSON Pointer of the `$ref` when it is in this document.
+   * Only a document JSON cannot copy (a YAML alias that makes it contain
+   * itself, or nesting deeper than JSON supports) still throws the
+   * `ParseError`, as generation does.
+   *
+   * Every other document (only `#` references, or `dereference: false`) is
+   * validated as loaded, after overlays, without reading anything: the
+   * result earlier releases gave. The validator follows local parameter
+   * references itself.
+   *
+   * Does not add to `getDiagnostics()`.
    */
   async validate(): Promise<ValidationResult> {
     const validator = new Validator();
+    if (this.options.dereference && OpenAPIToolGenerator.hasExternalRefs(this.document)) {
+      try {
+        await this.initialize(false);
+      } catch (error: unknown) {
+        if (!(error instanceof ParseError) || error.context?.['rule'] === undefined) throw error;
+        const path: unknown = error.context['path'];
+        return {
+          valid: false,
+          errors: [
+            {
+              message: error.message.slice(DEREFERENCE_ERROR_PREFIX.length),
+              ...(typeof path === 'string' ? { path } : {}),
+              code: DIAGNOSTIC_CODES.UNREADABLE_REFERENCE,
+            },
+          ],
+        };
+      }
+      return validator.validate(this.getDocument());
+    }
     return validator.validate(this.document);
   }
 
@@ -781,8 +1200,22 @@ export class OpenAPIToolGenerator {
   /**
    * Build $RefParser options based on refResolution configuration.
    * Defaults: allow http/https, block file://, block internal IPs.
+   *
+   * Which resolver reads a reference is decided as it always was: the file
+   * resolver (when `file` is allowed) takes what `$RefParser` reads as a local
+   * path, the http resolver takes what passes its `canRead` gate. A third
+   * one, `refused`, reads nothing: it takes exactly the references neither
+   * may read, to fail with an `ExternalRefError` saying which reference,
+   * resolved against which base, was refused by which rule, and what would
+   * allow it (instead of `$RefParser`'s "Unable to resolve $ref pointer").
+   * A file or a fetch that fails becomes an `ExternalRefError` too, and every
+   * read goes through `orderedReads`, so the failure reported is the first in
+   * document order whatever order the reads finish in.
+   *
+   * `fileResolver` is `$RefParser`'s own file resolver, whose `read` is
+   * wrapped (its `canRead` is kept).
    */
-  private buildRefParserOptions(): ParserOptions {
+  private buildRefParserOptions(fileResolver: { read(file: RefTarget): unknown }): ParserOptions {
     const raw = this.options.refResolution;
     const refOpts: Required<RefResolutionOptions> = {
       allowedProtocols: raw.allowedProtocols ?? ['http', 'https'],
@@ -800,15 +1233,83 @@ export class OpenAPIToolGenerator {
       return { resolve: { external: false } } as ParserOptions;
     }
 
+    const hasHostAllowlist = refOpts.allowedHosts.length > 0;
+    // Synchronous gate: protocol, host allow-list, and literal/known
+    // internal hosts. DNS names that *resolve* to internal addresses pass
+    // here (canRead cannot be async) and are caught in `read` via DNS
+    // resolution — closing the `127.0.0.1.nip.io` bypass for `$ref`s too.
+    const canReadHttp = (file: { url: string }): boolean => {
+      try {
+        const parsed = new URL(file.url);
+        const protocol = parsed.protocol.replace(':', '');
+
+        // Check protocol allowlist
+        if (!allowedProtocols.has(protocol)) {
+          return false;
+        }
+
+        // Check host allowlist (if configured), case- and trailing-dot-insensitively
+        if (hasHostAllowlist && !hostListIncludes(refOpts.allowedHosts, parsed.hostname)) {
+          return false;
+        }
+
+        // Check blocked hosts (internal IPs, known internal names, etc.)
+        if (isBlockedHostname(parsed.hostname, refOpts)) {
+          return false;
+        }
+
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const fileAllowed = allowedProtocols.has('file');
+    const documentHasBase = this.documentBase?.href !== undefined;
+    const ordered = orderedReads();
+    // Where the `$ref` is, when it is in the entry document (`$RefParser` passes its `$Refs` third)
+    const locate = (file: RefTarget, refs: RefParserRefs | undefined): string[] | undefined => {
+      const hash = file.baseUrl?.indexOf('#') ?? -1;
+      if (hash === -1 || (file.baseUrl as string).slice(0, hash) !== refs?._root$Ref?.path) return undefined;
+      return fragmentPointerTokens((file.baseUrl as string).slice(hash + 1));
+    };
+    const refuse = (file: RefTarget, refs: RefParserRefs | undefined, refusal: RefRefusal): never => {
+      throw new ExternalRefError(file, refusal, { documentHasBase, location: locate(file, refs) });
+    };
+
     const resolveConfig: Record<string, unknown> = {
       external: true,
-      file: allowedProtocols.has('file') ? undefined : false,
+      file: fileAllowed
+        ? {
+            read: (file: RefTarget, _callback: unknown, refs?: RefParserRefs): Promise<unknown> =>
+              ordered(async () => {
+                try {
+                  return await fileResolver.read(file);
+                } catch (error: unknown) {
+                  // `$RefParser`'s file resolver gives the I/O error's code (ENOENT, EISDIR, ...)
+                  const { ioErrorCode, message } = Object(error) as { ioErrorCode?: unknown; message?: unknown };
+                  return refuse(file, refs, {
+                    rule: 'file-error',
+                    /* c8 ignore next 4 -- defensive: an error without a code is described by its message */
+                    reason:
+                      typeof ioErrorCode === 'string'
+                        ? `the file cannot be read (${messageText(ioErrorCode, 32)})`
+                        : messageText(String(message), REF_TEXT_MAX_LENGTH),
+                  });
+                }
+              }),
+          }
+        : false,
+      refused: {
+        order: 1,
+        canRead: (file: RefTarget): boolean =>
+          !(fileAllowed && isLocalFileRef(file.url)) && !(hasNetworkProtocol && canReadHttp(file)),
+        read: (file: RefTarget, _callback: unknown, refs?: RefParserRefs): Promise<never> =>
+          ordered(async () => refuse(file, refs, explainUnreadableRef(file.url, { ...refOpts, allowedProtocols }))),
+      },
     };
 
     // Configure HTTP/HTTPS resolver with security filtering
     if (hasNetworkProtocol) {
-      const hasHostAllowlist = refOpts.allowedHosts.length > 0;
-
       resolveConfig['http'] = {
         // SECURITY: never auto-follow HTTP redirects when resolving external
         // `$ref`s. `canRead` validates only the INITIAL URL; the resolver's
@@ -818,53 +1319,33 @@ export class OpenAPIToolGenerator {
         // the allow/deny lists. `redirects: 0` refuses the first redirect, and
         // our custom `read` (below) additionally refuses redirects itself.
         redirects: 0,
-        // Synchronous gate: protocol, host allow-list, and literal/known
-        // internal hosts. DNS names that *resolve* to internal addresses pass
-        // here (canRead cannot be async) and are caught in `read` via DNS
-        // resolution — closing the `127.0.0.1.nip.io` bypass for `$ref`s too.
-        canRead: (file: { url: string }): boolean => {
-          try {
-            const parsed = new URL(file.url);
-            const protocol = parsed.protocol.replace(':', '');
-
-            // Check protocol allowlist
-            if (!allowedProtocols.has(protocol)) {
-              return false;
-            }
-
-            // Check host allowlist (if configured), case- and trailing-dot-insensitively
-            if (hasHostAllowlist && !hostListIncludes(refOpts.allowedHosts, parsed.hostname)) {
-              return false;
-            }
-
-            // Check blocked hosts (internal IPs, known internal names, etc.)
-            if (isBlockedHostname(parsed.hostname, refOpts)) {
-              return false;
-            }
-
-            return true;
-          } catch {
-            return false;
-          }
-        },
+        canRead: canReadHttp,
         // SSRF-safe fetch: resolves DNS and rejects names that map to internal
         // addresses, and refuses redirects. NOTE: deliberately does NOT forward
         // `this.options.headers` (the spec-load credentials) to third-party
         // `$ref` hosts — that would leak the spec's auth token cross-origin.
-        read: async (file: { url: string }): Promise<string> => {
-          const response = await safeFetch(file.url, {
-            timeoutMs: this.options.timeout,
-            followRedirects: false,
-            ssrf: refOpts,
-          });
-          if (!response.ok) {
-            throw new LoadError(
-              `Failed to resolve external $ref "${file.url}": ${response.status} ${response.statusText}`,
-              { url: file.url, status: response.status },
-            );
-          }
-          return response.text();
-        },
+        read: (file: RefTarget, _callback: unknown, refs?: RefParserRefs): Promise<string> =>
+          ordered(async () => {
+            let response: Response;
+            try {
+              response = await safeFetch(file.url, {
+                timeoutMs: this.options.timeout,
+                followRedirects: false,
+                ssrf: refOpts,
+              });
+            } catch (error: unknown) {
+              // The guard's refusal (an address the name resolves to, a body too large, ...), a
+              // timeout or a network failure, with the reference it concerns
+              return refuse(file, refs, fetchFailure(error, this.options.timeout));
+            }
+            if (!response.ok) {
+              refuse(file, refs, {
+                rule: 'response',
+                reason: `the server answered ${response.status} ${describeValue(response.statusText, REF_TEXT_MAX_LENGTH)}`,
+              });
+            }
+            return response.text();
+          }),
       };
     } else {
       resolveConfig['http'] = false;
@@ -879,17 +1360,26 @@ export class OpenAPIToolGenerator {
    * `$RefParser` (file/http resolvers, which pull Node builtins). A document
    * with only internal refs can be dereferenced with the runtime-agnostic
    * resolver below — so it works on V8 isolates (Cloudflare Workers) too.
+   *
+   * Walks with its own stack (issue #50): `validate()` runs it on every
+   * document, however deeply nested.
    */
-  private static hasExternalRefs(node: unknown, seen = new Set<unknown>()): boolean {
-    if (node === null || typeof node !== 'object') return false;
-    if (seen.has(node)) return false;
-    seen.add(node);
-    if (Array.isArray(node)) return node.some((n) => OpenAPIToolGenerator.hasExternalRefs(n, seen));
-    const ref = (node as { $ref?: unknown }).$ref;
-    if (typeof ref === 'string' && !ref.startsWith('#')) return true;
-    return Object.values(node as Record<string, unknown>).some((v) =>
-      OpenAPIToolGenerator.hasExternalRefs(v, seen),
-    );
+  private static hasExternalRefs(root: unknown): boolean {
+    const seen = new Set<unknown>();
+    const stack: unknown[] = [root];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (node === null || typeof node !== 'object' || seen.has(node)) continue;
+      seen.add(node);
+      if (Array.isArray(node)) {
+        for (const item of node) stack.push(item);
+        continue;
+      }
+      const ref = (node as { $ref?: unknown }).$ref;
+      if (typeof ref === 'string' && !ref.startsWith('#')) return true;
+      for (const value of Object.values(node as Record<string, unknown>)) stack.push(value);
+    }
+    return false;
   }
 
   /**
@@ -900,8 +1390,18 @@ export class OpenAPIToolGenerator {
    * The walk keeps its own stack instead of recursing: a chain of N `$ref`s
    * nests N levels deep, and a call per level would overflow the call stack
    * after a few hundred levels (issue #50).
+   *
+   * `exact` maps the `$ref` objects that were references to the document's
+   * own URI to the reference tokens of their (checked) target: they are
+   * resolved by those tokens, exactly as `$RefParser` reads their fragment.
+   * Every other `$ref` keeps the reading it always had here (no
+   * percent-decoding, empty tokens skipped, `{}` for a pointer that leads
+   * nowhere).
    */
-  private static dereferenceInternal(root: OpenAPIDocument): OpenAPIDocument {
+  private static dereferenceInternal(
+    root: OpenAPIDocument,
+    exact: ReadonlyMap<object, readonly string[]> = new Map(),
+  ): OpenAPIDocument {
     const cache = new Map<string, unknown>();
     const resolvePointer = (ptr: string): unknown => {
       const parts = ptr
@@ -934,6 +1434,19 @@ export class OpenAPIToolGenerator {
       if (Array.isArray(node)) {
         // The document is JSON-cloned, so arrays are never sparse
         frames.push({ children: node, keys: null, next: 0, out: new Array(node.length), placeholder: null });
+        return pending;
+      }
+      const tokens = exact.get(node);
+      if (tokens !== undefined) {
+        // Its own cache namespace: a `#` key never starts with a NUL
+        const key = `\u0000${JSON.stringify(tokens)}`;
+        const cached = cache.get(key);
+        if (cached !== undefined) return cached;
+        const placeholder: Record<string, unknown> = {};
+        cache.set(key, placeholder);
+        let target: unknown = root;
+        for (const token of tokens) target = (target as Record<string, unknown>)[token];
+        frames.push({ children: [target], keys: null, next: 0, out: [], placeholder });
         return pending;
       }
       const ref = (node as { $ref?: unknown }).$ref;
@@ -984,28 +1497,124 @@ export class OpenAPIToolGenerator {
   }
 
   /**
+   * The copy of the document to dereference, made once per generator:
+   *
+   * - every `$ref` that names the document itself (its retrieval URI or
+   *   `$self`, see `src/base-uri.ts`) is made local: its fragment is
+   *   percent-decoded into a JSON Pointer (RFC 6901 section 6) that must lead
+   *   to a value of the document as written, else the load fails with a
+   *   `ParseError` (rule `missing-target`) naming the reference, whichever
+   *   dereferencer runs. Like every local reference, it drops the keywords
+   *   next to it (a `description` beside the `$ref`). Without a base URI
+   *   nothing is rewritten;
+   * - with a retrieval URI too long to be used, a relative reference to
+   *   another document fails the load (rule `base-too-long`): it is never
+   *   resolved against the working directory instead;
+   * - whether a `$ref` to another document remains.
+   */
+  private prepare(): PreparedDocument {
+    if (this.prepared !== undefined) return this.prepared;
+    let copy: OpenAPIDocument;
+    try {
+      copy = JSON.parse(JSON.stringify(this.document)) as OpenAPIDocument;
+    } catch (error: unknown) {
+      // A YAML alias can make a document refer to itself, and nesting can go deeper than JSON
+      // supports: either way JSON throws an Error
+      const detail = (error as Error).message;
+      throw new ParseError(`${DEREFERENCE_ERROR_PREFIX}${messageText(detail, DEREFERENCE_ERROR_MAX_LENGTH)}`, {
+        originalError: error,
+      });
+    }
+    const exact = new Map<object, readonly string[]>();
+    const base = this.documentBase;
+    if (base !== undefined) {
+      for (const reference of findSelfReferences(copy, base).references) {
+        const problem = pointerTargetProblem(copy, reference.tokens);
+        if (problem !== undefined) {
+          throw dereferenceError(
+            new ExternalRefError(
+              { url: reference.resolved, reference: reference.ref, ...(base.href === undefined ? {} : { baseUrl: base.href }) },
+              { rule: 'missing-target', reason: `it names this document, but ${problem}` },
+              { documentHasBase: true, location: reference.location() },
+            ),
+          );
+        }
+        // What `$RefParser` reads from the fragment; the internal dereferencer uses the tokens
+        reference.node['$ref'] = `#${reference.fragment}`;
+        exact.set(reference.node, reference.tokens);
+      }
+      const relative = base.retrievalTooLong ? findRelativeReference(copy) : undefined;
+      if (relative !== undefined) {
+        throw dereferenceError(
+          new ExternalRefError(
+            { url: relative.ref, reference: relative.ref },
+            {
+              rule: 'base-too-long',
+              reason:
+                'it is relative, and the URI the document was retrieved from is too long to be used as its base ' +
+                '(BASE_URI_TOO_LONG)',
+            },
+            { documentHasBase: true, location: relative.location },
+          ),
+        );
+      }
+    }
+    this.prepared = { copy, external: OpenAPIToolGenerator.hasExternalRefs(copy), exact };
+    return this.prepared;
+  }
+
+  /** Dereferences the document into `dereferencedDocument`, throwing a `ParseError` on failure. */
+  private async dereference(): Promise<void> {
+    const { copy, external, exact } = this.prepare();
+    // Internal-only refs (self-references included, once rewritten) →
+    // dereference without `$RefParser` (no Node builtins, so this path runs on
+    // V8 isolates / Cloudflare Workers, and under `secureDefaults`). External
+    // refs → `$RefParser` (Node-only file/http resolvers).
+    if (!external) {
+      this.dereferencedDocument = OpenAPIToolGenerator.dereferenceInternal(copy, exact);
+      this.prepared = undefined;
+      return;
+    }
+    let refParser: typeof import('@apidevtools/json-schema-ref-parser') | undefined;
+    try {
+      refParser = await import('@apidevtools/json-schema-ref-parser');
+      // Its `read` is a function; the type also allows the static forms a plugin may take
+      const fileResolver = refParser.FileResolver as unknown as { read(file: RefTarget): unknown };
+      const refParserOptions = this.buildRefParserOptions(fileResolver);
+      const root = await this.refParserRoot();
+      // Without a base URI, as in earlier releases: relative refs resolve against the working directory
+      this.dereferencedDocument = (await (root === undefined
+        ? refParser.default.dereference(copy, refParserOptions)
+        : refParser.default.dereference(root, copy, refParserOptions))) as OpenAPIDocument;
+    } catch (error: unknown) {
+      throw dereferenceError(error, refParser);
+    }
+    this.prepared = undefined;
+  }
+
+  /**
+   * Where `$RefParser` resolves the document's relative references from: the
+   * retrieval base (see `src/base-uri.ts`), a `file:` one as the local path
+   * the file resolver reads; `undefined` without one.
+   */
+  private async refParserRoot(): Promise<string | undefined> {
+    const base = this.documentBase?.href;
+    if (base === undefined || !base.startsWith('file:')) return base;
+    const { fileURLToPath } = await import('url');
+    return fileURLToPath(base);
+  }
+
+  /**
    * Initialize the generator (dereference if needed, then validate)
    */
   private async initialize(runValidation: boolean = this.options.validate): Promise<void> {
     if (this.options.dereference && !this.dereferencedDocument) {
-      const cloned = JSON.parse(JSON.stringify(this.document)) as OpenAPIDocument;
-      // Internal-only refs → dereference without `$RefParser` (no Node builtins,
-      // so this path runs on V8 isolates / Cloudflare Workers). External refs →
-      // fall back to `$RefParser` (Node-only file/http resolvers).
-      if (!OpenAPIToolGenerator.hasExternalRefs(cloned)) {
-        this.dereferencedDocument = OpenAPIToolGenerator.dereferenceInternal(cloned);
-      } else {
-        try {
-          const { default: $RefParser } = await import('@apidevtools/json-schema-ref-parser');
-          const refParserOptions = this.buildRefParserOptions();
-          this.dereferencedDocument = (await $RefParser.dereference(cloned, refParserOptions)) as OpenAPIDocument;
-        } catch (error: unknown) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          throw new ParseError(`Failed to dereference OpenAPI document: ${errorMessage}`, {
-            originalError: error,
-          });
-        }
-      }
+      // One dereference at a time: concurrent callers share it (and its
+      // fetches); after a failure the next call tries again
+      this.dereferencing ??= this.dereference().finally(() => {
+        this.dereferencing = undefined;
+      });
+      await this.dereferencing;
     }
 
     if (runValidation) {
@@ -1964,13 +2573,16 @@ export class OpenAPIToolGenerator {
    * operation's, or the document's `/security`) for diagnostics.
    *
    * `security` lists alternatives; each Security Requirement Object lists
-   * schemes that are all required together. An object naming a scheme
-   * `components.securitySchemes` does not define (a typo, or an OpenAPI 3.2
-   * scheme named by URI, which is not resolved yet) cannot be satisfied, so
-   * the whole object is dropped, with one `UNRESOLVED_SECURITY_SCHEME` per
-   * missing scheme; an object that is not an object is dropped with
-   * `INVALID_SECURITY_REQUIREMENT`. An empty object (`{}`, no authentication)
-   * is kept. The kept objects' schemes are returned, flattened as before.
+   * schemes that are all required together. A scheme is found by component
+   * name or, from OpenAPI 3.2, by a URI naming one of this document's schemes
+   * (`findSecurityScheme`; reported under its component name, and named
+   * twice in one object it counts once, with the scopes of both). An object
+   * naming a scheme that is not found (a typo, another document's scheme)
+   * cannot be satisfied, so the whole object is dropped, with one
+   * `UNRESOLVED_SECURITY_SCHEME` per missing scheme; an object that is not an
+   * object is dropped with `INVALID_SECURITY_REQUIREMENT`. An empty object
+   * (`{}`, no authentication) is kept. The kept objects' schemes are
+   * returned, flattened as before.
    *
    * `unsatisfiable` is true when `security` is not empty and every object was
    * dropped, and the document defines security schemes: earlier releases
@@ -2007,22 +2619,32 @@ export class OpenAPIToolGenerator {
         return;
       }
       const resolved: SecurityRequirement[] = [];
+      // The component each scheme resolved to: a URI and a name can both name one
+      const byComponent = new Map<string, SecurityRequirement>();
       let satisfiable = true;
       for (const [scheme, scopes] of Object.entries(requirement)) {
-        // Own properties only: a scheme named `constructor` is not Object's
-        const found = ownProperty(schemes, scheme);
-        if (isSpecObject(found)) {
-          resolved.push(this.toSecurityRequirement(scheme, scopes as string[], found));
+        const found = this.findSecurityScheme(scheme, schemes);
+        if ('scheme' in found) {
+          const seen = byComponent.get(found.name);
+          if (seen === undefined) {
+            const entry = this.toSecurityRequirement(found.name, scopes as string[], found.scheme);
+            byComponent.set(found.name, entry);
+            resolved.push(entry);
+          } else if (Array.isArray(scopes)) {
+            // Both are required together, so the scopes of both are
+            const merged = Array.isArray(seen.scopes) ? [...seen.scopes] : [];
+            for (const scope of scopes as string[]) if (!merged.includes(scope)) merged.push(scope);
+            seen.scopes = merged;
+          }
           continue;
         }
         satisfiable = false;
-        const byUri = /[:#/]/.test(scheme) ? ' (a scheme named by URI is not resolved yet)' : '';
         this.addDiagnostic({
           severity: 'warning',
           code: DIAGNOSTIC_CODES.UNRESOLVED_SECURITY_SCHEME,
           message:
-            `Security Requirement names scheme ${describeValue(scheme)}, which components.securitySchemes does not ` +
-            `define${byUri}; the requirement cannot be satisfied and is dropped with every scheme it combines`,
+            `Security Requirement names scheme ${describeValue(scheme)}, which ${found.problem}; the requirement ` +
+            `cannot be satisfied and is dropped with every scheme it combines`,
           path: appendPointer(pointer, index, scheme),
         });
       }
@@ -2031,6 +2653,43 @@ export class OpenAPIToolGenerator {
       requirements.push(...resolved);
     });
     return { requirements, unsatisfiable: Boolean(schemes) && security.length > 0 && kept === 0 };
+  }
+
+  /**
+   * The Security Scheme Object a Security Requirement key names, with the
+   * component name it is reported under, or why none is found (for an
+   * `UNRESOLVED_SECURITY_SCHEME` message: "names scheme X, which ...").
+   *
+   * A key that is the name of a component of `components.securitySchemes` is
+   * that component, always: OpenAPI 3.2 gives the name precedence over a URI.
+   * In a document declaring OpenAPI 3.2 or later, another key that holds `:`,
+   * `/` or `#` is read as a URI reference (`resolveSecuritySchemeUri`): it
+   * names the component `<name>` when it resolves to this document with the
+   * fragment `/components/securitySchemes/<name>`. A key without those
+   * characters (`foo`) could only be a relative reference to another
+   * document, so it is reported simply as not defined. Another document's
+   * schemes are never read.
+   */
+  private findSecurityScheme(
+    key: string,
+    schemes: unknown,
+  ): { name: string; scheme: Record<string, unknown> } | { problem: string } {
+    // Own properties only: a scheme named `constructor` is not Object's
+    const found = ownProperty(schemes, key);
+    if (isSpecObject(found)) return { name: key, scheme: found };
+    const notDefined = 'components.securitySchemes does not define';
+    if (!/[:#/]/.test(key)) return { problem: notDefined };
+    const family = this.specVersion.family;
+    if (family === undefined || !isFeatureAvailable('securitySchemeUri', family)) {
+      return { problem: `${notDefined} (a scheme named by URI needs OpenAPI 3.2 or later)` };
+    }
+    const target = resolveSecuritySchemeUri(key, this.documentBase);
+    if ('problem' in target) return { problem: `${notDefined}, and read as a URI it ${target.problem}` };
+    const byUri = ownProperty(schemes, target.name);
+    if (isSpecObject(byUri)) return { name: target.name, scheme: byUri };
+    return {
+      problem: `names the scheme ${describeValue(target.name)} of this document by URI, but ${notDefined} it`,
+    };
   }
 
   /** One resolved scheme of a Security Requirement, as tool metadata. */

@@ -452,6 +452,7 @@ describe('features', () => {
     ['responseSummary', '3.2'],
     ['exampleDataValue', '3.2'],
     ['serverName', '3.2'],
+    ['securitySchemeUri', '3.2'],
   ])('dates %s to OpenAPI %s', (feature, since) => {
     expect(SPEC_FEATURES[feature].since).toBe(since);
   });

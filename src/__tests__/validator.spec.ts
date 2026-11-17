@@ -900,6 +900,48 @@ describe('version-aware validation (issue #55)', () => {
     });
   });
 
+  describe('$self', () => {
+    const paths = { '/a': { get: { operationId: 'a', responses: ok } } };
+
+    it.each(['https://example.com/api/openapi', '/api/openapi', '', 'https://user:pw@example.com/api', 'javascript:x'])(
+      'accepts a URI reference without a fragment in 3.2 (%p): the base rules are the generator\'s',
+      async (self) => {
+        expect(await validate(doc('3.2.0', paths, { $self: self }))).toEqual(VALID);
+      },
+    );
+
+    it.each<[unknown, string]>([
+      [42, '`$self` must be a string holding a URI reference, found 42'],
+      ['https://example.com/a b', '`$self` must be a URI reference (RFC 3986), found "https://example.com/a b"'],
+      ['/api\r\nX: 1', '`$self` must be a URI reference (RFC 3986), found "/api\\r\\nX: 1"'],
+      ['https://example.com/api#/info', '`$self` must not contain a fragment, found "https://example.com/api#/info"'],
+    ])('rejects %p in 3.2 with INVALID_SELF', async (self, message) => {
+      const result = await validate(doc('3.2.0', paths, { $self: self }));
+      expect(result.valid).toBe(false);
+      expect(result.errors).toEqual([{ code: 'INVALID_SELF', path: '/$self', message }]);
+      // The same rule applies to a newer minor version
+      expect(await errorCodes(doc('3.3.0', paths, { $self: self }))).toEqual(['INVALID_SELF']);
+    });
+
+    it.each(['3.0.3', '3.1.1'])('warns that %s does not read $self, whatever its value', async (version) => {
+      const result = await validate(doc(version, paths, { $self: 'https://example.com/api#bad' }));
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toEqual([
+        {
+          code: 'FEATURE_NEWER_THAN_DECLARED_VERSION',
+          path: '/$self',
+          message:
+            `The \`$self\` field needs OpenAPI 3.2 or later, but the document declares OpenAPI "${version}"; it is ` +
+            'ignored, and references resolve as if it were absent',
+        },
+      ]);
+    });
+
+    it('says nothing about $self when the version cannot be processed', async () => {
+      expect(await errorCodes(doc('4.0.0', paths, { $self: 5 }))).toEqual(['INVALID_OPENAPI_VERSION']);
+    });
+  });
+
   describe('responses', () => {
     const withoutResponses = (version: string) => doc(version, { '/a': { get: { operationId: 'a' } } });
 
