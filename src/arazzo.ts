@@ -18,6 +18,17 @@ import { applyClientTarget } from './client-targets';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { emitToolTypeScript } from './type-signature';
 import { toJsonSchema } from './types';
+import {
+  detectSpecVersion,
+  getOperation,
+  isHttpToken,
+  isRefusedMethod,
+  listOperations,
+  ownProperty,
+  resolveOperationLayout,
+  toStandardMethod,
+  wireMethod,
+} from './spec';
 import * as yaml from 'yaml';
 import type {
   GenerateOptions,
@@ -96,7 +107,6 @@ export interface FromArazzoOptions {
 const ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const OUTPUT_KEY_PATTERN = /^[a-zA-Z0-9.\-_]+$/;
 const VERSION_PATTERN = /^1\.0\.\d+$/;
-const HTTP_METHODS: readonly string[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
 const PARAMETER_LOCATIONS: readonly string[] = ['path', 'query', 'header', 'cookie'];
 const OUTPUT_DERIVATION_MAX_DEPTH = 8;
 
@@ -463,6 +473,15 @@ interface SourceContext {
   sourceTypes: Map<string, 'openapi' | 'arazzo'>;
 }
 
+/**
+ * Which Path Item fields hold a source's operations: the declared version
+ * decides whether `query` and `additionalOperations` are read, as it does for
+ * the operations the generator generates.
+ */
+function operationLayout(document: object) {
+  return resolveOperationLayout(detectSpecVersion(document));
+}
+
 async function prepareSources(doc: ArazzoDocument, options: FromArazzoOptions): Promise<SourceContext> {
   const declared = new Map(doc.sourceDescriptions.map((s) => [s.name, s]));
   const generators = new Map<string, OpenAPIToolGenerator>();
@@ -487,15 +506,13 @@ async function prepareSources(doc: ArazzoDocument, options: FromArazzoOptions): 
   const operationIndex: SourceContext['operationIndex'] = new Map();
   for (const [name, generator] of generators) {
     const document = generator.getDocument();
+    const layout = operationLayout(document);
     for (const [pathStr, pathItem] of Object.entries(document.paths ?? {})) {
-      if (!pathItem || typeof pathItem !== 'object') continue;
-      for (const method of HTTP_METHODS) {
-        const operation = (pathItem as Record<string, unknown>)[method];
-        if (!operation || typeof operation !== 'object') continue;
+      for (const { method, operation } of listOperations(pathItem, { layout }).operations) {
         const operationId = (operation as Record<string, unknown>)['operationId'];
         if (typeof operationId !== 'string') continue;
         const hits = operationIndex.get(operationId) ?? [];
-        hits.push({ source: name, path: pathStr, method: method as HTTPMethod });
+        hits.push({ source: name, path: pathStr, method });
         operationIndex.set(operationId, hits);
       }
     }
@@ -538,14 +555,33 @@ function parseOperationPath(value: string, path: string): { source: string; path
     .slice(2)
     .split('/')
     .map((segment) => segment.replace(/~1/g, '/').replace(/~0/g, '~'));
-  if (segments.length !== 3 || segments[0] !== 'paths') {
-    err(`operationPath pointer in "${value}" must have the shape #/paths/<path>/<method>`, path);
+  // #/paths/<path>/<method> for a fixed field, or (OpenAPI 3.2)
+  // #/paths/<path>/additionalOperations/<METHOD> for an additional operation.
+  // The method of an additional operation is its key exactly as written, so
+  // it is found only under that spelling. Whether the document has the
+  // operation (its version decides whether `query` and `additionalOperations`
+  // exist) is checked against the source document when the step is resolved.
+  const additional = segments.length === 4 && segments[2] === 'additionalOperations';
+  if (segments[0] !== 'paths' || (segments.length !== 3 && !additional)) {
+    err(
+      `operationPath pointer in "${value}" must have the shape #/paths/<path>/<method> or #/paths/<path>/additionalOperations/<method>`,
+      path,
+    );
   }
-  const method = segments[2].toLowerCase();
-  if (!HTTP_METHODS.includes(method)) {
-    err(`operationPath "${value}" ends in unknown HTTP method "${segments[2]}"`, path);
+  if (additional) {
+    // The key is a method exactly as written. A key `listOperations` ignores
+    // (not a token, CONNECT, or a fixed field's method) names no operation.
+    const key = segments[3];
+    if (!isHttpToken(key) || isRefusedMethod(key) || toStandardMethod(key) !== undefined) {
+      err(`operationPath "${value}" ends in unknown HTTP method ${JSON.stringify(key)} under additionalOperations`, path);
+    }
+    return { source, path: segments[1], method: key };
   }
-  return { source, path: segments[1], method: method as HTTPMethod };
+  const method = toStandardMethod(segments[2]);
+  if (method === undefined) {
+    err(`operationPath "${value}" ends in unknown HTTP method ${JSON.stringify(segments[2])}`, path);
+  }
+  return { source, path: segments[1], method };
 }
 
 function resolveOperationRef(
@@ -731,13 +767,22 @@ async function resolveStepOperation(
   let cached = ctx.operationCache.get(key);
   if (!cached) {
     const generator = requireGenerator(ctx.sources, ref.source, docPath);
+    const failure = (message: string) =>
+      new ArazzoError(`Failed to resolve ${wireMethod(ref.method)} ${ref.path} from source "${ref.source}": ${message}`, {
+        path: docPath,
+        source: ref.source,
+      });
+    // The operation must exist where the document's version puts operations
+    // (an operationPath can name any method of any path) and, for an
+    // additional operation, under exactly the key the pointer spells
+    const document = generator.getDocument();
+    const entry = getOperation(ownProperty(document.paths, ref.path), ref.method, { layout: operationLayout(document) });
+    if (entry === undefined) {
+      throw failure(`Operation not found: ${wireMethod(ref.method)} ${ref.path}`);
+    }
     cached = generator.generateTool(ref.path, ref.method, ctx.generateOptions as GenerateOptions).catch((error: unknown) => {
       /* c8 ignore next -- the generator only throws Error instances */
-      const message = error instanceof Error ? error.message : String(error);
-      throw new ArazzoError(
-        `Failed to resolve ${ref.method.toUpperCase()} ${ref.path} from source "${ref.source}": ${message}`,
-        { path: docPath, source: ref.source },
-      );
+      throw failure(error instanceof Error ? error.message : String(error));
     });
     ctx.operationCache.set(key, cached);
   }

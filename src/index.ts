@@ -170,6 +170,38 @@ export type {
 // reads a spec object's `x-` extensions
 export type { OAS30, OAS31, OAS32, WithExtensions, ExtensionName } from './spec';
 
+// OpenAPI versions, operations and diagnostics: the declared version of a
+// document (`generator.getSpecVersion()`), the walk over a Path Item's
+// operations that `generateTools` uses — pass
+// `{ layout: resolveOperationLayout(detectSpecVersion(document)) }` to read
+// what the declared version defines, as the generator does — and the codes
+// and cap of `generator.getDiagnostics()`
+export {
+  SUPPORTED_SPEC_VERSIONS,
+  detectSpecVersion,
+  getOperation,
+  isStandardMethod,
+  listOperations,
+  resolveOperationLayout,
+} from './spec';
+export { DIAGNOSTIC_CODES, MAX_DIAGNOSTICS, LEGACY_PATH_KEY_MAX_LENGTH } from './types';
+export type { DiagnosticCode } from './types';
+export type {
+  GetOperationOptions,
+  ListOperationsOptions,
+  OperationEntry,
+  OperationLayout,
+  OperationList,
+  OperationSource,
+  SpecDiagnostic,
+  SpecDiagnosticSeverity,
+  SpecFamily,
+  SpecVersionField,
+  SpecVersionInfo,
+  SpecVersionStatus,
+  StandardMethod,
+} from './spec';
+
 // Security resolver types
 export type {
   SecurityContext,

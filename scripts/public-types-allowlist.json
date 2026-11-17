@@ -193,6 +193,25 @@
         { "kind": "not-assignable", "direction": "candidate-to-baseline", "leaf": "OAS32.ResponsesObject.*", "exports": ["GenerateOptions", "NamingStrategy", "typeof dottedNaming"] },
         { "kind": "not-assignable", "direction": "candidate-to-baseline", "leaf": "OAS32.SchemaObject.$ref", "exports": ["GenerateOptions", "NamingStrategy", "typeof dottedNaming"] }
       ]
+    },
+    {
+      "reason": "OpenAPI 3.2 adds the `query` operation and `additionalOperations`, whose methods are arbitrary HTTP method tokens, so a method is no longer one of eight literals: `HTTPMethod` is the nine standard methods (`get`, `post`, `put`, `patch`, `delete`, `head`, `options`, `trace`, `query`) plus any string. A `switch` over a method needs a `default` branch, a `Record<HTTPMethod, T>` literal needs a `query` key, and a callback typed with a narrower method (such as a naming function taking only the standard methods) is rejected; `isStandardMethod` tells a standard method from another but returns a boolean, not a type guard, so narrow with `getOperation`, whose `fixed` entry types the method as a `StandardMethod`.",
+      "differences": [
+        { "kind": "not-assignable", "direction": "candidate-to-baseline", "leaf": "HTTPMethod", "exports": ["FromArazzoOptions", "GenerateOptions", "HTTPMethod", "McpOpenAPITool", "NamingStrategy", "OpenAPIToolGenerator", "OperationStepIR", "ToolMetadata", "WorkflowIR", "WorkflowStepIR", "typeof OpenAPIToolGenerator", "typeof ParameterResolver", "typeof ResponseBuilder", "typeof analyzeToolSet", "typeof buildHttpRequest", "typeof deriveSecurityElicitations", "typeof dottedNaming", "typeof estimateToolTokens", "typeof fromArazzo", "typeof inferAnnotationsFromMethod", "typeof toSdkTool"] }
+      ]
+    },
+    {
+      "reason": "`OpenAPIVersion` is any `3.0.x`, `3.1.x` or `3.2.x` string instead of five literals (`'3.0.0'` to `'3.0.3'` and `'3.1.0'`), because OpenAPI patch versions such as `3.0.4` and `3.1.2` exist, tooling should ignore the patch, and 3.2 is supported: a value of the type is no longer assignable to a union of those literals, and a `switch` over it is no longer exhaustive; `detectSpecVersion(...).family` (`'3.0' | '3.1' | '3.2'`, or `undefined` when the document cannot be processed) is the closed value to switch on.",
+      "differences": [
+        { "kind": "not-assignable", "direction": "candidate-to-baseline", "leaf": "OpenAPIVersion", "exports": ["OpenAPIVersion"] }
+      ]
+    },
+    {
+      "reason": "`OpenAPIToolGenerator` gains two public methods, `getDiagnostics()` (what the generator noticed without failing: each finding has a `severity`, a `code`, a `message` and a JSON Pointer `path`) and `getSpecVersion()` (the declared version, as `detectSpecVersion` reports it); callers of the class are unaffected, and only a hand-written stand-in typed as the class's public members needs to add them.",
+      "differences": [
+        { "kind": "property-added-required", "leaf": "OpenAPIToolGenerator.getDiagnostics", "exports": ["FromArazzoOptions", "OpenAPIToolGenerator", "typeof OpenAPIToolGenerator", "typeof fromArazzo"] },
+        { "kind": "property-added-required", "leaf": "OpenAPIToolGenerator.getSpecVersion", "exports": ["FromArazzoOptions", "OpenAPIToolGenerator", "typeof OpenAPIToolGenerator", "typeof fromArazzo"] }
+      ]
     }
   ]
 }

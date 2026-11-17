@@ -99,8 +99,15 @@ function firstPathSegment(path: string): string {
   return '';
 }
 
-/** Path remainder → method half: `/users/{id}/posts` → `users_by_id_posts`. */
+/**
+ * Path remainder → method half: `/users/{id}/posts` → `users_by_id_posts`.
+ * A standard method (`get`, `query`, ...) is already an identifier; an
+ * `additionalOperations` method is sanitized like the other halves
+ * (`M-SEARCH` → `M_SEARCH`, case kept) and falls back to `op` when nothing
+ * survives (`~`).
+ */
 function pathMethodHalf(method: HTTPMethod, path: string, ns: string): string {
+  const verb = sanitizeIdentifier(method) || 'op';
   const segments = path
     .split('/')
     .filter((s) => s !== '')
@@ -113,7 +120,7 @@ function pathMethodHalf(method: HTTPMethod, path: string, ns: string): string {
     segments.shift();
   }
   const joined = segments.join('_');
-  return joined === '' ? method : `${method}_${joined}`;
+  return joined === '' ? verb : `${verb}_${joined}`;
 }
 
 /**

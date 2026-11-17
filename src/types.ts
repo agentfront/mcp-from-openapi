@@ -24,13 +24,18 @@ import type {
   SecurityRequirementObject,
   SchemaObject,
   SchemaOrBoolean,
+  StandardMethod,
 } from './spec';
+import { SPEC_DIAGNOSTIC_CODES } from './spec';
 import { SchemaError } from './errors';
 
 /**
- * OpenAPI specification version 3.0.x or 3.1.x
+ * An OpenAPI version string of a supported `major.minor`: any `3.0.x`,
+ * `3.1.x` or `3.2.x` (`'3.0.3'`, `'3.1.0'`, `'3.2.0'`, `'3.2.0-rc1'`). The
+ * patch is not checked here: the specification says tooling should ignore
+ * it, and `detectSpecVersion` reads the value at runtime.
  */
-export type OpenAPIVersion = '3.0.0' | '3.0.1' | '3.0.2' | '3.0.3' | '3.1.0';
+export type OpenAPIVersion = `3.0.${string}` | `3.1.${string}` | `3.2.${string}`;
 
 // OpenAPI object types (cross-version unions of the `src/spec` types): the
 // document, and the objects within it that the library reads
@@ -59,9 +64,19 @@ export type {
 };
 
 /**
- * HTTP methods supported by OpenAPI
+ * The HTTP method of an operation.
+ *
+ * - A method with a fixed Path Item field (`get`, `post`, `put`, `patch`,
+ *   `delete`, `head`, `options`, `trace`, and `query` from OpenAPI 3.2) is
+ *   the lowercase field name.
+ * - An OpenAPI 3.2 `additionalOperations` method (`LINK`, `PURGE`, ...) is the
+ *   key exactly as written: HTTP methods are case-sensitive, and it is sent
+ *   as written.
+ *
+ * The type is open (`(string & {})`) so additional methods type-check while
+ * the standard ones still autocomplete. `isStandardMethod` tells them apart.
  */
-export type HTTPMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options' | 'trace';
+export type HTTPMethod = StandardMethod | (string & {});
 
 /**
  * Parameter location types
@@ -976,7 +991,9 @@ export interface ToolMetadata {
   path: string;
 
   /**
-   * HTTP method
+   * HTTP method: the lowercase field name for a fixed operation (`get`,
+   * `query`, ...), the `additionalOperations` key exactly as written
+   * otherwise (`LINK`)
    */
   method: HTTPMethod;
 
@@ -1349,12 +1366,14 @@ export interface GenerateOptions {
   excludeTags?: string[];
 
   /**
-   * Include only these HTTP methods
+   * Include only these HTTP methods. A standard method matches in any case
+   * (`'GET'` and `'get'` both match the `get` operations); an
+   * `additionalOperations` method matches only exactly as written (`'LINK'`)
    */
   includeMethods?: HTTPMethod[];
 
   /**
-   * Exclude these HTTP methods
+   * Exclude these HTTP methods; matched like `includeMethods`
    */
   excludeMethods?: HTTPMethod[];
 
@@ -1636,7 +1655,18 @@ export interface ValidationErrorDetail {
   message: string;
 
   /**
-   * Error path (JSON pointer)
+   * Where the error is, in one of two forms:
+   *
+   * - The codes that predate OpenAPI 3.2 support (`INVALID_PATH_FORMAT`,
+   *   `NO_OPERATIONS`, `NO_OPERATION_ID`, `NO_RESPONSES`,
+   *   `MISSING_PATH_PARAMETER`, `MISSING_PARAMETER_NAME`,
+   *   `MISSING_PARAMETER_IN`, `INVALID_PARAMETER_IN`,
+   *   `PATH_PARAMETER_NOT_REQUIRED`, `MISSING_PARAMETER_SCHEMA`) keep their
+   *   historical form: `/paths/` and the path key as written, NOT escaped
+   *   (`/paths//pets/{id}/get/responses`). A path key longer than
+   *   `LEGACY_PATH_KEY_MAX_LENGTH` characters is cut.
+   * - Every other code uses an RFC 6901 JSON Pointer
+   *   (`/paths/~1pets~1{id}/get/parameters/0`), whose segments are capped.
    */
   path?: string;
 
@@ -1656,7 +1686,9 @@ export interface ValidationWarning {
   message: string;
 
   /**
-   * Warning path (JSON pointer)
+   * Where the warning is; the two forms are those of
+   * `ValidationErrorDetail.path` (historical for the codes that predate
+   * OpenAPI 3.2 support, RFC 6901 JSON Pointers for the others)
    */
   path?: string;
 
@@ -1665,3 +1697,64 @@ export interface ValidationWarning {
    */
   code?: string;
 }
+
+/**
+ * The most findings one list keeps: `generator.getDiagnostics()`, and each of
+ * a `ValidationResult`'s `errors` and `warnings`. Past it, one final entry
+ * with code `DIAGNOSTICS_TRUNCATED` says the list was cut. A document is
+ * untrusted: thousands of bad entries must not grow memory without bound.
+ */
+export const MAX_DIAGNOSTICS = 1000;
+
+/**
+ * The longest path key the historical validation paths
+ * (`ValidationErrorDetail.path`) and messages quote; a longer one is cut
+ * (with `...`). No real API path comes close.
+ */
+export const LEGACY_PATH_KEY_MAX_LENGTH = 1024;
+
+/**
+ * Every code a diagnostic from `generator.getDiagnostics()` can carry, with
+ * what it means. Values never change once released.
+ */
+export const DIAGNOSTIC_CODES = Object.freeze({
+  // Spec layer: the declared version, the Path Item walk, newer features
+  ...SPEC_DIAGNOSTIC_CODES,
+  /** The declared version cannot be processed (recorded at load; validation rejects it). */
+  INVALID_OPENAPI_VERSION: 'INVALID_OPENAPI_VERSION',
+  /** The document declares no version (recorded at load; validation rejects it). */
+  MISSING_OPENAPI_VERSION: 'MISSING_OPENAPI_VERSION',
+  /** Validator warning: the document defines no paths. */
+  NO_PATHS: 'NO_PATHS',
+  /** Validator warning: a path item holds no operation. */
+  NO_OPERATIONS: 'NO_OPERATIONS',
+  /** Validator warning: an operation has no `operationId` (its tool name comes from the method and path). */
+  NO_OPERATION_ID: 'NO_OPERATION_ID',
+  /** Validator warning: the document defines no servers. */
+  NO_SERVERS: 'NO_SERVERS',
+  /** Validator warning: the document has security requirements but no security schemes. */
+  NO_SECURITY_SCHEMES: 'NO_SECURITY_SCHEMES',
+  /**
+   * A Security Requirement names a scheme `components.securitySchemes` does
+   * not define (a scheme named by URI is not resolved yet). The requirement
+   * object cannot be satisfied and is dropped.
+   */
+  UNRESOLVED_SECURITY_SCHEME: 'UNRESOLVED_SECURITY_SCHEME',
+  /** A Security Requirement is not an object; it is dropped. */
+  INVALID_SECURITY_REQUIREMENT: 'INVALID_SECURITY_REQUIREMENT',
+  /**
+   * Every Security Requirement of an operation was dropped, so no way to
+   * authenticate is known: the operation makes no tool.
+   */
+  UNSATISFIABLE_SECURITY: 'UNSATISFIABLE_SECURITY',
+  /**
+   * An operation has a parameter in a location the generator does not map to
+   * a request (such as `querystring`): the operation makes no tool.
+   */
+  UNSUPPORTED_PARAMETER_LOCATION: 'UNSUPPORTED_PARAMETER_LOCATION',
+  /** The list reached `MAX_DIAGNOSTICS`; later findings are not recorded. */
+  DIAGNOSTICS_TRUNCATED: 'DIAGNOSTICS_TRUNCATED',
+} as const);
+
+/** A code of `DIAGNOSTIC_CODES`. */
+export type DiagnosticCode = (typeof DIAGNOSTIC_CODES)[keyof typeof DIAGNOSTIC_CODES];

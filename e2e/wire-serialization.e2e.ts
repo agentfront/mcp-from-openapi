@@ -3,8 +3,9 @@
  * bytes/headers/paths the loopback server received — the OpenAPI
  * serialization table on the wire instead of as data structures.
  */
-import { OpenAPIToolGenerator, SecurityResolver, buildHttpRequest, createSecurityContext } from '../src';
-import type { McpOpenAPITool } from '../src';
+import { createServer, type AddressInfo, type Server } from 'net';
+import { OpenAPIToolGenerator, RequestBuildError, SecurityResolver, buildHttpRequest, createSecurityContext } from '../src';
+import type { McpOpenAPITool, ParameterMapper } from '../src';
 import { createLoopbackServer, type LoopbackHandler } from '../src/__tests__/helpers/loopback';
 import { sendBuiltRequest } from './helpers/http';
 
@@ -187,4 +188,108 @@ describe('story: serialization on the wire', () => {
     expect(captured.headers['x-api-key']).toBe('hk-1');
     expect(new URL(`http://x${captured.url}`).searchParams.get('api_key')).toBe('qk-2');
   });
+});
+
+describe('story: methods beyond the original eight on the wire', () => {
+  // Hand-made tools, not generated: this story is about what buildHttpRequest
+  // puts on the request line, whatever produced `metadata.method`. Node's
+  // global fetch passes `QUERY` and `LINK` through untouched (it only
+  // normalizes the case of the six methods in the Fetch standard, and refuses
+  // CONNECT and TRACE), so sendBuiltRequest needs no special case.
+  const handTool = (method: string, path: string, mapper: ParameterMapper[]): McpOpenAPITool => ({
+    name: 'hand_made',
+    description: 'hand made',
+    inputSchema: { type: 'object', properties: {} },
+    mapper,
+    metadata: { path, method },
+  });
+
+  const loopback = createLoopbackServer(() => (_req, res) => {
+    res.writeHead(204);
+    res.end();
+  });
+  let baseUrl: string;
+  beforeAll(async () => {
+    baseUrl = await loopback.listen();
+  });
+  afterAll(() => loopback.close());
+  beforeEach(() => loopback.reset());
+
+  it('sends a query operation as QUERY with its JSON body', async () => {
+    const tool = handTool('query', '/search', [
+      { inputKey: 'filter', type: 'body', key: 'filter' },
+      { inputKey: 'limit', type: 'body', key: 'limit' },
+    ]);
+    await sendBuiltRequest(buildHttpRequest(tool, { filter: { name: 'ada' }, limit: 5 }, { baseUrl }));
+
+    const captured = loopback.requests.at(-1)!;
+    expect(captured.method).toBe('QUERY');
+    expect(captured.url).toBe('/search');
+    expect(captured.headers['content-type']).toBe('application/json');
+    expect(JSON.parse(captured.body.toString())).toEqual({ filter: { name: 'ada' }, limit: 5 });
+  });
+
+  it('sends an additional operation under its own method, with path, query and header parameters', async () => {
+    const tool = handTool('LINK', '/items/{id}', [
+      { inputKey: 'id', type: 'path', key: 'id', required: true },
+      { inputKey: 'rel', type: 'query', key: 'rel' },
+      { inputKey: 'link', type: 'header', key: 'Link' },
+    ]);
+    await sendBuiltRequest(
+      buildHttpRequest(tool, { id: 'a b', rel: 'related', link: '<https://example.com/other>; rel="related"' }, { baseUrl }),
+    );
+
+    const captured = loopback.requests.at(-1)!;
+    expect(captured.method).toBe('LINK');
+    expect(captured.url).toBe('/items/a%20b?rel=related');
+    expect(captured.headers['link']).toBe('<https://example.com/other>; rel="related"');
+    expect(captured.body.length).toBe(0);
+  });
+
+  it('sends the original eight methods exactly as before', async () => {
+    // TRACE is left out: fetch refuses to send it
+    for (const method of ['get', 'post', 'put', 'patch', 'delete', 'head', 'options']) {
+      await sendBuiltRequest(buildHttpRequest(handTool(method, '/m', []), {}, { baseUrl }));
+      expect(loopback.requests.at(-1)!.method).toBe(method.toUpperCase());
+    }
+  });
+
+  describe('methods Node\'s HTTP parser would refuse', () => {
+    // Node's HTTP server only parses the methods in http.METHODS (and in
+    // upper case), so the request line of any other additional method is
+    // captured with a raw socket instead.
+    let server: Server;
+    let port: number;
+    const requestLines: string[] = [];
+
+    beforeAll(async () => {
+      server = createServer((socket) => {
+        socket.once('data', (chunk) => {
+          requestLines.push(chunk.toString('latin1').split('\r\n')[0]);
+          socket.end('HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n');
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      port = (server.address() as AddressInfo).port;
+    });
+    afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    beforeEach(() => {
+      requestLines.length = 0;
+    });
+
+    it.each(['Link', 'link', 'X-CUSTOM', 'FOO'])('puts the additional method %s on the request line as written', async (method) => {
+      const built = buildHttpRequest(handTool(method, '/things', []), {}, { baseUrl: `http://127.0.0.1:${port}` });
+      await sendBuiltRequest(built);
+
+      expect(requestLines).toEqual([`${method} /things HTTP/1.1`]);
+    });
+  });
+
+  it.each(['CONNECT', 'connect', 'LINK\r\nX-Injected: 1', 'LINK /x'])(
+    'sends nothing for the method %j',
+    (method) => {
+      expect(() => buildHttpRequest(handTool(method, '/things', []), {}, { baseUrl })).toThrow(RequestBuildError);
+      expect(loopback.requests).toHaveLength(0);
+    },
+  );
 });

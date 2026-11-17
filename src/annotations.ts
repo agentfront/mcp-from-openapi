@@ -1,5 +1,5 @@
 import type { FrontMcpExtensionData, HTTPMethod, ToolAnnotations, ToolIcon } from './types';
-import type { WithExtensions } from './spec';
+import { toStandardMethod, type WithExtensions } from './spec';
 import { SchemaError } from './errors';
 import { copyJsonValue, type CopyBudget } from './json-copy';
 import { resolveSchemaLimits } from './schema-builder';
@@ -62,23 +62,28 @@ export interface ExtensionToolOverrides {
 
 /**
  * Default MCP tool annotations per HTTP method, derived from HTTP semantics
- * (RFC 9110 safety/idempotency): safe methods are read-only and idempotent;
- * PUT/DELETE are idempotent but may destroy state; POST/PATCH are neither
- * safe nor idempotent. `openWorldHint` is false throughout — tools generated
- * from a spec target one known API backend, a closed world.
+ * (RFC 9110 safety/idempotency): safe methods (`GET`, `HEAD`, `OPTIONS`,
+ * `TRACE`, and `QUERY`) are read-only and idempotent; PUT/DELETE are
+ * idempotent but may destroy state; POST/PATCH are neither safe nor
+ * idempotent. A standard method is matched case-insensitively. Any other
+ * method (an OpenAPI 3.2 `additionalOperations` method such as `LINK`) has
+ * unknown semantics and gets the conservative POST profile. `openWorldHint`
+ * is false throughout — tools generated from a spec target one known API
+ * backend, a closed world.
  */
 export function inferAnnotationsFromMethod(method: HTTPMethod): ToolAnnotations {
-  switch (method) {
+  switch (toStandardMethod(method)) {
     case 'get':
     case 'head':
     case 'options':
     case 'trace':
+    case 'query':
       return { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
     case 'put':
     case 'delete':
       return { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
-    case 'post':
-    case 'patch':
+    default:
+      // post, patch, and every method with unknown semantics
       return { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
   }
 }

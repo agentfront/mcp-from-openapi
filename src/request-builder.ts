@@ -1,5 +1,6 @@
-import type { McpOpenAPITool, ParameterMapper } from './types';
+import type { McpOpenAPITool, ParameterLocation, ParameterMapper } from './types';
 import { RequestBuildError } from './errors';
+import { describeValue, isHttpToken, isRefusedMethod, wireMethod } from './spec';
 
 /**
  * Options for {@link buildHttpRequest}.
@@ -19,7 +20,11 @@ export interface BuiltHttpRequest {
   /** Fully composed URL: base + expanded path + encoded query string */
   url: string;
 
-  /** Uppercase HTTP method */
+  /**
+   * HTTP method as sent: a standard method (`get`, `query`, ...) upper-case
+   * (`GET`, `QUERY`), an OpenAPI 3.2 `additionalOperations` method exactly as
+   * written in the document (`LINK`), since methods are case-sensitive.
+   */
   method: string;
 
   /**
@@ -274,6 +279,33 @@ function resolveServerUrl(tool: McpOpenAPITool): string {
 
 const JSON_CONTENT = /^application\/(.+\+)?json$/i;
 
+/** Where a mapper entry can put its value */
+const MAPPER_LOCATIONS: ReadonlySet<ParameterLocation> = new Set(['path', 'query', 'header', 'cookie', 'body']);
+
+/** Where a security mapper entry can put its credential */
+const SECURITY_LOCATIONS: ReadonlySet<ParameterLocation> = new Set(['header', 'query', 'cookie']);
+
+/**
+ * The method to put on the wire for `tool.metadata.method`: a standard method
+ * upper-cased, any other exactly as written. The method comes from a
+ * document, so it must be an RFC 9110 token (no space, CR or LF can reach the
+ * request line) and never `CONNECT`.
+ */
+function resolveWireMethod(method: unknown): string {
+  if (!isHttpToken(method)) {
+    throw new RequestBuildError(`HTTP method ${describeValue(method)} is not a valid method (an RFC 9110 token)`, {
+      method,
+    });
+  }
+  if (isRefusedMethod(method)) {
+    throw new RequestBuildError(
+      `HTTP method ${describeValue(method)} is not sent: CONNECT opens a tunnel rather than sending a request`,
+      { method },
+    );
+  }
+  return wireMethod(method);
+}
+
 /**
  * Build an HTTP request from a generated tool and its input values — the
  * mapper applied in full: style/explode serialization (form, spaceDelimited,
@@ -291,6 +323,7 @@ export function buildHttpRequest(
   input: Record<string, unknown>,
   options: BuildHttpRequestOptions = {},
 ): BuiltHttpRequest {
+  const method = resolveWireMethod(tool.metadata.method);
   const rawBase = options.baseUrl ?? resolveServerUrl(tool);
   if (rawBase.includes('{')) {
     throw new RequestBuildError(
@@ -316,6 +349,21 @@ export function buildHttpRequest(
   let binaryBody = false;
 
   for (const mapper of tool.mapper) {
+    // Checked before anything else, so an entry that is skipped for lack of a
+    // value is rejected too, and nothing is dropped or sent somewhere else
+    if (!MAPPER_LOCATIONS.has(mapper.type)) {
+      throw new RequestBuildError(
+        `Unknown parameter location ${describeValue(mapper.type)} for '${mapper.key}' (input key '${mapper.inputKey}')`,
+        { param: mapper.key, inputKey: mapper.inputKey, location: mapper.type },
+      );
+    }
+    if (mapper.security && !SECURITY_LOCATIONS.has(mapper.type)) {
+      throw new RequestBuildError(
+        `Security parameter '${mapper.key}' (input key '${mapper.inputKey}') cannot be sent in the ${mapper.type}; credentials go in a header, the query string or a cookie`,
+        { param: mapper.key, inputKey: mapper.inputKey, location: mapper.type },
+      );
+    }
+
     const value = input[mapper.inputKey];
 
     if (mapper.security) {
@@ -345,6 +393,7 @@ export function buildHttpRequest(
       continue;
     }
 
+    // every location in MAPPER_LOCATIONS has a case: none is dropped here
     switch (mapper.type) {
       case 'path':
         path = path.replaceAll(`{${mapper.key}}`, serializePathValue(mapper, value));
@@ -481,7 +530,7 @@ export function buildHttpRequest(
 
   return {
     url: `${base}${path}${queryString ? `?${queryString}` : ''}`,
-    method: tool.metadata.method.toUpperCase(),
+    method,
     headers,
     query,
     cookies,

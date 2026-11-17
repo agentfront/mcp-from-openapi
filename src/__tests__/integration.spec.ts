@@ -809,3 +809,86 @@ describe('Tier 4 surface through the entrypoint', () => {
     expect(() => lib.parseRuntimeExpression('$nope')).toThrow(lib.ArazzoError);
   });
 });
+
+describe('Integration: OpenAPI 3.2 documents (issue #55)', () => {
+  const lib = require('../index');
+
+  const spec32 = [
+    'openapi: 3.2.0',
+    'info: { title: Pets, version: 1.0.0 }',
+    'servers: [{ url: "https://api.example.com" }]',
+    'components:',
+    '  securitySchemes:',
+    '    basic: { type: http, scheme: basic }',
+    'paths:',
+    '  /pets/{id}:',
+    '    parameters:',
+    '      - { name: id, in: path, required: true, schema: { type: string } }',
+    '    get: { operationId: getPet, responses: { "200": { description: OK } } }',
+    '    query:',
+    '      operationId: queryPet',
+    '      requestBody: { content: { application/json: { schema: { type: object, properties: { q: { type: string } } } } } }',
+    '      responses: { "200": { description: OK } }',
+    '    additionalOperations:',
+    '      LINK:',
+    '        operationId: linkPet',
+    '        security: [{ basic: [] }, { "other#/components/securitySchemes/x": [] }]',
+    '        responses: { "200": { description: OK } }',
+    '  /search:',
+    '    query:',
+    '      operationId: searchByQuerystring',
+    '      parameters:',
+    '        - { name: filter, in: querystring, content: { application/json: { schema: { type: object } } } }',
+  ].join('\n');
+
+  it('loads, validates and generates query and additionalOperations tools that build requests', async () => {
+    const generator = await lib.OpenAPIToolGenerator.fromYAML(spec32);
+    expect(await generator.validate()).toEqual({ valid: true, errors: undefined, warnings: undefined });
+    const tools: McpOpenAPITool[] = await generator.generateTools();
+
+    expect(tools.map((t) => [t.name, t.metadata.method])).toEqual([
+      ['getPet', 'get'],
+      ['queryPet', 'query'],
+      ['linkPet', 'LINK'],
+    ]);
+    const query = lib.buildHttpRequest(tools[1], { id: '7', q: 'x' });
+    expect([query.method, query.url, query.body]).toEqual(['QUERY', 'https://api.example.com/pets/7', '{"q":"x"}']);
+    const link = lib.buildHttpRequest(tools[2], { id: '7' });
+    expect([link.method, link.url]).toEqual(['LINK', 'https://api.example.com/pets/7']);
+    expect(tools[2].metadata.security?.map((s) => s.scheme)).toEqual(['basic']);
+
+    expect(generator.getSpecVersion()).toMatchObject({ status: 'supported', family: '3.2', declared: '3.2.0' });
+    expect(generator.getDiagnostics().map((d: { code: string; path: string }) => [d.code, d.path])).toEqual([
+      ['UNRESOLVED_SECURITY_SCHEME', '/paths/~1pets~1{id}/additionalOperations/LINK/security/1/other#~1components~1securitySchemes~1x'],
+      ['UNSUPPORTED_PARAMETER_LOCATION', '/paths/~1search/query/parameters/0'],
+    ]);
+  });
+
+  it('exports the version, operation and diagnostic helpers', () => {
+    expect(lib.SUPPORTED_SPEC_VERSIONS).toEqual(['3.0.x', '3.1.x', '3.2.x']);
+    expect(lib.MAX_DIAGNOSTICS).toBe(1000);
+    expect(lib.LEGACY_PATH_KEY_MAX_LENGTH).toBe(1024);
+    expect(lib.DIAGNOSTIC_CODES).toMatchObject({
+      NEWER_OPENAPI_VERSION: 'NEWER_OPENAPI_VERSION',
+      METHOD_CASE_VARIANT: 'METHOD_CASE_VARIANT',
+      UNSATISFIABLE_SECURITY: 'UNSATISFIABLE_SECURITY',
+      DIAGNOSTICS_TRUNCATED: 'DIAGNOSTICS_TRUNCATED',
+      NO_OPERATION_ID: 'NO_OPERATION_ID',
+    });
+    expect(Object.isFrozen(lib.DIAGNOSTIC_CODES)).toBe(true);
+    expect(lib.SPEC_DIAGNOSTIC_CODES).toBeUndefined();
+    expect([lib.isStandardMethod('QUERY'), lib.isStandardMethod('LINK')]).toEqual([true, false]);
+
+    // the walk generateTools makes: the declared version decides which fields are read
+    const pathItem = { get: {}, query: {}, additionalOperations: { LINK: {} } };
+    const methods = (openapi: string): string[] =>
+      lib
+        .listOperations(pathItem, { layout: lib.resolveOperationLayout(lib.detectSpecVersion({ openapi })) })
+        .operations.map((e: { method: string }) => e.method);
+    expect(methods('3.1.0')).toEqual(['get']);
+    expect(methods('3.2.0')).toEqual(['get', 'query', 'LINK']);
+    expect(lib.detectSpecVersion({ openapi: '3.3.0' })).toMatchObject({ status: 'newer-minor', family: '3.2' });
+    expect(lib.getOperation(pathItem, 'LINK')).toMatchObject({ method: 'LINK', source: 'additional' });
+    expect(lib.getOperation(pathItem, 'link')).toBeUndefined();
+  });
+});

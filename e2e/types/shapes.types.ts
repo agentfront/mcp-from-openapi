@@ -6,16 +6,30 @@
  * (see README.md).
  */
 import type {
+  DIAGNOSTIC_CODES,
+  DiagnosticCode,
   ExampleObject,
+  GenerateOptions,
+  HTTPMethod,
   MediaTypeObject,
   OAS30,
   OAS31,
   OAS32,
+  OpenAPIToolGenerator,
+  OpenAPIVersion,
+  OperationLayout,
   ParameterObject,
   ReferenceObject,
   ResponseObject,
   SchemaObject,
   SchemaOrBoolean,
+  SpecDiagnostic,
+  SpecFamily,
+  SpecVersionInfo,
+  SpecVersionStatus,
+  StandardMethod,
+  ToolMetadata,
+  resolveOperationLayout,
 } from 'mcp-from-openapi';
 
 type Expect<T extends true> = T;
@@ -291,4 +305,109 @@ export type FreeFormValues = [
   Expect<IsAny<NonNullable<OAS31.LinkObject['parameters']>[string]>>,
   Expect<IsAny<NonNullable<OAS31.LinkObject['requestBody']>>>,
   Expect<IsAny<NonNullable<OAS32.ExampleObject['dataValue']>>>,
+];
+
+// ---------------------------------------------------------------------------
+// HTTP methods, declared versions and diagnostics (see methods.types.ts)
+// ---------------------------------------------------------------------------
+
+/** The nine standard methods, and the open type that adds any other token. */
+export type MethodTypes = [
+  Expect<
+    Equal<StandardMethod, 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options' | 'trace' | 'query'>
+  >,
+  Expect<Extends<StandardMethod, HTTPMethod>>,
+  Expect<Extends<'LINK', HTTPMethod>>,
+  Expect<Extends<string, HTTPMethod>>,
+  Expect<Extends<HTTPMethod, string>>,
+  Expect<Not<Extends<number, HTTPMethod>>>,
+  // open, but not a plain `string`: the standard methods still autocomplete
+  Expect<Not<Equal<HTTPMethod, string>>>,
+  Expect<Equal<ToolMetadata['method'], HTTPMethod>>,
+  Expect<Equal<GenerateOptions['includeMethods'], HTTPMethod[] | undefined>>,
+  Expect<Equal<GenerateOptions['excludeMethods'], HTTPMethod[] | undefined>>,
+];
+
+/** Any `3.0.x`, `3.1.x` and `3.2.x` string, and no other. */
+export type VersionTypes = [
+  Expect<Equal<OpenAPIVersion, `3.0.${string}` | `3.1.${string}` | `3.2.${string}`>>,
+  Expect<Extends<'3.0.4', OpenAPIVersion>>,
+  Expect<Extends<'3.1.2', OpenAPIVersion>>,
+  Expect<Extends<'3.2.1', OpenAPIVersion>>,
+  Expect<Extends<'3.0.0' | '3.0.1' | '3.0.2' | '3.0.3' | '3.1.0', OpenAPIVersion>>,
+  Expect<Not<Extends<'3.3.0', OpenAPIVersion>>>,
+  Expect<Not<Extends<string, OpenAPIVersion>>>,
+  Expect<Equal<SpecFamily, '3.0' | '3.1' | '3.2'>>,
+];
+
+/** A diagnostic always has a severity, a code and a message; the pointer is optional. */
+export type DiagnosticShape = [
+  Expect<Equal<RequiredKeys<SpecDiagnostic>, 'severity' | 'code' | 'message'>>,
+  Expect<Equal<OptionalKeys<SpecDiagnostic>, 'path'>>,
+  Expect<Equal<SpecDiagnostic['severity'], 'warning' | 'info'>>,
+  Expect<Equal<SpecDiagnostic['code'], string>>,
+  Expect<Equal<SpecDiagnostic['message'], string>>,
+  Expect<Equal<SpecDiagnostic['path'], string | undefined>>,
+  Expect<Equal<ReturnType<OpenAPIToolGenerator['getDiagnostics']>, SpecDiagnostic[]>>,
+];
+
+/** The declared version: a status and the diagnostics always, the rest when the document gives it. */
+export type SpecVersionShape = [
+  Expect<Equal<RequiredKeys<SpecVersionInfo>, 'status' | 'diagnostics'>>,
+  Expect<Equal<OptionalKeys<SpecVersionInfo>, 'field' | 'declared' | 'major' | 'minor' | 'family'>>,
+  Expect<Equal<SpecVersionInfo['status'], SpecVersionStatus>>,
+  Expect<Equal<SpecVersionInfo['family'], SpecFamily | undefined>>,
+  Expect<Equal<SpecVersionInfo['major'], number | undefined>>,
+  Expect<Equal<SpecVersionInfo['minor'], number | undefined>>,
+  Expect<Equal<SpecVersionInfo['diagnostics'], SpecDiagnostic[]>>,
+  // the declared value is whatever the document holds, so it must be narrowed before use
+  Expect<Equal<SpecVersionInfo['declared'], unknown>>,
+  Expect<Equal<ReturnType<OpenAPIToolGenerator['getSpecVersion']>, SpecVersionInfo>>,
+  Expect<
+    Equal<SpecVersionStatus, 'supported' | 'newer-minor' | 'swagger-2.0' | 'unsupported' | 'malformed' | 'missing'>
+  >,
+];
+
+/**
+ * A diagnostic's `code` is a plain string, and `DIAGNOSTIC_CODES` is the one registry of the codes
+ * the generator documents: the spec layer's (the declared version, the Path Item walk) and the
+ * generator's own (version rejection, validator warnings, security, parameter locations, the cap).
+ */
+export type DiagnosticCodes = [
+  Expect<Equal<SpecDiagnostic['code'], string>>,
+  Expect<Extends<DiagnosticCode, SpecDiagnostic['code']>>,
+  // a closed union, not a string: a code can be compared with the registry exhaustively
+  Expect<Not<Extends<string, DiagnosticCode>>>,
+  // every key is its own value
+  Expect<Equal<keyof typeof DIAGNOSTIC_CODES, DiagnosticCode>>,
+  Expect<Equal<(typeof DIAGNOSTIC_CODES)['UNRESOLVED_SECURITY_SCHEME'], 'UNRESOLVED_SECURITY_SCHEME'>>,
+  // spec layer
+  Expect<
+    Extends<
+      'NEWER_OPENAPI_VERSION' | 'FEATURE_NEWER_THAN_DECLARED_VERSION' | 'INVALID_METHOD_TOKEN' | 'REFUSED_METHOD',
+      DiagnosticCode
+    >
+  >,
+  // generator level
+  Expect<
+    Extends<
+      | 'INVALID_OPENAPI_VERSION'
+      | 'MISSING_OPENAPI_VERSION'
+      | 'NO_OPERATION_ID'
+      | 'UNRESOLVED_SECURITY_SCHEME'
+      | 'UNSATISFIABLE_SECURITY'
+      | 'UNSUPPORTED_PARAMETER_LOCATION'
+      | 'DIAGNOSTICS_TRUNCATED',
+      DiagnosticCode
+    >
+  >,
+];
+
+/** Which operations a version defines: the layout `listOperations` and `getOperation` take. */
+export type OperationLayoutShape = [
+  Expect<Equal<RequiredKeys<OperationLayout>, 'fixedMethods' | 'additionalOperations'>>,
+  Expect<Equal<OperationLayout['fixedMethods'], readonly StandardMethod[]>>,
+  Expect<Equal<OperationLayout['additionalOperations'], boolean>>,
+  Expect<Equal<ReturnType<typeof resolveOperationLayout>, OperationLayout>>,
+  Expect<Equal<Parameters<typeof resolveOperationLayout>, [version: SpecVersionInfo]>>,
 ];

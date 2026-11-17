@@ -894,3 +894,169 @@ describe('flattened multipart bodies with binary parts', () => {
     expect(built.headers['content-type']).toBe('application/octet-stream');
   });
 });
+
+describe('HTTP method on the wire', () => {
+  const noPath = { path: '/things' };
+  const call = (method: unknown) =>
+    buildHttpRequest(makeTool([], { ...noPath, method: method as any }), {}, { baseUrl: 'http://h' });
+  const failure = (method: unknown): RequestBuildError => {
+    try {
+      call(method);
+    } catch (error) {
+      return error as RequestBuildError;
+    }
+    throw new Error('expected buildHttpRequest to throw');
+  };
+
+  it.each([
+    ['get', 'GET'],
+    ['post', 'POST'],
+    ['put', 'PUT'],
+    ['patch', 'PATCH'],
+    ['delete', 'DELETE'],
+    ['head', 'HEAD'],
+    ['options', 'OPTIONS'],
+    ['trace', 'TRACE'],
+    ['query', 'QUERY'],
+    ['GET', 'GET'],
+    ['Query', 'QUERY'],
+  ])('sends the standard method %s upper-cased as %s', (method, wire) => {
+    expect(call(method).method).toBe(wire);
+  });
+
+  it.each(['LINK', 'link', 'Link', 'M-SEARCH', 'PURGE', "a!#$%&'*+.^_`|~-b", 'constructor', '__proto__', 'toString'])(
+    'sends the additional method %s exactly as written',
+    (method) => {
+      expect(call(method).method).toBe(method);
+    },
+  );
+
+  it.each([
+    ['an empty string', ''],
+    ['a space', 'GET /x'],
+    ['a leading space', ' GET'],
+    ['CRLF', 'LINK\r\nX-Injected: 1'],
+    ['a newline', 'LINK\n'],
+    ['a tab', 'LI\tNK'],
+    ['a non-ASCII letter', 'LÍNK'],
+    ['a slash', 'LI/NK'],
+    ['undefined', undefined],
+    ['null', null],
+    ['a number', 42],
+    ['an object', {}],
+    ['an array', ['GET']],
+  ])('rejects a method that is %s', (_label, method) => {
+    const error = failure(method);
+
+    expect(error).toBeInstanceOf(RequestBuildError);
+    expect(error.message).toMatch(/is not a valid method/);
+    expect(error.context).toEqual({ method });
+  });
+
+  it('keeps control characters of a rejected method out of the message', () => {
+    const { message } = failure('LINK\r\nX-Injected: 1');
+
+    expect(message).not.toMatch(/[\r\n]/);
+    expect(message).toContain('"LINK\\r\\nX-Injected: 1"');
+  });
+
+  it.each(['CONNECT', 'connect', 'Connect'])('refuses %s', (method) => {
+    const error = failure(method);
+
+    expect(error).toBeInstanceOf(RequestBuildError);
+    expect(error.message).toMatch(/CONNECT opens a tunnel/);
+    expect(error.context).toEqual({ method });
+  });
+
+  it('checks the method before the base URL', () => {
+    const tool = makeTool([], { method: 'CONNECT' as any });
+
+    expect(() => buildHttpRequest(tool, {}, { baseUrl: 'file:///etc/passwd' })).toThrow(/CONNECT opens a tunnel/);
+  });
+
+  it('sends a query operation with its JSON body', () => {
+    const tool = makeTool([{ inputKey: 'filter', type: 'body', key: 'filter' }], {
+      path: '/search',
+      method: 'query',
+    });
+    const built = buildHttpRequest(tool, { filter: { name: 'ada' } });
+
+    expect(built.method).toBe('QUERY');
+    expect(built.url).toBe('https://api.example.com/search');
+    expect(built.body).toBe('{"filter":{"name":"ada"}}');
+    expect(built.headers['content-type']).toBe('application/json');
+  });
+
+  it('sends an additional operation with its path and query parameters', () => {
+    const tool = makeTool(
+      [
+        { inputKey: 'id', type: 'path', key: 'id', required: true },
+        { inputKey: 'target', type: 'query', key: 'target' },
+      ],
+      { path: '/items/{id}', method: 'LINK' },
+    );
+    const built = buildHttpRequest(tool, { id: '7', target: '/items/8' });
+
+    expect(built.method).toBe('LINK');
+    expect(built.url).toBe('https://api.example.com/items/7?target=%2Fitems%2F8');
+  });
+});
+
+describe('mapper locations', () => {
+  const entry = (type: unknown, overrides: Partial<ParameterMapper> = {}): ParameterMapper =>
+    ({ inputKey: 'x', type: type as any, key: 'x', ...overrides }) as ParameterMapper;
+  const security = { scheme: 's', type: 'apiKey', apiKeyName: 'x' } as const;
+
+  it.each(['querystring', 'PATH', 'constructor', '__proto__', 'toString', '', undefined, null, 42, {}])(
+    'rejects the unknown location %p whether or not a value is given',
+    (type) => {
+      const tool = makeTool([entry(type)], { path: '/things' });
+
+      for (const input of [{ x: 'value' }, {}]) {
+        let caught: unknown;
+        try {
+          buildHttpRequest(tool, input);
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(RequestBuildError);
+        expect((caught as RequestBuildError).message).toMatch(/Unknown parameter location/);
+        expect((caught as RequestBuildError).context).toEqual({ param: 'x', inputKey: 'x', location: type });
+      }
+    },
+  );
+
+  it('rejects an unknown location even when the entry is optional and there is a value', () => {
+    const tool = makeTool([entry('matrix', { required: false })], { path: '/things' });
+
+    expect(() => buildHttpRequest(tool, { x: 1 })).toThrow(RequestBuildError);
+  });
+
+  it.each(['querystring', 'constructor', undefined, 42])(
+    'rejects a security entry at the unknown location %p instead of sending it as a cookie',
+    (type) => {
+      const tool = makeTool([entry(type, { security })], { path: '/things' });
+
+      expect(() => buildHttpRequest(tool, { x: 'secret' })).toThrow(/Unknown parameter location/);
+      expect(() => buildHttpRequest(tool, {})).toThrow(/Unknown parameter location/);
+    },
+  );
+
+  it.each(['path', 'body'])('rejects a security entry at the %s location, with or without a value', (type) => {
+    const tool = makeTool([entry(type, { security })], { path: '/things' });
+
+    for (const input of [{ x: 'secret' }, {}]) {
+      expect(() => buildHttpRequest(tool, input)).toThrow(/cannot be sent in the .*credentials go in a header/);
+    }
+  });
+
+  it.each([
+    ['header', (built: ReturnType<typeof buildHttpRequest>) => built.headers['x']],
+    ['query', (built: ReturnType<typeof buildHttpRequest>) => built.query['x']?.[0]],
+    ['cookie', (built: ReturnType<typeof buildHttpRequest>) => built.cookies['x']],
+  ])('still sends a security entry at the %s location', (type, read) => {
+    const tool = makeTool([entry(type, { security })], { path: '/things' });
+
+    expect(read(buildHttpRequest(tool, { x: 'secret' }))).toBe('secret');
+  });
+});

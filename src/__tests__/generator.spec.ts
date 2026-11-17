@@ -1,9 +1,11 @@
-import { OpenAPIToolGenerator } from '../generator';
+import { OpenAPIToolGenerator, fnv1aHex } from '../generator';
 import { toPascalIdentifier } from '../type-signature';
 import { ParameterResolver } from '../parameter-resolver';
 import { ResponseBuilder } from '../response-builder';
-import { ParseError, LoadError, SchemaError } from '../errors';
-import type { OpenAPIDocument } from '../types';
+import { ParseError, LoadError, SchemaError, GenerationError } from '../errors';
+import { Validator } from '../validator';
+import { DIAGNOSTIC_CODES, MAX_DIAGNOSTICS } from '../types';
+import type { GenerateOptions, OpenAPIDocument } from '../types';
 import { createLoopbackServer, type LoopbackHandler } from './helpers/loopback';
 import { makePinnedLookup } from '../ssrf';
 import dns from 'node:dns';
@@ -1823,32 +1825,24 @@ describe('OpenAPIToolGenerator - Additional Coverage', () => {
       const openapi = {
         openapi: '3.0.0',
         info: { title: 'Test', version: '1.0.0' },
+        components: { securitySchemes: { token: { type: 'http', scheme: 'bearer' } } },
         paths: {
           '/users': {
-            get: {
-              operationId: 'getUsers',
-              responses: { '200': { description: 'OK' } },
-            },
+            // `security` must be a list: with schemes defined, this tool fails
+            get: { operationId: 'getUsers', security: { token: [] }, responses: { '200': { description: 'OK' } } },
+            post: { operationId: 'createUser', responses: { '200': { description: 'OK' } } },
           },
         },
       };
 
       const generator = await OpenAPIToolGenerator.fromJSON(openapi);
-
-      // Mock generateTool to fail
-      const origGenerate = generator.generateTool.bind(generator);
-      let first = true;
-      jest.spyOn(generator, 'generateTool').mockImplementation(async (...args) => {
-        if (first) {
-          first = false;
-          throw new Error('Simulated failure');
-        }
-        return origGenerate(...args);
-      });
-
       const tools = await generator.generateTools();
 
-      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Failed to generate tool'), expect.any(String));
+      expect(tools.map((t) => t.name)).toEqual(['createUser']);
+      expect(consoleSpy).toHaveBeenCalledWith(
+        'Failed to generate tool for GET /users:',
+        '/paths/~1users/get/security must be an array of Security Requirement Objects, found an object',
+      );
 
       consoleSpy.mockRestore();
     });
@@ -5508,5 +5502,835 @@ describe('Wide schemas and inlined definitions stay bounded (issue #50)', () => 
     await expect(generator.generateTool('/x', 'get', { target: 'claude' })).rejects.toThrow(
       'Inlining the local $refs of a schema exceeds the node budget of 100000 (maxSchemaNodes)',
     );
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// OpenAPI 3.2 operations, versions and diagnostics (issue #55)
+// ---------------------------------------------------------------------------
+
+describe('OpenAPI 3.2 operations, versions and diagnostics (issue #55)', () => {
+  const ok = { '200': { description: 'OK' } };
+  const op = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({ responses: ok, ...extra });
+  const LEGACY_METHODS = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
+  /** A document no validator warning fires on: servers, operationIds, responses */
+  const clean = (openapi: unknown, paths: Record<string, unknown>, extra: Record<string, unknown> = {}): any => ({
+    openapi,
+    info: { title: 'T', version: '1.0.0' },
+    servers: [{ url: 'https://api.example.com' }],
+    paths,
+    ...extra,
+  });
+  const codes = (generator: OpenAPIToolGenerator): string[] => generator.getDiagnostics().map((d) => d.code);
+  const names = async (generator: OpenAPIToolGenerator, options?: GenerateOptions): Promise<string[]> =>
+    (await generator.generateTools(options)).map((t) => t.name);
+  const silenceWarnings = (): jest.SpyInstance => jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+  describe('tool order and names', () => {
+    // Every legacy method on one path without operationIds (names from method + path), and on another with them
+    const legacyPaths = (): Record<string, any> => ({
+      '/items/{id}': {
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        ...Object.fromEntries(LEGACY_METHODS.map((method) => [method, op()])),
+      },
+      '/named': Object.fromEntries(LEGACY_METHODS.map((method) => [method, op({ operationId: `${method}Named` })])),
+    });
+    const legacyNames = [
+      'get_items_By_id',
+      'post_items_By_id',
+      'put_items_By_id',
+      'patch_items_By_id',
+      'delete_items_By_id',
+      'head_items_By_id',
+      'options_items_By_id',
+      'trace_items_By_id',
+      ...LEGACY_METHODS.map((method) => `${method}Named`),
+    ];
+
+    it('keeps the exact names and order of the eight legacy methods', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(clean('3.0.3', legacyPaths()));
+      const tools = await generator.generateTools();
+      expect(tools.map((t) => t.name)).toEqual(legacyNames);
+      expect(tools.map((t) => t.metadata.method)).toEqual([...LEGACY_METHODS, ...LEGACY_METHODS]);
+    });
+
+    it('appends query, then additionalOperations sorted by method, without changing the legacy tools', async () => {
+      const paths = legacyPaths();
+      paths['/items/{id}'].query = op();
+      // key order in the document is irrelevant: code-unit order puts upper case first
+      paths['/items/{id}'].additionalOperations = { purge: op(), LINK: op(), COPY: op() };
+      const generator = await OpenAPIToolGenerator.fromJSON(clean('3.2.0', paths));
+      const tools = await generator.generateTools();
+
+      expect(tools.map((t) => t.name)).toEqual([
+        ...legacyNames.slice(0, 8),
+        'query_items_By_id',
+        'COPY_items_By_id',
+        'LINK_items_By_id',
+        'purge_items_By_id',
+        ...legacyNames.slice(8),
+      ]);
+      const added = tools.slice(8, 12);
+      expect(added.map((t) => t.metadata.method)).toEqual(['query', 'COPY', 'LINK', 'purge']);
+      // the description fallback names the method as sent: standard upper-cased, additional as written
+      expect(added.map((t) => t.description)).toEqual([
+        'QUERY /items/{id}',
+        'COPY /items/{id}',
+        'LINK /items/{id}',
+        'purge /items/{id}',
+      ]);
+      // QUERY is safe; a method of unknown semantics gets the conservative POST profile
+      expect(added.map((t) => t.annotations?.readOnlyHint)).toEqual([true, false, false, false]);
+      // the only findings are the missing operationIds this spec relies on for its names
+      expect(new Set(codes(generator))).toEqual(new Set(['NO_OPERATION_ID']));
+    });
+
+    it('gives an additional method that normalizes onto a fixed one a deduplicated name', async () => {
+      // `get!` is a valid method token; its raw name `get!_items` normalizes to `get_items`
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', { '/items': { get: op(), additionalOperations: { 'get!': op() } } }),
+      );
+      const tools = await generator.generateTools();
+      expect(tools.map((t) => t.name)).toEqual(['get_items', `get_items_${fnv1aHex('get! /items')}`]);
+      expect(tools.map((t) => t.metadata.method)).toEqual(['get', 'get!']);
+    });
+
+    it('keeps additional methods that differ only by case apart', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', { '/items': { additionalOperations: { link: op(), LINK: op() } } }),
+      );
+      const tools = await generator.generateTools();
+      expect(tools.map((t) => t.name)).toEqual(['LINK_items', 'link_items']);
+      expect(tools.map((t) => t.metadata.method)).toEqual(['LINK', 'link']);
+    });
+
+    it('passes the canonical method to toolNameGenerator, filterFn and the _meta operation entry', async () => {
+      const seen: string[] = [];
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', { '/items': { get: op(), query: op(), additionalOperations: { LINK: op() } } }),
+      );
+      const tools = await generator.generateTools({
+        emitMeta: true,
+        filterFn: (operation) => {
+          seen.push(operation.method);
+          return true;
+        },
+        namingStrategy: {
+          conflictResolver: (name) => name,
+          toolNameGenerator: (path, method) => `${method}${path.replace(/\//g, '-')}`,
+        },
+      });
+      expect(seen).toEqual(['get', 'query', 'LINK']);
+      expect(tools.map((t) => t.name)).toEqual(['get-items', 'query-items', 'LINK-items']);
+      expect(tools.map((t) => (t._meta?.['dev.agentfront.openapi/operation'] as { method: string }).method)).toEqual([
+        'get',
+        'query',
+        'LINK',
+      ]);
+    });
+  });
+
+  describe('operations follow the declared version', () => {
+    const paths = (): Record<string, unknown> => ({
+      '/items': {
+        get: op({ operationId: 'list' }),
+        query: op({ operationId: 'search' }),
+        additionalOperations: { PURGE: op({ operationId: 'purge' }) },
+      },
+    });
+    const skippedMessages = (declared: string) => [
+      `The \`query\` operation needs OpenAPI 3.2 or later, but the document declares OpenAPI "${declared}", so it is ignored (no tool); declare OpenAPI 3.2 or later to read it`,
+      `Path Item \`additionalOperations\` needs OpenAPI 3.2 or later, but the document declares OpenAPI "${declared}", so it is ignored (no tool); declare OpenAPI 3.2 or later to read it`,
+    ];
+
+    it.each([
+      // declared, validate, tools, diagnostic codes
+      ['3.0.3', true, ['list'], ['FEATURE_NEWER_THAN_DECLARED_VERSION', 'FEATURE_NEWER_THAN_DECLARED_VERSION']],
+      ['3.1.0', true, ['list'], ['FEATURE_NEWER_THAN_DECLARED_VERSION', 'FEATURE_NEWER_THAN_DECLARED_VERSION']],
+      ['3.1.0', false, ['list'], ['FEATURE_NEWER_THAN_DECLARED_VERSION', 'FEATURE_NEWER_THAN_DECLARED_VERSION']],
+      ['3.2.0', true, ['list', 'search', 'purge'], []],
+      ['3.3.0', true, ['list', 'search', 'purge'], ['NEWER_OPENAPI_VERSION']],
+      // a version that cannot be processed reads what the library always read
+      [undefined, false, ['list'], ['MISSING_OPENAPI_VERSION']],
+      ['4.0.0', false, ['list'], ['INVALID_OPENAPI_VERSION']],
+      ['3.1', false, ['list'], ['INVALID_OPENAPI_VERSION']],
+    ] as const)('declared %s (validate: %s) makes the tools %j', async (declared, validate, tools, diagnostics) => {
+      const generator = await OpenAPIToolGenerator.fromJSON(clean(declared, paths()), { validate });
+      expect(await names(generator)).toEqual(tools);
+      expect(codes(generator)).toEqual(diagnostics);
+    });
+
+    it('says why a query operation or additionalOperations of an older document is ignored', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(clean('3.1.0', paths()));
+      await generator.generateTools();
+      expect(generator.getDiagnostics()).toEqual([
+        {
+          severity: 'warning',
+          code: 'FEATURE_NEWER_THAN_DECLARED_VERSION',
+          message: skippedMessages('3.1.0')[0],
+          path: '/paths/~1items/query',
+        },
+        {
+          severity: 'warning',
+          code: 'FEATURE_NEWER_THAN_DECLARED_VERSION',
+          message: skippedMessages('3.1.0')[1],
+          path: '/paths/~1items/additionalOperations',
+        },
+      ]);
+    });
+
+    it('never finds those operations through generateTool, but records why', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(clean('3.1.0', paths()));
+      await expect(generator.generateTool('/items', 'query')).rejects.toThrow('Operation not found: QUERY /items');
+      await expect(generator.generateTool('/items', 'PURGE')).rejects.toThrow('Operation not found: PURGE /items');
+      expect(codes(generator)).toEqual(['FEATURE_NEWER_THAN_DECLARED_VERSION', 'FEATURE_NEWER_THAN_DECLARED_VERSION']);
+    });
+
+    it('lets an excludeMethods denylist of an older document stand: additional operations make no tool', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.1.0', {
+          '/items': {
+            get: op({ operationId: 'list' }),
+            delete: op({ operationId: 'remove' }),
+            additionalOperations: { DESTROY: op({ operationId: 'destroy' }) },
+          },
+        }),
+      );
+      expect(await names(generator, { excludeMethods: ['delete'] })).toEqual(['list']);
+    });
+
+    it('accepts and ignores a malformed additionalOperations in an older document', async () => {
+      const spec = clean('3.1.0', { '/items': { get: op({ operationId: 'list' }), additionalOperations: 'junk' } });
+      const generator = await OpenAPIToolGenerator.fromJSON(spec);
+      expect(await generator.validate()).toMatchObject({ valid: true });
+      expect(await names(generator)).toEqual(['list']);
+      expect(codes(generator)).toEqual(['FEATURE_NEWER_THAN_DECLARED_VERSION']);
+    });
+
+    it('still skips an operation with a querystring parameter in an older document', async () => {
+      const spec = clean('3.1.0', {
+        '/items': {
+          get: op({
+            operationId: 'list',
+            parameters: [{ name: 'q', in: 'querystring', content: { 'application/json': { schema: {} } } }],
+          }),
+        },
+      });
+      const generator = await OpenAPIToolGenerator.fromJSON(spec);
+      expect(await names(generator)).toEqual([]);
+      expect(codes(generator)).toEqual(['FEATURE_NEWER_THAN_DECLARED_VERSION', 'UNSUPPORTED_PARAMETER_LOCATION']);
+    });
+  });
+
+  describe('generateTool method lookup', () => {
+    const spec = clean('3.2.0', { '/items': { get: op(), additionalOperations: { LINK: op() } } });
+
+    it('normalizes a standard method given in any case to its lowercase field name', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(spec);
+      const tool = await generator.generateTool('/items', 'GET');
+      expect(tool.name).toBe('get_items');
+      expect(tool.metadata.method).toBe('get');
+      expect(tool.description).toBe('GET /items');
+    });
+
+    it('finds an additional method exactly as written only', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(spec);
+      expect((await generator.generateTool('/items', 'LINK')).metadata.method).toBe('LINK');
+      await expect(generator.generateTool('/items', 'link')).rejects.toThrow('Operation not found: link /items');
+    });
+
+    it('never resolves a path or a method through the prototype chain', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(spec);
+      await expect(generator.generateTool('/items', 'constructor')).rejects.toThrow(
+        'Operation not found: constructor /items',
+      );
+      await expect(generator.generateTool('constructor', 'get')).rejects.toThrow('Operation not found: GET constructor');
+      await expect(generator.generateTool('/items', 5 as unknown as string)).rejects.toThrow(
+        'Operation not found: 5 /items',
+      );
+    });
+
+    it('records the diagnostics of the path item it builds from, once', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', {
+          '/items': { get: op({ operationId: 'a' }), additionalOperations: { GET: op(), Get: op(), LINK: op({ operationId: 'b' }) } },
+          '/other': { additionalOperations: { CONNECT: op() } },
+        }),
+        { validate: false },
+      );
+      await generator.generateTool('/items', 'LINK');
+      await generator.generateTool('/items', 'get');
+      await generator.generateTool('/items', 'LINK');
+      expect(generator.getDiagnostics().map((d) => [d.code, d.path])).toEqual([
+        ['DUPLICATE_FIXED_METHOD', '/paths/~1items/additionalOperations/GET'],
+        ['METHOD_CASE_VARIANT', '/paths/~1items/additionalOperations/Get'],
+      ]);
+      // a path never built from is not walked; a missing path records nothing
+      await expect(generator.generateTool('/nope', 'get')).rejects.toThrow('Operation not found');
+      expect(generator.getDiagnostics()).toHaveLength(2);
+    });
+  });
+
+  describe('hostile path items', () => {
+    it('reads only method fields and usable additionalOperations keys', async () => {
+      // JSON.parse creates own `__proto__` keys, which survive the generator's JSON clone
+      const document = JSON.parse(`{
+        "openapi": "3.2.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "servers": [{ "url": "https://api.example.com" }],
+        "paths": {
+          "/items": {
+            "constructor": { "operationId": "fake1", "responses": { "200": { "description": "OK" } } },
+            "__proto__": { "operationId": "fake2", "responses": { "200": { "description": "OK" } } },
+            "get": { "operationId": "listItems", "responses": { "200": { "description": "OK" } } },
+            "additionalOperations": {
+              "GET": { "operationId": "dupGet", "responses": { "200": { "description": "OK" } } },
+              "CONNECT": { "operationId": "tunnel", "responses": { "200": { "description": "OK" } } },
+              "in valid token": { "operationId": "spaced", "responses": { "200": { "description": "OK" } } },
+              "constructor": { "responses": { "200": { "description": "OK" } } },
+              "__proto__": { "responses": { "200": { "description": "OK" } } }
+            }
+          }
+        }
+      }`);
+      expect(Object.hasOwn(document.paths['/items'], '__proto__')).toBe(true);
+
+      const generator = await OpenAPIToolGenerator.fromJSON(document, { validate: false });
+      const tools = await generator.generateTools();
+      // `constructor` and `__proto__` are valid method tokens: as additionalOperations keys they are operations
+      expect(tools.map((t) => [t.name, t.metadata.method])).toEqual([
+        ['listItems', 'get'],
+        ['proto_items', '__proto__'],
+        ['constructor_items', 'constructor'],
+      ]);
+      // in the document's key order
+      expect(generator.getDiagnostics().map((d) => [d.code, d.path])).toEqual([
+        ['DUPLICATE_FIXED_METHOD', '/paths/~1items/additionalOperations/GET'],
+        ['REFUSED_METHOD', '/paths/~1items/additionalOperations/CONNECT'],
+        ['INVALID_METHOD_TOKEN', '/paths/~1items/additionalOperations/in valid token'],
+      ]);
+      // the fixed `get`, never the `GET` key; `constructor` is the additional operation, not Object's
+      expect((await generator.generateTool('/items', 'GET')).name).toBe('listItems');
+      expect((await generator.generateTool('/items', 'constructor')).metadata.method).toBe('constructor');
+    });
+
+    it('keeps own __proto__ keys own through the internal dereferencer', async () => {
+      // A path item key `__proto__` once became the path item's prototype, so its `x-mcp` was inherited
+      const document = JSON.parse(`{
+        "openapi": "3.2.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "components": { "pathItems": { "P": { "__proto__": { "x-mcp": { "enabled": false } },
+          "post": { "operationId": "viaRef", "responses": { "200": { "description": "OK" } } } } } },
+        "paths": {
+          "/a": { "__proto__": { "x-mcp": { "enabled": false } },
+            "get": { "operationId": "direct", "responses": { "200": { "description": "OK" } } } },
+          "/b": { "$ref": "#/components/pathItems/P" }
+        }
+      }`);
+      for (const dereference of [true, false]) {
+        const generator = await OpenAPIToolGenerator.fromJSON(document, { dereference, validate: false });
+        // without dereferencing, a path item that is a reference is skipped, as before
+        expect(await names(generator)).toEqual(dereference ? ['direct', 'viaRef'] : ['direct']);
+      }
+      const generator = await OpenAPIToolGenerator.fromJSON(document, { validate: false });
+      await generator.generateTools();
+      for (const path of ['/a', '/b']) {
+        const pathItem = generator.getDocument().paths![path]!;
+        expect(Object.getPrototypeOf(pathItem)).toBe(Object.prototype);
+        expect(Object.hasOwn(pathItem, '__proto__')).toBe(true);
+      }
+    });
+
+    it('rejects invalid additionalOperations keys when validating, without saying they are ignored', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', { '/items': { get: op(), additionalOperations: { GET: op(), 'in valid': op() } } }),
+      );
+      await expect(generator.generateTools()).rejects.toThrow(ParseError);
+      await expect(generator.generateTools()).rejects.toThrow(
+        'Invalid OpenAPI document: additionalOperations key "GET" is the method of the fixed `get` field, which the ' +
+          "specification forbids (and 1 more; see the error's context.errors)",
+      );
+    });
+
+    it('reports a path item that is not an object, and ignores paths that are not an object', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.0.3', { '/a': null, '/b': { get: op({ operationId: 'b' }) } }),
+        { validate: false },
+      );
+      expect(await names(generator)).toEqual(['b']);
+      expect(generator.getDiagnostics()).toEqual([
+        expect.objectContaining({ code: 'PATH_ITEM_NOT_OBJECT', path: '/paths/~1a', severity: 'warning' }),
+      ]);
+
+      const noPaths = await OpenAPIToolGenerator.fromJSON({ ...clean('3.0.3', {}), paths: 'nope' }, { validate: false });
+      expect(await noPaths.generateTools()).toEqual([]);
+    });
+  });
+
+  describe('bounded work and output on hostile documents', () => {
+    it('generates thousands of additional operations on one path in linear time', async () => {
+      const count = 4000;
+      const additionalOperations = Object.fromEntries(
+        Array.from({ length: count }, (_, i) => [`M${String(i).padStart(4, '0')}`, op({ operationId: `op${i}` })]),
+      );
+      const generator = await OpenAPIToolGenerator.fromJSON(clean('3.2.0', { '/x': { additionalOperations } }));
+      const started = Date.now();
+      const tools = await generator.generateTools();
+      expect(tools).toHaveLength(count);
+      expect(tools[count - 1].metadata.method).toBe('M3999');
+      // generateTool looks one key up and walks the path item once, not per call
+      for (let i = 0; i < count; i += 4) {
+        await generator.generateTool('/x', `M${String(i).padStart(4, '0')}`);
+      }
+      // generous backstop: the quadratic lookup took ~15 s for this size
+      expect(Date.now() - started).toBeLessThan(10_000);
+    }, 30_000);
+
+    it('keeps at most MAX_DIAGNOSTICS diagnostics, then one DIAGNOSTICS_TRUNCATED entry', async () => {
+      const additionalOperations = Object.fromEntries(Array.from({ length: 3000 }, (_, i) => [`bad key ${i}`, op()]));
+      const generator = await OpenAPIToolGenerator.fromJSON(clean('3.2.0', { '/x': { additionalOperations } }), {
+        validate: false,
+      });
+      expect(await generator.generateTools()).toEqual([]);
+      const diagnostics = generator.getDiagnostics();
+      expect(diagnostics).toHaveLength(MAX_DIAGNOSTICS + 1);
+      expect(diagnostics.slice(0, -1).every((d) => d.code === 'INVALID_METHOD_TOKEN')).toBe(true);
+      expect(diagnostics[MAX_DIAGNOSTICS]).toEqual({
+        severity: 'warning',
+        code: 'DIAGNOSTICS_TRUNCATED',
+        message: `Only the first ${MAX_DIAGNOSTICS} diagnostics are kept; later findings were not recorded`,
+      });
+      // a duplicate of a kept finding is still recognised, and the truncation entry stays single
+      await generator.generateTools();
+      expect(generator.getDiagnostics()).toEqual(diagnostics);
+    });
+
+    it('bounds and escapes document text in diagnostics and error messages', async () => {
+      const hostile = `/${'a'.repeat(200_000)}\n\u001b[31mred`;
+      const spec = clean('3.2.0', {
+        [hostile]: { get: op({ operationId: 'a', parameters: [{ name: 'q', in: 'querystring', content: {} }] }) },
+      });
+      const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+      expect(await generator.generateTools()).toEqual([]);
+      const [diagnostic] = generator.getDiagnostics();
+      expect(diagnostic.code).toBe('UNSUPPORTED_PARAMETER_LOCATION');
+      expect(diagnostic.message.length).toBeLessThan(1300);
+      expect(diagnostic.path!.length).toBeLessThan(400);
+      for (const text of [diagnostic.message, diagnostic.path!]) expect(text).not.toMatch(/[\u0000-\u001f]/);
+
+      // a key that is not a path, cut and escaped in the ParseError message; in full in context.errors
+      const invalid = await OpenAPIToolGenerator.fromJSON(clean('3.0.3', { [hostile.slice(1)]: { get: op() } }));
+      const error = await invalid.generateTools().catch((e: unknown) => e as ParseError);
+      expect(error).toBeInstanceOf(ParseError);
+      expect(error.message.length).toBeLessThan(700);
+      expect(error.message).toMatch(/^Invalid OpenAPI document: Path must start with '\/': a+\.\.\.$/);
+      expect(error.message).not.toMatch(/[\u0000-\u001f]/);
+      expect(error.context!['errors'][0].path.length).toBe('/paths/'.length + 1024 + 3);
+    });
+  });
+
+  describe('declared versions', () => {
+    const paths = { '/items': { get: op({ operationId: 'listItems' }) } };
+
+    it.each(['3.0.4', '3.1.2', '3.2.0', '3.2.1-rc1'])('loads %s without diagnostics', async (version) => {
+      const generator = await OpenAPIToolGenerator.fromJSON(clean(version, paths));
+      expect(await names(generator)).toEqual(['listItems']);
+      expect(generator.getDiagnostics()).toEqual([]);
+      expect(generator.getSpecVersion().status).toBe('supported');
+    });
+
+    it('loads a newer 3.x minor version with exactly one diagnostic', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(clean('3.3.0', paths));
+      expect(codes(generator)).toEqual(['NEWER_OPENAPI_VERSION']);
+      expect(await names(generator)).toEqual(['listItems']);
+      // the validator reports the same warning; it is kept once
+      expect(generator.getDiagnostics()).toEqual([
+        {
+          severity: 'warning',
+          code: 'NEWER_OPENAPI_VERSION',
+          message: expect.stringContaining('newer than the latest version this library knows (3.2)'),
+          path: '/openapi',
+        },
+      ]);
+      expect(generator.getSpecVersion()).toMatchObject({ status: 'newer-minor', family: '3.2', major: 3, minor: 3 });
+    });
+
+    it('rejects another major version with a clear error, and reports it when validation is off', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(clean('4.0.0', paths));
+      await expect(generator.generateTools()).rejects.toThrow(
+        'Invalid OpenAPI document: Unsupported version: OpenAPI "4.0.0". Expected OpenAPI 3.0.x, 3.1.x or 3.2.x',
+      );
+
+      const lenient = await OpenAPIToolGenerator.fromJSON(clean('4.0.0', paths), { validate: false });
+      expect(await names(lenient)).toEqual(['listItems']);
+      expect(lenient.getDiagnostics()).toEqual([
+        expect.objectContaining({ code: 'INVALID_OPENAPI_VERSION', path: '/openapi', severity: 'warning' }),
+      ]);
+      expect(lenient.getSpecVersion()).toMatchObject({ status: 'unsupported', major: 4, minor: 0 });
+      expect(lenient.getSpecVersion().family).toBeUndefined();
+    });
+
+    it('names Swagger 2.0 and a missing version in its diagnostics', async () => {
+      const swagger = await OpenAPIToolGenerator.fromJSON(
+        { swagger: '2.0', info: { title: 'T', version: '1' }, paths: {} },
+        { validate: false },
+      );
+      expect(swagger.getDiagnostics()).toEqual([
+        expect.objectContaining({
+          code: 'INVALID_OPENAPI_VERSION',
+          path: '/swagger',
+          message: expect.stringContaining('Swagger 2.0 documents are not supported'),
+        }),
+      ]);
+      const missing = await OpenAPIToolGenerator.fromJSON(
+        { info: { title: 'T', version: '1' }, paths: {} },
+        { validate: false },
+      );
+      expect(missing.getDiagnostics()).toEqual([
+        expect.objectContaining({ code: 'MISSING_OPENAPI_VERSION', path: '/openapi' }),
+      ]);
+      expect(missing.getSpecVersion().status).toBe('missing');
+    });
+
+    it('reports conflicting version fields, and returns copies', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(clean('3.1.0', paths, { swagger: '2.0' }));
+      const version = generator.getSpecVersion();
+      expect(version.diagnostics.map((d) => d.code)).toEqual(['CONFLICTING_VERSION_FIELDS']);
+      version.diagnostics[0].message = 'changed';
+      version.status = 'malformed';
+      const diagnostics = generator.getDiagnostics();
+      diagnostics[0].message = 'changed';
+      diagnostics.push({ severity: 'info', code: 'X', message: 'x' });
+
+      expect(generator.getSpecVersion().status).toBe('supported');
+      expect(generator.getSpecVersion().diagnostics[0].message).not.toBe('changed');
+      expect(generator.getDiagnostics()).toEqual([
+        expect.objectContaining({ code: 'CONFLICTING_VERSION_FIELDS', message: expect.not.stringContaining('changed') }),
+      ]);
+    });
+
+    it('reads the version after overlays', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(clean('3.0.3', paths), {
+        overlays: {
+          overlay: '1.0.0',
+          info: { title: 'o', version: '1' },
+          actions: [{ target: '$', update: { openapi: '3.3.0' } }],
+        },
+      });
+      expect(generator.getSpecVersion().declared).toBe('3.3.0');
+    });
+  });
+
+  describe('diagnostics channel', () => {
+    it('adds validator warnings once validation has run, never twice', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON({
+        openapi: '3.0.3',
+        info: { title: 'T', version: '1.0.0' },
+        paths: { '/items': { get: op() } },
+      });
+      expect(generator.getDiagnostics()).toEqual([]);
+      await generator.lint(); // lint never validates
+      expect(generator.getDiagnostics()).toEqual([]);
+
+      await generator.generateTools();
+      const first = generator.getDiagnostics();
+      // a forwarded legacy validator code keeps its historical path
+      expect(first.map((d) => [d.code, d.path])).toEqual([
+        ['NO_OPERATION_ID', '/paths//items/get/operationId'],
+        ['NO_SERVERS', '/servers'],
+      ]);
+      await generator.generateTools();
+      await generator.generateTool('/items', 'get');
+      expect(generator.getDiagnostics()).toEqual(first);
+    });
+
+    it('validates once per generator', async () => {
+      const spy = jest.spyOn(Validator.prototype, 'validate');
+      try {
+        const generator = await OpenAPIToolGenerator.fromJSON(
+          clean('3.0.3', { '/a': { get: op({ operationId: 'a' }), post: op({ operationId: 'b' }) } }),
+        );
+        await generator.generateTools();
+        await generator.generateTools();
+        await generator.generateTool('/a', 'post');
+        expect(spy).toHaveBeenCalledTimes(1);
+        // the public validate() still runs on demand
+        await generator.validate();
+        expect(spy).toHaveBeenCalledTimes(2);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('keeps a finding reported by both the validator and the walker once', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', { '/items': { get: op({ operationId: 'a' }), additionalOperations: { CONNECT: op(), Post: op() } } }),
+      );
+      expect(await names(generator)).toEqual(['a']);
+      expect(generator.getDiagnostics().map((d) => [d.code, d.path])).toEqual([
+        ['REFUSED_METHOD', '/paths/~1items/additionalOperations/CONNECT'],
+        ['METHOD_CASE_VARIANT', '/paths/~1items/additionalOperations/Post'],
+      ]);
+    });
+
+    it('reports a fixed field holding null, which validation skips silently', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.0.3', { '/items': { get: op({ operationId: 'a' }), put: null } }),
+      );
+      expect(await generator.validate()).toEqual({ valid: true, errors: undefined, warnings: undefined });
+      expect(await names(generator)).toEqual(['a']);
+      expect(generator.getDiagnostics().map((d) => [d.code, d.path])).toEqual([['OPERATION_NOT_OBJECT', '/paths/~1items/put']]);
+    });
+
+    it('accepts an operation without responses from 3.1 on, and requires it in 3.0', async () => {
+      const paths = { '/items': { get: { operationId: 'listItems' } } };
+      const v31 = await OpenAPIToolGenerator.fromJSON(clean('3.1.0', paths));
+      expect(await names(v31)).toEqual(['listItems']);
+      const v30 = await OpenAPIToolGenerator.fromJSON(clean('3.0.3', paths));
+      await expect(v30.generateTools()).rejects.toThrow(
+        'Invalid OpenAPI document: Operation missing responses: GET /items',
+      );
+    });
+
+    it('lists only codes of the DIAGNOSTIC_CODES registry', async () => {
+      const spec = clean(
+        '3.2.0',
+        {
+          '/a': null,
+          '/b': {
+            get: op(),
+            put: 'x',
+            query: op({ parameters: [{ name: 'q', in: 'querystring', content: {} }] }),
+            additionalOperations: { GET: op(), Get: op(), CONNECT: op(), 'a b': op(), LINK: 5 },
+          },
+          '/c': { additionalOperations: [] },
+          '/d': { get: op({ security: [{ nope: [] }] }), post: op({ security: [null, { k: [] }] }) },
+        },
+        { swagger: '2.0', components: { securitySchemes: { k: { type: 'http', scheme: 'basic' } } } },
+      );
+      const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+      await generator.generateTools();
+      const found = new Set(codes(generator));
+      const registry = new Set<string>(Object.values(DIAGNOSTIC_CODES));
+      expect([...found].filter((code) => !registry.has(code))).toEqual([]);
+      expect(found.size).toBeGreaterThanOrEqual(12);
+    });
+  });
+
+  describe('security requirements naming unknown schemes', () => {
+    const schemes = { components: { securitySchemes: { basic: { type: 'http', scheme: 'basic' } } } };
+    const securedSpec = (security: unknown, extra: Record<string, unknown> = schemes) =>
+      clean('3.2.0', { '/pets': { put: op({ operationId: 'updatePet', security }) } }, extra);
+
+    it('keeps the resolvable alternative when another names a scheme by URI', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        securedSpec([{ basic: ['write'] }, { 'otherapi#/components/securitySchemes/generic_auth': ['read'] }]),
+      );
+      const tools = await generator.generateTools();
+      expect(tools.map((t) => t.name)).toEqual(['updatePet']);
+      expect(tools[0].metadata.security?.map((s) => s.scheme)).toEqual(['basic']);
+      expect(tools[0].mapper.filter((m) => m.security).map((m) => m.security!.scheme)).toEqual(['basic']);
+      expect(generator.getDiagnostics()).toEqual([
+        {
+          severity: 'warning',
+          code: 'UNRESOLVED_SECURITY_SCHEME',
+          message:
+            'Security Requirement names scheme "otherapi#/components/securitySchemes/generic_auth", which ' +
+            'components.securitySchemes does not define (a scheme named by URI is not resolved yet); the requirement ' +
+            'cannot be satisfied and is dropped with every scheme it combines',
+          path: '/paths/~1pets/put/security/1/otherapi#~1components~1securitySchemes~1generic_auth',
+        },
+      ]);
+      // generateTool directly no longer throws a TypeError either
+      expect((await generator.generateTool('/pets', 'put')).name).toBe('updatePet');
+    });
+
+    it.each([
+      ['a single missing scheme', [{ missing: [] }], [['UNRESOLVED_SECURITY_SCHEME', '/paths/~1pets/put/security/0/missing']]],
+      [
+        'a resolvable scheme required together with a missing one',
+        [{ basic: [], missing: [] }],
+        [['UNRESOLVED_SECURITY_SCHEME', '/paths/~1pets/put/security/0/missing']],
+      ],
+      [
+        'only unresolvable alternatives',
+        [{ a: [] }, { b: [] }, null],
+        [
+          ['UNRESOLVED_SECURITY_SCHEME', '/paths/~1pets/put/security/0/a'],
+          ['UNRESOLVED_SECURITY_SCHEME', '/paths/~1pets/put/security/1/b'],
+          ['INVALID_SECURITY_REQUIREMENT', '/paths/~1pets/put/security/2'],
+        ],
+      ],
+    ])('makes no tool for %s, without a console warning', async (_label, security, findings) => {
+      const warn = silenceWarnings();
+      try {
+        const generator = await OpenAPIToolGenerator.fromJSON(securedSpec(security), { validate: false });
+        expect(await names(generator)).toEqual([]);
+        expect(warn).not.toHaveBeenCalled();
+        expect(generator.getDiagnostics().map((d) => [d.code, d.path])).toEqual([
+          ...findings,
+          ['UNSATISFIABLE_SECURITY', '/paths/~1pets/put'],
+        ]);
+        expect(generator.getDiagnostics().at(-1)!.message).toMatch(
+          /^PUT \/pets: none of its Security Requirements can be satisfied .*; the operation makes no tool$/,
+        );
+        await expect(generator.generateTool('/pets', 'put')).rejects.toThrow(GenerationError);
+        await expect(generator.generateTool('/pets', 'put')).rejects.toThrow('PUT /pets: none of its Security');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('keeps the meaning of an empty requirement and of an empty security list', async () => {
+      const optional = await OpenAPIToolGenerator.fromJSON(securedSpec([{ missing: [] }, {}]));
+      const [optionalTool] = await optional.generateTools();
+      expect(optionalTool.metadata.security).toEqual([]);
+      expect(codes(optional)).toEqual(['UNRESOLVED_SECURITY_SCHEME']);
+
+      const open = await OpenAPIToolGenerator.fromJSON(securedSpec([]));
+      const [openTool] = await open.generateTools();
+      expect(openTool.metadata.security).toEqual([]);
+      expect(codes(open)).toEqual([]);
+    });
+
+    it('reports a document-level unknown scheme once for every tool it applies to', async () => {
+      const spec = clean(
+        '3.0.3',
+        { '/a': { get: op({ operationId: 'a' }) }, '/b': { get: op({ operationId: 'b' }) } },
+        { security: [{ missing: [], constructor: [] }, { basic: [] }], ...schemes },
+      );
+      const generator = await OpenAPIToolGenerator.fromJSON(spec);
+      const tools = await generator.generateTools();
+      expect(tools.map((t) => t.metadata.security?.map((s) => s.scheme))).toEqual([['basic'], ['basic']]);
+      expect(generator.getDiagnostics().map((d) => [d.code, d.path, d.message.includes('URI')])).toEqual([
+        ['UNRESOLVED_SECURITY_SCHEME', '/security/0/missing', false],
+        ['UNRESOLVED_SECURITY_SCHEME', '/security/0/constructor', false],
+      ]);
+    });
+
+    it('keeps generating, as before, when the document defines no security schemes at all', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(securedSpec([{ token: [] }, null], {}), { validate: false });
+      const [tool] = await generator.generateTools();
+      expect(tool.metadata.security).toEqual([]);
+      expect(codes(generator)).toEqual(['UNRESOLVED_SECURITY_SCHEME', 'INVALID_SECURITY_REQUIREMENT']);
+    });
+
+    it('fails a tool whose security is not a list when schemes exist, as before, with a typed error', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(securedSpec({ basic: [] }), { validate: false });
+      await expect(generator.generateTool('/pets', 'put')).rejects.toThrow(GenerationError);
+      await expect(generator.generateTool('/pets', 'put')).rejects.toThrow(
+        '/paths/~1pets/put/security must be an array of Security Requirement Objects, found an object',
+      );
+      const warn = silenceWarnings();
+      try {
+        expect(await generator.generateTools()).toEqual([]);
+        expect(warn).toHaveBeenCalledWith('Failed to generate tool for PUT /pets:', expect.any(String));
+      } finally {
+        warn.mockRestore();
+      }
+
+      // without schemes there was never anything to read: the tool is generated
+      const noSchemes = await OpenAPIToolGenerator.fromJSON(securedSpec({ basic: [] }, {}), { validate: false });
+      expect((await noSchemes.generateTool('/pets', 'put')).metadata.security).toEqual([]);
+    });
+  });
+
+  describe('parameters in a location the generator does not map', () => {
+    const querystringParameter = {
+      name: 'filter',
+      in: 'querystring',
+      content: { 'application/json': { schema: { type: 'object' } } },
+    };
+
+    it('skips the operation with a diagnostic instead of leaking into the mapper', async () => {
+      const spec = clean('3.2.0', {
+        '/search': {
+          get: op({ operationId: 'plain' }),
+          query: op({ operationId: 'search', parameters: [querystringParameter] }),
+        },
+      });
+      const warn = silenceWarnings();
+      try {
+        const generator = await OpenAPIToolGenerator.fromJSON(spec);
+        expect(await names(generator)).toEqual(['plain']);
+        expect(warn).not.toHaveBeenCalled();
+        expect(generator.getDiagnostics()).toEqual([
+          {
+            severity: 'warning',
+            code: 'UNSUPPORTED_PARAMETER_LOCATION',
+            message:
+              'QUERY /search: parameter "filter" has location (in) "querystring", which is not mapped to a request ' +
+              '(supported: path, query, header, cookie); the operation makes no tool',
+            path: '/paths/~1search/query/parameters/0',
+          },
+        ]);
+        await expect(generator.generateTool('/search', 'query')).rejects.toThrow(GenerationError);
+        await expect(generator.generateTool('/search', 'query')).rejects.toThrow('QUERY /search: parameter "filter"');
+        expect(generator.getDiagnostics()).toHaveLength(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('checks path-level and additional-operation parameters, and any unmapped location', async () => {
+      const spec = clean('3.2.0', {
+        '/a': { parameters: [{ name: 'p', in: 'body', schema: {} }], get: op({ operationId: 'a' }) },
+        '/b': { additionalOperations: { LINK: op({ operationId: 'b', parameters: [{ name: 'q', schema: {} }] }) } },
+        '/c': { get: op({ operationId: 'c', parameters: [null] }) },
+      });
+      const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
+      expect(await generator.generateTools()).toEqual([]);
+      expect(generator.getDiagnostics().map((d) => [d.path, d.message.split(', which')[0]])).toEqual([
+        ['/paths/~1a/parameters/0', 'GET /a: parameter "p" has location (in) "body"'],
+        ['/paths/~1b/additionalOperations/LINK/parameters/0', 'LINK /b: parameter "q" has location (in) undefined'],
+        ['/paths/~1c/get/parameters/0', 'GET /c: parameter undefined has location (in) undefined'],
+      ]);
+    });
+
+    it('applies after the filters, and leaves unresolved references to the resolver as before', async () => {
+      const spec = clean(
+        '3.0.3',
+        {
+          '/a': {
+            get: op({ operationId: 'a', parameters: [{ $ref: '#/components/parameters/P' }] }),
+            post: op({ operationId: 'b', parameters: [{ name: 'x', in: 'body', schema: {} }] }),
+          },
+        },
+        { components: { parameters: { P: { name: 'p', in: 'query', schema: { type: 'string' } } } } },
+      );
+      const generator = await OpenAPIToolGenerator.fromJSON(spec, { dereference: false, validate: false });
+      expect(await names(generator, { includeMethods: ['get'] })).toEqual(['a']);
+      expect(generator.getDiagnostics()).toEqual([]);
+    });
+  });
+
+  describe('method filters', () => {
+    const spec = clean('3.2.0', {
+      '/items': {
+        get: op({ operationId: 'list' }),
+        post: op({ operationId: 'create' }),
+        query: op({ operationId: 'search' }),
+        additionalOperations: { LINK: op({ operationId: 'link' }) },
+      },
+    });
+    const namesFor = async (options: GenerateOptions): Promise<string[]> =>
+      names(await OpenAPIToolGenerator.fromJSON(spec), options);
+
+    it('match standard methods in any case', async () => {
+      expect(await namesFor({ includeMethods: ['GET'] })).toEqual(['list']);
+      expect(await namesFor({ includeMethods: ['Get', 'QUERY'] })).toEqual(['list', 'search']);
+      expect(await namesFor({ excludeMethods: ['POST', 'query'] })).toEqual(['list', 'link']);
+    });
+
+    it('match additional methods exactly as written', async () => {
+      expect(await namesFor({ includeMethods: ['LINK'] })).toEqual(['link']);
+      expect(await namesFor({ includeMethods: ['link'] })).toEqual([]);
+      expect(await namesFor({ excludeMethods: ['LINK'] })).toEqual(['list', 'create', 'search']);
+    });
+
+    it('treat query as read-only and an additional method as not', async () => {
+      expect(await namesFor({ readOnlyOnly: true })).toEqual(['list', 'search']);
+    });
   });
 });

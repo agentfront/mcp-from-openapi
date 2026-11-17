@@ -1,5 +1,13 @@
-import type { HTTPMethod, OpenAPIDocument, OperationObject, ParameterObject } from './types';
+import type { ParameterObject } from './types';
 import { isReferenceObject } from './types';
+import {
+  detectSpecVersion,
+  isSpecObject,
+  listOperations,
+  ownProperty,
+  resolveOperationLayout,
+  wireMethod,
+} from './spec';
 
 export type LintSeverity = 'error' | 'warning' | 'info';
 
@@ -21,8 +29,6 @@ export interface LintResult {
   findings: LintFinding[];
   counts: { error: number; warning: number; info: number };
 }
-
-const METHODS: HTTPMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
 
 /** Query-parameter names that read as pagination controls (shared with response hints) */
 export const PAGINATION_PARAM = /^(page|limit|offset|cursor|per_page|pagesize|page_size|after|before)$/i;
@@ -155,33 +161,52 @@ function hasAnyExample(content: Record<string, unknown> | undefined): boolean {
 }
 
 /**
+ * The Parameter Objects of a `parameters` value. A document being linted may
+ * be imperfect, so anything that is not an array of objects is skipped, as is
+ * each entry that is not an object or is a Reference Object.
+ */
+function readParameters(value: unknown): ParameterObject[] {
+  return Array.isArray(value)
+    ? value.filter((param): param is ParameterObject => isSpecObject(param) && !isReferenceObject(param))
+    : [];
+}
+
+/**
  * Lint an OpenAPI document for agent-readiness: the spec-quality gaps that
  * measurably degrade tool-calling accuracy (missing operationIds, absent or
  * vague descriptions, unpaginated list endpoints, oversized schemas, missing
  * examples). Small spec fixes routinely take tool-call success rates from
  * mediocre to near-perfect — each finding carries a concrete hint.
+ *
+ * Meant for imperfect documents: a value that cannot be read (a path item, a
+ * `parameters` list, a parameter that is not an object, ...) is skipped
+ * rather than failing. It lints the operations the generator generates: the
+ * ones the declared version has (`query` and `additionalOperations` from
+ * OpenAPI 3.2; the eight historical methods when the version is older,
+ * missing or malformed).
  */
 export function lintDocument(document: object): LintResult {
   const findings: LintFinding[] = [];
   const operationIds = new Map<string, string[]>();
 
-  const paths = (document as OpenAPIDocument).paths ?? {};
-  for (const [pathStr, pathItem] of Object.entries(paths).sort(([a], [b]) => (a < b ? -1 : 1))) {
-    if (!pathItem || '$ref' in pathItem) continue;
+  const layout = resolveOperationLayout(detectSpecVersion(document));
+  const paths = ownProperty(document, 'paths');
+  for (const [pathStr, pathItem] of Object.entries(isSpecObject(paths) ? paths : {}).sort(([a], [b]) =>
+    a < b ? -1 : 1,
+  )) {
+    if (!isSpecObject(pathItem) || '$ref' in pathItem) continue;
 
     // Path-item-level parameters apply to every operation (the generator
     // merges them the same way) — lint must see them too.
-    const pathLevelParameters = ((pathItem as Record<string, unknown>)['parameters'] as unknown[] | undefined ?? []).filter(
-      (param): param is ParameterObject => !isReferenceObject(param),
-    );
+    const pathLevelParameters = readParameters(ownProperty(pathItem, 'parameters'));
 
-    for (const method of METHODS) {
-      const operation = pathItem[method] as OperationObject | undefined;
-      if (!operation) continue;
-      const label = `${method.toUpperCase()} ${pathStr}`;
+    for (const { method, operation } of listOperations(pathItem, { layout }).operations) {
+      const wire = wireMethod(method);
+      const label = `${wire} ${pathStr}`;
 
       // operationId presence + duplicates
-      if (!operation.operationId) {
+      const operationId = typeof operation.operationId === 'string' ? operation.operationId : '';
+      if (!operationId) {
         findings.push({
           severity: 'warning',
           code: 'missing-operation-id',
@@ -190,14 +215,14 @@ export function lintDocument(document: object): LintResult {
           hint: 'Add a short, action-oriented operationId (it becomes the tool name).',
         });
       } else {
-        const existing = operationIds.get(operation.operationId) ?? [];
+        const existing = operationIds.get(operationId) ?? [];
         existing.push(label);
-        operationIds.set(operation.operationId, existing);
-        if (operation.operationId.length > 64) {
+        operationIds.set(operationId, existing);
+        if (operationId.length > 64) {
           findings.push({
             severity: 'info',
             code: 'long-operation-id',
-            message: `operationId '${operation.operationId.slice(0, 40)}…' exceeds 64 characters and will be truncated with a hash suffix.`,
+            message: `operationId '${operationId.slice(0, 40)}…' exceeds 64 characters and will be truncated with a hash suffix.`,
             path: label,
             hint: 'Shorten the operationId below 64 characters to keep tool names readable.',
           });
@@ -225,10 +250,7 @@ export function lintDocument(document: object): LintResult {
       }
 
       // parameter descriptions (path-level + operation-level, like generation)
-      const parameters = [
-        ...pathLevelParameters,
-        ...(operation.parameters ?? []).filter((param): param is ParameterObject => !isReferenceObject(param)),
-      ];
+      const parameters = [...pathLevelParameters, ...readParameters(ownProperty(operation, 'parameters'))];
       const undescribed = parameters.filter((param) => !param.description).map((param) => param.name);
       if (undescribed.length > 0) {
         findings.push({
@@ -270,13 +292,14 @@ export function lintDocument(document: object): LintResult {
         }
       }
 
-      if (method === 'get' && responseShape.hasArray) {
+      // GET and QUERY are the safe reads
+      if ((method === 'get' || method === 'query') && responseShape.hasArray) {
         const hasPagination = parameters.some((param) => param.in === 'query' && PAGINATION_PARAM.test(param.name));
         if (!hasPagination) {
           findings.push({
             severity: 'warning',
             code: 'unpaginated-list',
-            message: 'GET returns an array but declares no pagination parameter — responses can blow past client result limits (Claude Code caps tool results at 25K tokens).',
+            message: `${wire} returns an array but declares no pagination parameter — responses can blow past client result limits (Claude Code caps tool results at 25K tokens).`,
             path: label,
             hint: 'Add limit/cursor/page parameters, or shape responses at the server.',
           });

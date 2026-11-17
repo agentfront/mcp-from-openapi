@@ -11,6 +11,8 @@ import type {
   GenerateOptions,
   McpOpenAPITool,
   ValidationResult,
+  ValidationErrorDetail,
+  ValidationWarning,
   HTTPMethod,
   ParameterObject,
   SecurityRequirement,
@@ -24,8 +26,29 @@ import type {
   PathItemObject,
   JsonSchema,
   ToolIcon,
+  SecuritySchemeObject,
+  ReferenceObject,
 } from './types';
-import type { WithExtensions } from './spec';
+import { DIAGNOSTIC_CODES, MAX_DIAGNOSTICS } from './types';
+import {
+  appendPointer,
+  describeValue,
+  detectSpecVersion,
+  getOperation,
+  isSpecObject,
+  jsonPointer,
+  listOperations,
+  ownProperty,
+  resolveOperationLayout,
+  toStandardMethod,
+  wireMethod,
+  diagnosticKey,
+  type OperationEntry,
+  type OperationLayout,
+  type SpecDiagnostic,
+  type SpecVersionInfo,
+  type WithExtensions,
+} from './spec';
 import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import { isReferenceObject } from './types';
 import { ParameterResolver } from './parameter-resolver';
@@ -41,7 +64,14 @@ import {
 import { applyClientTarget } from './client-targets';
 import { applyOverlay } from './overlay';
 import { lintDocument, PAGINATION_PARAM, type LintResult } from './lint';
-import { Validator } from './validator';
+import {
+  Validator,
+  messageText,
+  operationLabel,
+  operationPointer,
+  skippedOperationDiagnostics,
+  versionError,
+} from './validator';
 import { GenerationError, LoadError, OverlayError, ParseError, SchemaError } from './errors';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { emitToolTypeScript } from './type-signature';
@@ -60,6 +90,81 @@ const DEFAULT_MAX_TOOL_NAME_LENGTH = 64;
  * entire name space is exhausted fails loudly instead of looping forever.
  */
 const MAX_NAME_DEDUP_ATTEMPTS = 256;
+
+/**
+ * Parameter locations the generator maps to a request. A parameter in any
+ * other location (`querystring` until it is implemented, a Swagger-style
+ * `body`, a missing `in`) would reach the mapper as an entry no request
+ * builder understands, so its operation is skipped with a
+ * `UNSUPPORTED_PARAMETER_LOCATION` diagnostic instead.
+ */
+const MAPPED_PARAMETER_LOCATIONS: readonly string[] = Object.freeze(['path', 'query', 'header', 'cookie']);
+
+/**
+ * Whether `method` (an operation's method as `listOperations` gives it)
+ * passes a method filter: a standard method matches in any case (`'GET'`
+ * matches `get`), an `additionalOperations` method only exactly as written.
+ */
+function matchesMethodFilter(filter: readonly string[], method: string): boolean {
+  const standard = toStandardMethod(method);
+  return filter.some((candidate) =>
+    standard === undefined ? candidate === method : toStandardMethod(candidate) === standard,
+  );
+}
+
+/**
+ * Sets `key` as an own data property. Plain assignment of the key
+ * `__proto__` replaces the object's prototype instead, so a document key
+ * `__proto__` (which `JSON.parse` creates as an own property) would vanish
+ * and its value's fields would be inherited by the object.
+ */
+function setOwnProperty(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (key === '__proto__') {
+    Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+  } else {
+    target[key] = value;
+  }
+}
+
+/** A validation warning as a diagnostic. */
+function fromValidationWarning(warning: ValidationWarning): SpecDiagnostic {
+  return {
+    severity: 'warning',
+    /* c8 ignore next -- the Validator gives every warning a code; the type leaves it optional */
+    code: warning.code ?? 'VALIDATION_WARNING',
+    message: warning.message,
+    path: warning.path,
+  };
+}
+
+/** Longest stretch of the first validation error quoted in a `ParseError` message. */
+const PARSE_ERROR_DETAIL_MAX_LENGTH = 512;
+
+/**
+ * `Invalid OpenAPI document: <first error>`, counting the rest. The first
+ * error's message can quote the document, so it is cut and escaped; every
+ * error stays in full in the `ParseError`'s `context.errors`.
+ */
+function invalidDocumentMessage(errors: ValidationErrorDetail[]): string {
+  const more = errors.length > 1 ? ` (and ${errors.length - 1} more; see the error's context.errors)` : '';
+  return `Invalid OpenAPI document: ${messageText(errors[0].message, PARSE_ERROR_DETAIL_MAX_LENGTH)}${more}`;
+}
+
+/**
+ * A key of bounded length for a path string: a `Set` of long strings of one
+ * length hashes them into one bucket (V8 hashes a string past 16,383
+ * characters by its length).
+ */
+function pathKey(path: string): string {
+  return diagnosticKey({ severity: 'info', code: '', message: path });
+}
+
+/**
+ * Errors thrown for an operation that is skipped on purpose, with a
+ * diagnostic already recorded: `generateTools` leaves them out silently
+ * instead of warning.
+ */
+const skippedOperations = new WeakSet<object>();
 
 /**
  * Apply the `secureDefaults` load preset: redirects off, external `$ref`
@@ -133,7 +238,8 @@ function composeDescription(
   pathStr: string,
   strategy: 'summaryOnly' | 'descriptionOnly' | 'combined' | 'full',
 ): string {
-  const fallback = `${method.toUpperCase()} ${pathStr}`;
+  // The method as sent: a standard one upper-cased, an additional one as written
+  const fallback = `${wireMethod(method)} ${pathStr}`;
   const summary = operation.summary?.trim();
   const description = operation.description?.trim();
 
@@ -328,6 +434,18 @@ export class OpenAPIToolGenerator {
   private document: OpenAPIDocument;
   private dereferencedDocument?: OpenAPIDocument;
   private options: Required<Omit<LoadOptions, 'overlays'>> & Pick<LoadOptions, 'overlays'>;
+  /** The version the document declares, read once after overlays apply */
+  private readonly specVersion: SpecVersionInfo;
+  /** The operation fields read: those the declared version defines (`resolveOperationLayout`) */
+  private readonly operationLayout: OperationLayout;
+  /** Validation of the (dereferenced) document: the document never changes after load, so it runs once */
+  private validation?: Promise<ValidationResult>;
+  /** Diagnostics in the order first noticed, keyed by `diagnosticKey`; at most `MAX_DIAGNOSTICS` */
+  private readonly diagnostics = new Map<string, SpecDiagnostic>();
+  /** Whether a diagnostic was refused because the list was full */
+  private diagnosticsTruncated = false;
+  /** Paths (`pathKey`) whose Path Item diagnostics are recorded */
+  private readonly walkedPaths = new Set<string>();
 
   /**
    * Private constructor - use static factory methods to create instances
@@ -357,6 +475,101 @@ export class OpenAPIToolGenerator {
         this.document = applyOverlay(this.document, overlay);
       }
     }
+
+    // The declared version: its warnings (a newer 3.x minor, conflicting
+    // version fields), and why it cannot be processed if it cannot — an error
+    // when validation runs, a warning to read when `validate: false` skips it
+    this.specVersion = detectSpecVersion(this.document);
+    this.operationLayout = resolveOperationLayout(this.specVersion);
+    for (const diagnostic of this.specVersion.diagnostics) this.addDiagnostic(diagnostic);
+    const problem = versionError(this.specVersion);
+    if (problem !== undefined) this.addDiagnostic(fromValidationWarning(problem));
+  }
+
+  /**
+   * Records a diagnostic once: a finding reported twice (by the validator and
+   * again while generating, or once per tool for a document-level value) is
+   * kept at its first position. Past `MAX_DIAGNOSTICS`, new findings are
+   * dropped and `getDiagnostics()` ends with `DIAGNOSTICS_TRUNCATED`.
+   */
+  private addDiagnostic(diagnostic: SpecDiagnostic): void {
+    const key = diagnosticKey(diagnostic);
+    if (this.diagnostics.has(key)) return;
+    if (this.diagnostics.size >= MAX_DIAGNOSTICS) {
+      this.diagnosticsTruncated = true;
+      return;
+    }
+    this.diagnostics.set(key, { ...diagnostic });
+  }
+
+  /**
+   * What the generator noticed about the document without failing, in the
+   * order first noticed, each finding once (`DIAGNOSTIC_CODES` lists every
+   * code). It grows as the generator works:
+   *
+   * 1. at load: the declared version (`NEWER_OPENAPI_VERSION` for a 3.x minor
+   *    newer than 3.2, `CONFLICTING_VERSION_FIELDS`, and
+   *    `INVALID_OPENAPI_VERSION` / `MISSING_OPENAPI_VERSION` for a version that
+   *    validation rejects — useful with `validate: false`);
+   * 2. at the first generation with validation on: the validator's warnings
+   *    (`NO_OPERATION_ID`, `NO_SERVERS`, `FEATURE_NEWER_THAN_DECLARED_VERSION`,
+   *    ...). Validation errors never reach it: they throw `ParseError`.
+   *    Validation runs once per generator and is not re-run if the document
+   *    returned by `getDocument()` is changed;
+   * 3. while generating — `generateTools()` for every path, `generateTool()`
+   *    (and Arazzo steps, which use it) for the path item and operation it
+   *    builds:
+   *    - the operation walker's findings, each a value generation ignores
+   *      (`PATH_ITEM_NOT_OBJECT`, `OPERATION_NOT_OBJECT`,
+   *      `ADDITIONAL_OPERATIONS_NOT_OBJECT`, `INVALID_METHOD_TOKEN`,
+   *      `DUPLICATE_FIXED_METHOD`, `METHOD_CASE_VARIANT`, `REFUSED_METHOD`);
+   *    - `FEATURE_NEWER_THAN_DECLARED_VERSION` for a `query` operation or
+   *      `additionalOperations` in a document declaring 3.0 or 3.1: they are
+   *      read only from 3.2 on, so they make no tool;
+   *    - `UNRESOLVED_SECURITY_SCHEME` / `INVALID_SECURITY_REQUIREMENT`: a
+   *      Security Requirement that cannot be satisfied (it names a scheme
+   *      `components.securitySchemes` does not define, a scheme named by URI
+   *      included, or it is not an object) is dropped; when every requirement
+   *      of an operation is dropped, `UNSATISFIABLE_SECURITY` and the
+   *      operation makes no tool;
+   *    - `UNSUPPORTED_PARAMETER_LOCATION`: an operation has a parameter in a
+   *      location the generator does not map (such as `querystring`); the
+   *      operation makes no tool.
+   *
+   * At most `MAX_DIAGNOSTICS` entries are kept; past that, one final
+   * `DIAGNOSTICS_TRUNCATED` entry. Every severity is `warning`.
+   *
+   * `path` comes in two forms, like `ValidationErrorDetail.path`: a
+   * forwarded validator warning whose code predates OpenAPI 3.2 support
+   * (`NO_OPERATION_ID`, `NO_OPERATIONS`) keeps its historical form, the path
+   * key unescaped (`/paths//pets/get/operationId`); every other diagnostic
+   * carries an RFC 6901 JSON Pointer (`/paths/~1pets/get`), whose segments
+   * are escaped for display and capped, so a capped one does not resolve.
+   *
+   * Returns a copy.
+   */
+  getDiagnostics(): SpecDiagnostic[] {
+    const diagnostics = [...this.diagnostics.values()].map((diagnostic) => ({ ...diagnostic }));
+    if (this.diagnosticsTruncated) {
+      diagnostics.push({
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.DIAGNOSTICS_TRUNCATED,
+        message: `Only the first ${MAX_DIAGNOSTICS} diagnostics are kept; later findings were not recorded`,
+      });
+    }
+    return diagnostics;
+  }
+
+  /**
+   * The OpenAPI version the document declares (read after overlays), as
+   * `detectSpecVersion` reports it: its `status` (`supported`,
+   * `newer-minor`, `swagger-2.0`, `unsupported`, `malformed`, `missing`), the
+   * declared value, and the `family` (`3.0`, `3.1`, `3.2`) whose rules the
+   * validator applies, `undefined` when the version cannot be processed.
+   * Returns a copy.
+   */
+  getSpecVersion(): SpecVersionInfo {
+    return { ...this.specVersion, diagnostics: this.specVersion.diagnostics.map((diagnostic) => ({ ...diagnostic })) };
   }
 
   /**
@@ -474,7 +687,11 @@ export class OpenAPIToolGenerator {
   }
 
   /**
-   * Get the OpenAPI document
+   * Get the OpenAPI document: dereferenced once generation or linting has
+   * run, as loaded (after overlays) before that. It is the generator's own
+   * object, not a copy. Validation runs once per generator, so changing this
+   * document afterwards is not re-validated, and neither the declared
+   * version (`getSpecVersion()`) nor `getDiagnostics()` is recomputed.
    */
   getDocument(): OpenAPIDocument {
     return this.dereferencedDocument ?? this.document;
@@ -680,7 +897,7 @@ export class OpenAPIToolGenerator {
       return pending;
     };
     const store = (frame: WalkFrame, index: number, value: unknown): void => {
-      if (frame.keys) (frame.out as Record<string, unknown>)[frame.keys[index]] = value;
+      if (frame.keys) setOwnProperty(frame.out as Record<string, unknown>, frame.keys[index], value);
       else (frame.out as unknown[])[index] = value;
     };
 
@@ -700,7 +917,11 @@ export class OpenAPIToolGenerator {
       let value: unknown = frame.out;
       if (frame.placeholder) {
         const resolved = (frame.out as unknown[])[0];
-        if (resolved && typeof resolved === 'object') Object.assign(frame.placeholder, resolved);
+        if (resolved && typeof resolved === 'object') {
+          // Not Object.assign: it would turn an own `__proto__` key into the prototype
+          const record = resolved as Record<string, unknown>;
+          for (const key of Object.keys(record)) setOwnProperty(frame.placeholder, key, record[key]);
+        }
         value = frame.placeholder;
       }
       const parent = frames[frames.length - 1];
@@ -734,13 +955,26 @@ export class OpenAPIToolGenerator {
     }
 
     if (runValidation) {
-      const validator = new Validator();
-      const documentToValidate = this.dereferencedDocument ?? this.document;
-      const result = await validator.validate(documentToValidate);
+      const result = await this.validateOnce();
       if (!result.valid) {
-        throw new ParseError('Invalid OpenAPI document', { errors: result.errors });
+        // `valid: false` always comes with at least one error
+        throw new ParseError(invalidDocumentMessage(result.errors!), { errors: result.errors });
       }
     }
+  }
+
+  /**
+   * Validates the document generation reads (dereferenced when dereferencing
+   * is on) once per generator, recording its warnings as diagnostics. Every
+   * `generateTool` call goes through `initialize()`; without this the
+   * validator re-ran for each operation.
+   */
+  private validateOnce(): Promise<ValidationResult> {
+    this.validation ??= new Validator().validate(this.getDocument()).then((result) => {
+      for (const warning of result.warnings ?? []) this.addDiagnostic(fromValidationWarning(warning));
+      return result;
+    });
+    return this.validation;
   }
 
   /**
@@ -753,33 +987,36 @@ export class OpenAPIToolGenerator {
     const tools: McpOpenAPITool[] = [];
     const usedNames = new Set<string>();
 
-    if (!document.paths) {
+    if (!isSpecObject(document.paths)) {
       return tools;
     }
 
     // Deterministic ordering (MCP 2026-07-28 SHOULD): paths sorted by code
-    // unit (locale-independent), methods in the fixed canonical order below.
-    // Stable output across spec re-serializations keeps clients' prompt
-    // caches effective.
-    // (object keys are unique, so the comparator never sees equal paths)
+    // unit (locale-independent), then the operations in `listOperations`
+    // order: the eight historical methods in their fixed order, then, from
+    // OpenAPI 3.2, `query` and `additionalOperations` sorted by method. Stable
+    // output across spec re-serializations keeps clients' prompt caches
+    // effective. (object keys are unique, so the comparator never sees equal paths)
     const sortedPaths = Object.entries(document.paths).sort(([a], [b]) => (a < b ? -1 : 1));
 
     for (const [pathStr, pathItem] of sortedPaths) {
-      if (!pathItem || '$ref' in pathItem) continue;
+      // A path item that is still a reference (dereferencing off) is skipped, as before
+      if (ownProperty(pathItem, '$ref') !== undefined) continue;
 
-      const methods: HTTPMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
-
-      for (const method of methods) {
-        const operation = pathItem[method];
-        if (!operation) continue;
+      for (const entry of this.walkPathItem(pathStr, pathItem, true)) {
+        // Fixed methods are lowercase field names (names and dedup hashes are
+        // seeded with them); an additional method is its key as written
+        const { method, operation } = entry;
 
         // Apply filters
-        if (!this.shouldIncludeOperation(operation, pathStr, method, options, document, pathItem)) {
+        if (!this.shouldIncludeOperation(operation, pathStr, method, options, document, pathItem as PathItemObject)) {
           continue;
         }
 
         try {
-          let tool = await this.generateTool(pathStr, method, options);
+          // The entry found by the walk is built directly: looking it up again
+          // per operation would make a large path item quadratic
+          let tool = this.buildToolGuarded(pathStr, pathItem, entry, options);
           // Resolve tool-name collisions (e.g. duplicate operationIds) with a
           // stable, content-derived suffix — the (method, path) pair is unique
           // per operation, so the suffixed name is deterministic across runs.
@@ -797,7 +1034,7 @@ export class OpenAPIToolGenerator {
             while (usedNames.has(deduped)) {
               if (attempts >= MAX_NAME_DEDUP_ATTEMPTS) {
                 throw new GenerationError(
-                  `Unable to find a unique tool name for "${tool.name}" (${method.toUpperCase()} ${pathStr}) ` +
+                  `Unable to find a unique tool name for "${tool.name}" (${operationLabel(method, pathStr)}) ` +
                     `within ${MAX_NAME_DEDUP_ATTEMPTS} attempts — the name space under maxToolNameLength=${maxLength} ` +
                     `is exhausted. Increase maxToolNameLength or rename the operation.`,
                   { name: tool.name, method, path: pathStr, maxToolNameLength: maxLength },
@@ -822,9 +1059,11 @@ export class OpenAPIToolGenerator {
           usedNames.add(tool.name);
           tools.push(tool);
         } catch (error: unknown) {
+          // Skipped on purpose: the reason is already a diagnostic
+          if (skippedOperations.has(error as object)) continue;
           /* c8 ignore next */
           const errorMessage = error instanceof Error ? error.message : String(error);
-          console.warn(`Failed to generate tool for ${method.toUpperCase()} ${pathStr}:`, errorMessage);
+          console.warn(`Failed to generate tool for ${operationLabel(method, pathStr)}:`, errorMessage);
         }
       }
     }
@@ -833,23 +1072,87 @@ export class OpenAPIToolGenerator {
   }
 
   /**
-   * Generate a specific tool for a path and method
+   * The operations of one Path Item that the declared version defines, in
+   * `listOperations` order. The first walk of a path records its diagnostics
+   * (values the walk ignores, operation fields the declared version does not
+   * define). With `list` false, a path already walked is not walked again and
+   * nothing is returned: `generateTool` records the diagnostics of the path
+   * item it builds from without walking it once per call.
+   */
+  private walkPathItem(pathStr: string, pathItem: unknown, list: boolean): OperationEntry[] {
+    const key = pathKey(pathStr);
+    const walked = this.walkedPaths.has(key);
+    if (walked && !list) return [];
+    const pointer = jsonPointer('paths', pathStr);
+    const listed = listOperations(pathItem, { layout: this.operationLayout, pointer });
+    if (!walked) {
+      this.walkedPaths.add(key);
+      for (const diagnostic of listed.diagnostics) this.addDiagnostic(diagnostic);
+      for (const diagnostic of skippedOperationDiagnostics(pathItem, this.operationLayout, this.specVersion, pointer)) {
+        this.addDiagnostic(diagnostic);
+      }
+    }
+    return listed.operations;
+  }
+
+  /**
+   * Generate a specific tool for a path and method.
+   *
+   * `method` names a standard method in any case (`'get'`, `'GET'`) or an
+   * OpenAPI 3.2 `additionalOperations` method exactly as written (`'LINK'`
+   * does not find `link`). Only the operations the declared version defines
+   * are found: `query` and `additionalOperations` from 3.2 on. The tool's
+   * `metadata.method` is the canonical form: the lowercase field name of a
+   * standard method, the key as written otherwise.
+   *
+   * Records the diagnostics of the path item and operation it builds (see
+   * `getDiagnostics()`). Throws a `GenerationError` for an operation
+   * `generateTools` skips with a diagnostic: a parameter in a location the
+   * generator does not map (`UNSUPPORTED_PARAMETER_LOCATION`), or no
+   * Security Requirement that can be satisfied (`UNSATISFIABLE_SECURITY`).
    */
   async generateTool(pathStr: string, method: string, options: GenerateOptions = {}): Promise<McpOpenAPITool> {
     await this.initialize();
+    const document = this.getDocument();
+
+    if (!document.paths) {
+      throw new Error('No paths defined in OpenAPI document');
+    }
+
+    // Own-property lookups: a path or method named `constructor` must not
+    // resolve through the prototype chain. One lookup, constant time.
+    const pathItem = ownProperty(document.paths, pathStr);
+    if (pathItem !== undefined) this.walkPathItem(pathStr, pathItem, false);
+    const entry = getOperation(pathItem, method, { layout: this.operationLayout });
+
+    if (!entry) {
+      throw new Error(`Operation not found: ${operationLabel(String(method), pathStr)}`);
+    }
+    return this.buildToolGuarded(pathStr, pathItem, entry, options);
+  }
+
+  /**
+   * `buildTool`, with a call-stack overflow turned into a `SchemaError`.
+   * Every walk before depth truncation keeps its own stack, so schemas of any
+   * nesting convert. Truncation and the steps after it (trims, client
+   * targets, type signatures) recurse once per level they keep, so only a
+   * maxSchemaDepth in the hundreds or more can overflow the call stack.
+   */
+  private buildToolGuarded(
+    pathStr: string,
+    pathItem: unknown,
+    entry: OperationEntry,
+    options: GenerateOptions,
+  ): McpOpenAPITool {
     try {
-      return this.buildTool(pathStr, method, options);
+      return this.buildTool(pathStr, pathItem as PathItemObject, entry, options);
     } catch (error: unknown) {
-      // Every walk before depth truncation keeps its own stack, so schemas of
-      // any nesting convert. Truncation and the steps after it (trims, client
-      // targets, type signatures) recurse once per level they keep, so only a
-      // maxSchemaDepth in the hundreds or more can overflow the call stack.
       if (error instanceof RangeError && /call stack/i.test(error.message)) {
         const { maxDepth } = resolveSchemaLimits(options);
         throw new SchemaError(
-          `Schemas of ${method.toUpperCase()} ${pathStr} are nested too deeply to process at maxSchemaDepth ` +
+          `Schemas of ${operationLabel(entry.method, pathStr)} are nested too deeply to process at maxSchemaDepth ` +
             `${maxDepth} (maximum call stack size exceeded); lower maxSchemaDepth.`,
-          { path: pathStr, method, maxSchemaDepth: maxDepth },
+          { path: pathStr, method: entry.method, maxSchemaDepth: maxDepth },
         );
       }
       throw error;
@@ -857,20 +1160,97 @@ export class OpenAPIToolGenerator {
   }
 
   /**
-   * Build the tool for one operation of the initialized document
+   * Records `diagnostic` and returns the `GenerationError` for an operation
+   * skipped on purpose (`generateTools` drops it without warning).
    */
-  private buildTool(pathStr: string, method: string, options: GenerateOptions): McpOpenAPITool {
-    const document = this.getDocument();
+  private skipOperation(diagnostic: SpecDiagnostic, context: Record<string, unknown>): GenerationError {
+    this.addDiagnostic(diagnostic);
+    const error = new GenerationError(diagnostic.message, { ...context, pointer: diagnostic.path });
+    skippedOperations.add(error);
+    return error;
+  }
 
-    if (!document.paths) {
-      throw new Error('No paths defined in OpenAPI document');
+  /**
+   * The first parameter of an operation (path-level ones first, as merged)
+   * whose location the generator does not map, as a diagnostic; `undefined`
+   * when every location is mapped. Reference Objects (left by
+   * `dereference: false`) are not checked, as the resolver has always
+   * passed them through. Feature-driven: a `querystring` parameter is caught
+   * whatever version the document declares.
+   */
+  private unsupportedParameterLocation(
+    pathStr: string,
+    entry: OperationEntry,
+    pathItem: unknown,
+  ): SpecDiagnostic | undefined {
+    const lists: Array<[unknown, string]> = [
+      [ownProperty(pathItem, 'parameters'), jsonPointer('paths', pathStr, 'parameters')],
+      [ownProperty(entry.operation, 'parameters'), appendPointer(operationPointer(pathStr, entry), 'parameters')],
+    ];
+    for (const [parameters, pointer] of lists) {
+      if (!Array.isArray(parameters)) continue;
+      for (let index = 0; index < parameters.length; index++) {
+        const parameter: unknown = parameters[index];
+        if (isReferenceObject(parameter)) continue;
+        const location = ownProperty(parameter, 'in');
+        if (typeof location === 'string' && MAPPED_PARAMETER_LOCATIONS.includes(location)) continue;
+        return {
+          severity: 'warning',
+          code: DIAGNOSTIC_CODES.UNSUPPORTED_PARAMETER_LOCATION,
+          message:
+            `${operationLabel(entry.method, pathStr)}: parameter ${describeValue(ownProperty(parameter, 'name'))} has ` +
+            `location (in) ${describeValue(location)}, which is not mapped to a request ` +
+            `(supported: ${MAPPED_PARAMETER_LOCATIONS.join(', ')}); the operation makes no tool`,
+          path: appendPointer(pointer, index),
+        };
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Build the tool for one operation (an entry of `walkPathItem` or
+   * `getOperation`) of the initialized document
+   */
+  private buildTool(
+    pathStr: string,
+    pathItem: PathItemObject,
+    entry: OperationEntry,
+    options: GenerateOptions,
+  ): McpOpenAPITool {
+    const document = this.getDocument();
+    // The canonical method from here on: lowercase for a fixed field, the
+    // additionalOperations key as written
+    const { method, operation } = entry;
+
+    const unsupported = this.unsupportedParameterLocation(pathStr, entry, pathItem);
+    if (unsupported !== undefined) {
+      throw this.skipOperation(unsupported, { path: pathStr, method });
     }
 
-    const pathItem = document.paths[pathStr];
-    const operation = pathItem?.[method.toLowerCase() as HTTPMethod];
-
-    if (!operation) {
-      throw new Error(`Operation not found: ${method.toUpperCase()} ${pathStr}`);
+    // Extract security requirements, once: both the mapper and the metadata
+    // read them (an operation's own `security` replaces the document's)
+    let securityRequirements: SecurityRequirement[] | undefined = undefined;
+    const securitySpec = operation.security ?? document.security;
+    if (securitySpec) {
+      const securityPointer =
+        operation.security !== undefined ? appendPointer(operationPointer(pathStr, entry), 'security') : '/security';
+      const extracted = this.extractSecurityRequirements(securitySpec, document, securityPointer);
+      if (extracted.unsatisfiable) {
+        throw this.skipOperation(
+          {
+            severity: 'warning',
+            code: DIAGNOSTIC_CODES.UNSATISFIABLE_SECURITY,
+            message:
+              `${operationLabel(method, pathStr)}: none of its Security Requirements can be satisfied (each names a ` +
+              `scheme components.securitySchemes does not define, or is not an object), so no way to authenticate ` +
+              `is known; the operation makes no tool`,
+            path: operationPointer(pathStr, entry),
+          },
+          { path: pathStr, method },
+        );
+      }
+      securityRequirements = extracted.requirements;
     }
 
     // Schema limits: conversion stops descending at the same depth the final
@@ -885,19 +1265,13 @@ export class OpenAPIToolGenerator {
       schemaConversion,
     });
 
-    // Filter out ReferenceObjects from parameters
+    // Filter out ReferenceObjects from parameters (an operation was found, so
+    // the path item is an object)
     let pathParameters: ParameterObject[] | undefined = undefined;
     if (pathItem.parameters) {
       pathParameters = pathItem.parameters.filter(
         (p): p is ParameterObject => !isReferenceObject(p),
       );
-    }
-
-    // Extract security requirements
-    let securityRequirements: SecurityRequirement[] | undefined = undefined;
-    const securitySpec = operation.security ?? document.security;
-    if (securitySpec) {
-      securityRequirements = this.extractSecurityRequirements(securitySpec as Record<string, string[]>[], document);
     }
 
     const { inputSchema, mapper } = parameterResolver.resolve(
@@ -917,13 +1291,7 @@ export class OpenAPIToolGenerator {
 
     // Generate tool name (an extension name override takes the operationId's
     // place, including as the value passed to a custom toolNameGenerator)
-    const name = this.generateToolName(
-      pathStr,
-      method as HTTPMethod,
-      overrides.name ?? operation.operationId,
-      options,
-      operation,
-    );
+    const name = this.generateToolName(pathStr, method, overrides.name ?? operation.operationId, options, operation);
 
     // Generate description (extension override > strategy)
     const description =
@@ -934,16 +1302,13 @@ export class OpenAPIToolGenerator {
     const title = overrides.title ?? operation.summary;
 
     // Annotations: HTTP-method inference (opt-out) + extension overrides on top.
-    // Lowercase first — the public generateTool(path, method) accepts any case.
-    const inferred =
-      options.inferAnnotations !== false
-        ? inferAnnotationsFromMethod(method.toLowerCase() as HTTPMethod)
-        : undefined;
+    // `method` is canonical, so a generateTool(path, 'GET') call infers like 'get'.
+    const inferred = options.inferAnnotations !== false ? inferAnnotationsFromMethod(method) : undefined;
     const annotations =
       inferred || overrides.annotations ? { ...inferred, ...overrides.annotations } : undefined;
 
     // Extract metadata
-    const metadata = this.extractMetadata(pathStr, method as HTTPMethod, operation, document, outputSchema);
+    const metadata = this.extractMetadata(pathStr, method, operation, document, outputSchema, securityRequirements);
 
     // Apply format resolution if configured
     const formatResolvers = {
@@ -1044,7 +1409,7 @@ export class OpenAPIToolGenerator {
       nodes: 0,
       exceeded: () => {
         throw new SchemaError(
-          `The metadata of ${method.toUpperCase()} ${pathStr} exceeds the node budget of ${maxSchemaNodes} ` +
+          `The metadata of ${operationLabel(method, pathStr)} exceeds the node budget of ${maxSchemaNodes} ` +
             `(maxSchemaNodes): with its $refs resolved, a value copied from the spec (tags, servers, externalDocs, ` +
             `x-frontmcp, request encodings, ...) expands into more nodes than allowed.`,
           { maxNodes: maxSchemaNodes },
@@ -1140,12 +1505,11 @@ export class OpenAPIToolGenerator {
       return false;
     }
 
-    // Method filters
-    const lowerMethod = method.toLowerCase() as HTTPMethod;
-    if (options.includeMethods && !options.includeMethods.includes(lowerMethod)) {
+    // Method filters: a standard method in any case, an additional one as written
+    if (options.includeMethods && !matchesMethodFilter(options.includeMethods, method)) {
       return false;
     }
-    if (options.excludeMethods?.includes(lowerMethod)) {
+    if (options.excludeMethods && matchesMethodFilter(options.excludeMethods, method)) {
       return false;
     }
 
@@ -1184,7 +1548,7 @@ export class OpenAPIToolGenerator {
     // the filter's semantics must not depend on output formatting options.
     if (options.readOnlyOnly) {
       const effective = {
-        ...inferAnnotationsFromMethod(lowerMethod),
+        ...inferAnnotationsFromMethod(method),
         ...extractExtensionSettings(operation).annotations,
       };
       if (effective.readOnlyHint !== true) {
@@ -1249,7 +1613,8 @@ export class OpenAPIToolGenerator {
     method: HTTPMethod,
     operation: OperationObject,
     document: OpenAPIDocument,
-    outputSchema?: unknown,
+    outputSchema: unknown,
+    securityRequirements: SecurityRequirement[] | undefined,
   ): ToolMetadata {
     const metadata: ToolMetadata = {
       path,
@@ -1261,12 +1626,9 @@ export class OpenAPIToolGenerator {
       deprecated: operation.deprecated,
     };
 
-    // Extract security requirements
-    if (operation.security || document.security) {
-      metadata.security = this.extractSecurityRequirements(
-        (operation.security ?? document.security) as Record<string, string[]>[],
-        document,
-      );
+    // Security requirements (extracted once by buildTool; copied with the metadata)
+    if (securityRequirements) {
+      metadata.security = securityRequirements;
     }
 
     // Extract servers
@@ -1310,48 +1672,108 @@ export class OpenAPIToolGenerator {
   }
 
   /**
-   * Extract security requirements
+   * Extract security requirements. `pointer` locates `security` (the
+   * operation's, or the document's `/security`) for diagnostics.
+   *
+   * `security` lists alternatives; each Security Requirement Object lists
+   * schemes that are all required together. An object naming a scheme
+   * `components.securitySchemes` does not define (a typo, or an OpenAPI 3.2
+   * scheme named by URI, which is not resolved yet) cannot be satisfied, so
+   * the whole object is dropped, with one `UNRESOLVED_SECURITY_SCHEME` per
+   * missing scheme; an object that is not an object is dropped with
+   * `INVALID_SECURITY_REQUIREMENT`. An empty object (`{}`, no authentication)
+   * is kept. The kept objects' schemes are returned, flattened as before.
+   *
+   * `unsatisfiable` is true when `security` is not empty and every object was
+   * dropped, and the document defines security schemes: earlier releases
+   * failed such a tool (with a `TypeError`). A document defining no schemes
+   * at all keeps the output it always had: its requirements are reported but
+   * the tool is generated, with no security.
    */
   private extractSecurityRequirements(
-    security: Record<string, string[]>[],
+    security: unknown,
     document: OpenAPIDocument,
-  ): SecurityRequirement[] {
-    if (!security || !document.components?.securitySchemes) {
-      return [];
+    pointer: string,
+  ): { requirements: SecurityRequirement[]; unsatisfiable: boolean } {
+    const schemes: unknown = document.components?.securitySchemes;
+    if (!Array.isArray(security)) {
+      // Not a list: without schemes there was never anything to read; with
+      // them the tool fails, as it always has (now with a typed error)
+      if (!schemes) return { requirements: [], unsatisfiable: false };
+      throw new GenerationError(
+        `${pointer} must be an array of Security Requirement Objects, found ${describeValue(security)}`,
+        { pointer },
+      );
     }
 
-    return security.flatMap((req) =>
-      Object.entries(req).map(([scheme, scopes]): SecurityRequirement => {
-        // A requirement naming a scheme the document lacks still fails below (not handled yet)
-        const securityScheme = document.components!.securitySchemes![scheme]!;
-
-        // Skip if it's a reference object
-        if (isReferenceObject(securityScheme)) {
-          return { scheme, type: 'http', scopes };
+    const requirements: SecurityRequirement[] = [];
+    let kept = 0;
+    security.forEach((requirement: unknown, index: number) => {
+      if (!isSpecObject(requirement)) {
+        this.addDiagnostic({
+          severity: 'warning',
+          code: DIAGNOSTIC_CODES.INVALID_SECURITY_REQUIREMENT,
+          message: `A Security Requirement must be an object, found ${describeValue(requirement)}; it is dropped`,
+          path: appendPointer(pointer, index),
+        });
+        return;
+      }
+      const resolved: SecurityRequirement[] = [];
+      let satisfiable = true;
+      for (const [scheme, scopes] of Object.entries(requirement)) {
+        // Own properties only: a scheme named `constructor` is not Object's
+        const found = ownProperty(schemes, scheme);
+        if (isSpecObject(found)) {
+          resolved.push(this.toSecurityRequirement(scheme, scopes as string[], found));
+          continue;
         }
+        satisfiable = false;
+        const byUri = /[:#/]/.test(scheme) ? ' (a scheme named by URI is not resolved yet)' : '';
+        this.addDiagnostic({
+          severity: 'warning',
+          code: DIAGNOSTIC_CODES.UNRESOLVED_SECURITY_SCHEME,
+          message:
+            `Security Requirement names scheme ${describeValue(scheme)}, which components.securitySchemes does not ` +
+            `define${byUri}; the requirement cannot be satisfied and is dropped with every scheme it combines`,
+          path: appendPointer(pointer, index, scheme),
+        });
+      }
+      if (!satisfiable) return;
+      kept++;
+      requirements.push(...resolved);
+    });
+    return { requirements, unsatisfiable: Boolean(schemes) && security.length > 0 && kept === 0 };
+  }
 
-        // Typed as a plain string so the equality checks below narrow it to the known locations
-        const apiKeyIn: string | undefined = 'in' in securityScheme ? securityScheme.in : undefined;
-        const result: SecurityRequirement = {
-          scheme,
-          type: securityScheme.type as AuthType,
-          scopes,
-          name: 'name' in securityScheme ? securityScheme.name : undefined,
-          in:
-            apiKeyIn && (apiKeyIn === 'query' || apiKeyIn === 'header' || apiKeyIn === 'cookie') ? apiKeyIn : undefined,
-        };
+  /** One resolved scheme of a Security Requirement, as tool metadata. */
+  private toSecurityRequirement(scheme: string, scopes: string[], found: Record<string, unknown>): SecurityRequirement {
+    const securityScheme = found as unknown as SecuritySchemeObject | ReferenceObject;
 
-        // Add HTTP-specific metadata
-        if (securityScheme.type === 'http') {
-          result.httpScheme = 'scheme' in securityScheme ? securityScheme.scheme : undefined;
-          result.bearerFormat = 'bearerFormat' in securityScheme ? securityScheme.bearerFormat : undefined;
-        }
+    // Skip if it's a reference object
+    if (isReferenceObject(securityScheme)) {
+      return { scheme, type: 'http', scopes };
+    }
 
-        // Add description if available
-        result.description = 'description' in securityScheme ? securityScheme.description : undefined;
+    // Typed as a plain string so the equality checks below narrow it to the known locations
+    const apiKeyIn: string | undefined = 'in' in securityScheme ? securityScheme.in : undefined;
+    const result: SecurityRequirement = {
+      scheme,
+      type: securityScheme.type as AuthType,
+      scopes,
+      name: 'name' in securityScheme ? securityScheme.name : undefined,
+      in:
+        apiKeyIn && (apiKeyIn === 'query' || apiKeyIn === 'header' || apiKeyIn === 'cookie') ? apiKeyIn : undefined,
+    };
 
-        return result;
-      }),
-    );
+    // Add HTTP-specific metadata
+    if (securityScheme.type === 'http') {
+      result.httpScheme = 'scheme' in securityScheme ? securityScheme.scheme : undefined;
+      result.bearerFormat = 'bearerFormat' in securityScheme ? securityScheme.bearerFormat : undefined;
+    }
+
+    // Add description if available
+    result.description = 'description' in securityScheme ? securityScheme.description : undefined;
+
+    return result;
   }
 }
