@@ -674,8 +674,10 @@ describe('story: one API in five spellings gives one tool contract', () => {
     expect(tools.map((tool) => tool['annotations'].readOnlyHint)).toEqual([true, false, true, false, false, false, true, true, false, true]);
   });
 
-  it('produces no conversion diagnostic for the two Swagger 2.0 forms: nothing in them is lossy', async () => {
+  it('records no diagnostic for any of the five forms: nothing in the two Swagger 2.0 ones is lossy', async () => {
     for (const form of EQUIVALENT_FORMS) {
+      // generate here, so the test does not depend on the generators another test left behind
+      await generate(form, OPTION_SETS[0]);
       const generator = generators.get(form.label)!;
       expect({ form: form.label, diagnostics: generator.getDiagnostics() }).toEqual({ form: form.label, diagnostics: [] });
     }
@@ -2266,7 +2268,7 @@ describe('story: the bounds of a conversion', () => {
       expect(last).not.toHaveProperty('document');
     });
 
-    it.each([0, -3, Number.NaN, 'many', null, undefined, {}])('reads a maxEntries of %j as the default, which is far above this document', (maxEntries) => {
+    it.each([0, -3, Number.NaN, 'many', null, undefined, {}])('reads a maxEntries of %p as the default, which is far above this document', (maxEntries) => {
       const [, document] = CASES[0];
       const result = upgradeSwagger2(document, { maxEntries: maxEntries as number });
       expect(result.tooLarge).toBeUndefined();

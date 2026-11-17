@@ -66,6 +66,20 @@ describe('example: swagger-2.0', () => {
     expect(wire.headers['x-api-key']).toBe('k-123');
   });
 
+  it('sends an API key defined in: query as a query pair, and no header', async () => {
+    // The same document, with its key in the query: the credential has to reach the URL the request is built with
+    const { tools } = await loadTools({
+      ...petStore,
+      securityDefinitions: { apiKey: { type: 'apiKey', name: 'api_key', in: 'query' } },
+    });
+
+    await callTool(tools.get('listPets')!, { tags: ['a', 'b'] }, { apiBaseUrl, auth: { apiKeys: { api_key: 'k-456' } } });
+
+    const wire = loopback.requests.at(-1)!;
+    expect(wire.url).toBe('/v2/pets?tags=a%2Cb&api_key=k-456');
+    expect(wire.headers['x-api-key']).toBeUndefined();
+  });
+
   it('sends an in: body parameter as a JSON body whose properties are the tool inputs', async () => {
     const { tools } = await loadTools(petStore);
     const add = tools.get('addPet')!;

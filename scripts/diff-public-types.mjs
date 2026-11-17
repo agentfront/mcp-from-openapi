@@ -630,8 +630,11 @@ function createWalker(ts, checker, probe, dir, exportNames) {
   const flip = (d) => (d === BC ? CB : BC);
   const candidateDir = `${dir}/node_modules/candidate/`;
   const owners = new Map(); // pair and directions -> { name, items, edges, steps }
+  // The whole rendering of a type: whatever is matched or named by it (an index signature's key type) uses this one.
+  const render = (t) => readable(checker.typeToString(t, probe, ts.TypeFormatFlags.NoTruncation), dir);
+  // The same, cut for a message: never an identity, since two long types can share their first 120 characters.
   const text = (t) => {
-    const s = readable(checker.typeToString(t, probe, ts.TypeFormatFlags.NoTruncation), dir);
+    const s = render(t);
     return s.length > 120 ? `${s.slice(0, 119)}…` : s;
   };
   const both = (b, c) => `baseline: ${text(b)}; candidate: ${text(c)}`;
@@ -893,9 +896,9 @@ function createWalker(ts, checker, probe, dir, exportNames) {
       explained.add(BC);
     }
     // Index signatures, matched by key type: string, number, symbol or a template literal pattern.
-    const indexes = (t) => new Map(checker.getIndexInfosOfType(t).map((info) => [text(info.keyType), info]));
+    const indexes = (t) => new Map(checker.getIndexInfosOfType(t).map((info) => [render(info.keyType), info]));
     const indexSegment = (info) =>
-      info.keyType.flags & ts.TypeFlags.String ? `${rel}.*` : `${rel}[${text(info.keyType)}]`;
+      info.keyType.flags & ts.TypeFlags.String ? `${rel}.*` : `${rel}[${render(info.keyType)}]`;
     const [bIndexes, cIndexes] = [indexes(b), indexes(c)];
     for (const [key, bi] of bIndexes) {
       const ci = cIndexes.get(key);

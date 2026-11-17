@@ -82,6 +82,19 @@ describe('story: a schema that accepts no value is `never` in the emitted TypeSc
           },
         },
       },
+      // An object with properties that `not: {}` makes accept nothing: its root type is `never`, so it is declared
+      // `type X = never;` (an `interface` needs a `{ ... }` body)
+      '/out': {
+        get: {
+          operationId: 'emptyOutput',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } }, not: {} } } },
+            },
+          },
+        },
+      },
       '/whole': {
         post: {
           operationId: 'whole',
@@ -108,6 +121,11 @@ describe('story: a schema that accepts no value is `never` in the emitted TypeSc
     );
     // a whole body that accepts nothing
     expect(signature('whole')).toBe('(input: { body: never }) => Promise<null>');
+    // an output object that accepts nothing, whatever properties it lists
+    expect(signature('emptyOutput')).toBe('() => Promise<never>');
+    expect(tools.find((tool) => tool.name === 'emptyOutput')!.metadata.typescript!.declaration).toContain(
+      'type EmptyOutputOutput = never;',
+    );
   });
 
   it('compiles, with zero diagnostics', () => {
@@ -126,7 +144,7 @@ describe('story: a schema that accepts no value is `never` in the emitted TypeSc
       ['warning', '/paths/~1whole/post', 'body'],
     ]);
     // the tools are still made
-    expect(tools.map(({ name }) => name)).toEqual(['never', 'whole']);
+    expect(tools.map(({ name }) => name)).toEqual(['never', 'emptyOutput', 'whole']);
   });
 });
 

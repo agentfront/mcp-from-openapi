@@ -106,8 +106,8 @@ export async function diagnosticsOf(spec: OAS20.SwaggerObject): Promise<string[]
 /**
  * Mapper → request → fetch. `apiBaseUrl` replaces the server the document names
  * (`https://petstore.example.com/v2`, `basePath` included); leave it out to
- * call that server. The API key of `securityDefinitions` is resolved by the
- * name of the header it travels in.
+ * call that server. The API key of `securityDefinitions` is resolved by its
+ * `name` (the header or query parameter it travels in).
  */
 export async function callTool(
   tool: McpOpenAPITool,
@@ -115,11 +115,17 @@ export async function callTool(
   options: { apiBaseUrl?: string; auth?: Partial<SecurityContext> } = {},
 ) {
   const security = await new SecurityResolver().resolve(tool.mapper, createSecurityContext(options.auth ?? {}));
-  const built = buildHttpRequest(tool, input, { baseUrl: options.apiBaseUrl });
+  // Each resolved credential goes to buildHttpRequest as input, under its security mapper entry's inputKey: it places
+  // the value (a header, or a query pair for `in: query`). Never append a credential to the URL yourself.
+  const where: Record<string, Record<string, string> | undefined> = { header: security.headers, query: security.query };
+  const credentials = Object.fromEntries(
+    tool.mapper.filter((m) => m.security).map((m) => [m.inputKey, where[m.type]?.[m.key]]),
+  );
+  const built = buildHttpRequest(tool, { ...input, ...credentials }, { baseUrl: options.apiBaseUrl });
   const response = await fetch(built.url, {
     method: built.method,
     // A multipart body has no content-type here: fetch adds it, with the boundary
-    headers: { ...built.headers, ...security.headers },
+    headers: built.headers,
     body: built.body as never,
   });
   return { status: response.status, body: await response.text() };
