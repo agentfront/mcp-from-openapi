@@ -1,5 +1,6 @@
 import type { ParameterObject } from './types';
 import { isReferenceObject } from './types';
+import { analyzeParameters } from './parameter-resolver';
 import {
   detectSpecVersion,
   isSpecObject,
@@ -249,8 +250,14 @@ export function lintDocument(document: object): LintResult {
         });
       }
 
-      // parameter descriptions (path-level + operation-level, like generation)
-      const parameters = [...pathLevelParameters, ...readParameters(ownProperty(operation, 'parameters'))];
+      // parameter descriptions: the parameters that apply, merged exactly as
+      // generation merges them (an operation parameter overrides the
+      // path-level one with the same name and location)
+      const parameters = readParameters(
+        analyzeParameters(pathLevelParameters, readParameters(ownProperty(operation, 'parameters'))).effective.map(
+          (slot) => slot.parameter,
+        ),
+      );
       const undescribed = parameters.filter((param) => !param.description).map((param) => param.name);
       if (undescribed.length > 0) {
         findings.push({

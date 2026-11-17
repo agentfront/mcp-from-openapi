@@ -399,6 +399,35 @@ describe('review-fix regressions', () => {
     expect(codes).not.toContain('unpaginated-list'); // path-level 'limit' counts
     expect(codes).toContain('missing-parameter-description'); // and gets checked
   });
+
+  it('checks the parameters that apply: an operation parameter overrides the path-level one', () => {
+    const doc: any = {
+      openapi: '3.1.0',
+      info: { title: 'T', version: '1' },
+      paths: {
+        '/items': {
+          parameters: [
+            { name: 'limit', in: 'query', schema: { type: 'integer' } }, // overridden: not checked
+            { name: 'X-Tenant', in: 'header', schema: { type: 'string' } }, // overridden in another case
+            { name: 'sort', in: 'query', schema: { type: 'string' } }, // applies
+          ],
+          get: {
+            operationId: 'listItems',
+            summary: 'A perfectly reasonable summary.',
+            parameters: [
+              { name: 'limit', in: 'query', description: 'Page size.', schema: { type: 'integer' } },
+              { name: 'x-tenant', in: 'header', description: 'Tenant.', schema: { type: 'string' } },
+              { name: 'q', in: 'query', schema: { type: 'string' } },
+              { name: 'q', in: 'query', description: 'Search terms.', schema: { type: 'string' } },
+            ],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    };
+    const findings = lintDocument(doc).findings.filter((f) => f.code === 'missing-parameter-description');
+    expect(findings.map((f) => f.message)).toEqual(['Parameter(s) without description: sort.']);
+  });
 });
 
 describe('shared dereferenced nodes', () => {

@@ -51,7 +51,17 @@ import {
 } from './spec';
 import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import { isReferenceObject } from './types';
-import { ParameterResolver } from './parameter-resolver';
+import {
+  ParameterResolver,
+  analyzeParameters,
+  describeContentWithoutSchema,
+  isJsonMediaType,
+  readParameterContent,
+  selectRequestMediaType,
+  type ParameterAnalysis,
+  type ParameterSlot,
+  type QuerystringProblem,
+} from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
 import { SchemaBuilder, resolveSchemaLimits } from './schema-builder';
 import {
@@ -66,9 +76,11 @@ import { applyOverlay } from './overlay';
 import { lintDocument, PAGINATION_PARAM, type LintResult } from './lint';
 import {
   Validator,
+  duplicateParameterDiagnostic,
   messageText,
   operationLabel,
   operationPointer,
+  parameterContentDiagnostics,
   skippedOperationDiagnostics,
   versionError,
 } from './validator';
@@ -77,6 +89,7 @@ import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolve
 import { emitToolTypeScript } from './type-signature';
 import { hostListIncludes, isBlockedHostname, normalizeSsrfOptions, safeFetch } from './ssrf';
 import { copyJsonValue, type CopyBudget } from './json-copy';
+import { classifyMediaType } from './media-type';
 
 /** MCP hard limit for tool name length (spec revision 2025-11-25, SEP-986) */
 const MCP_MAX_TOOL_NAME_LENGTH = 128;
@@ -92,13 +105,13 @@ const DEFAULT_MAX_TOOL_NAME_LENGTH = 64;
 const MAX_NAME_DEDUP_ATTEMPTS = 256;
 
 /**
- * Parameter locations the generator maps to a request. A parameter in any
- * other location (`querystring` until it is implemented, a Swagger-style
- * `body`, a missing `in`) would reach the mapper as an entry no request
- * builder understands, so its operation is skipped with a
+ * Parameter locations the generator maps to a request (`querystring`, from
+ * OpenAPI 3.2, as a whole-query `query` entry). A parameter in any other
+ * location (a Swagger-style `body`, a missing `in`) would reach the mapper as
+ * an entry no request builder understands, so its operation is skipped with a
  * `UNSUPPORTED_PARAMETER_LOCATION` diagnostic instead.
  */
-const MAPPED_PARAMETER_LOCATIONS: readonly string[] = Object.freeze(['path', 'query', 'header', 'cookie']);
+const MAPPED_PARAMETER_LOCATIONS: readonly string[] = Object.freeze(['path', 'query', 'querystring', 'header', 'cookie']);
 
 /**
  * Whether `method` (an operation's method as `listOperations` gives it)
@@ -212,23 +225,48 @@ function hasUnboundedArray(node: unknown, seen = new Set<unknown>()): boolean {
   return children.some((child) => hasUnboundedArray(child, seen));
 }
 
-/** Compute response-shaping hints; undefined when there is nothing to say. */
+/**
+ * Compute response-shaping hints; undefined when there is nothing to say.
+ * `streaming`: the operation has a streamed response (`responseStream`).
+ */
 function detectResponseHints(
   outputSchema: JsonSchema | undefined,
   mapper: McpOpenAPITool['mapper'],
+  streaming: boolean,
 ): ToolMetadata['responseHints'] {
+  // A whole-query parameter's key is not sent, so it never names a pagination control
   const paginationParams = [
-    ...new Set(mapper.filter((m) => m.type === 'query' && !m.security && PAGINATION_PARAM.test(m.key)).map((m) => m.key)),
+    ...new Set(
+      mapper
+        .filter((m) => m.type === 'query' && !m.security && !m.wholeQuery && PAGINATION_PARAM.test(m.key))
+        .map((m) => m.key),
+    ),
   ];
   const unboundedArray = outputSchema !== undefined && hasUnboundedArray(outputSchema);
 
-  if (!unboundedArray && paginationParams.length === 0) return undefined;
+  if (!unboundedArray && paginationParams.length === 0 && !streaming) return undefined;
 
   return {
     ...(unboundedArray && { unboundedArray: true }),
     ...(paginationParams.length > 0 && { paginationParams }),
     ...(unboundedArray && paginationParams.length === 0 && { largeResponseRisk: true }),
+    ...(streaming && { streaming: true }),
   };
+}
+
+/**
+ * Whether a schema allows only JSON numbers, booleans and `null`: its
+ * `type` is one of `number`, `integer`, `boolean`, `null`, or a list of
+ * them. Without a `type` (or for a boolean schema) anything is allowed.
+ */
+function onlyScalarJson(schema: unknown): boolean {
+  const type = ownProperty(schema, 'type');
+  const types: unknown[] | undefined = typeof type === 'string' ? [type] : Array.isArray(type) ? type : undefined;
+  return (
+    types !== undefined &&
+    types.length > 0 &&
+    types.every((t) => t === 'number' || t === 'integer' || t === 'boolean' || t === 'null')
+  );
 }
 
 /** Assemble the tool description per the configured strategy. */
@@ -533,8 +571,24 @@ export class OpenAPIToolGenerator {
    *      of an operation is dropped, `UNSATISFIABLE_SECURITY` and the
    *      operation makes no tool;
    *    - `UNSUPPORTED_PARAMETER_LOCATION`: an operation has a parameter in a
-   *      location the generator does not map (such as `querystring`); the
-   *      operation makes no tool.
+   *      location the generator does not map (a Swagger-style `body`, a
+   *      missing `in`); the operation makes no tool;
+   *    - `MULTIPLE_QUERYSTRING_PARAMETERS`, `QUERYSTRING_WITH_QUERY_PARAMETERS`,
+   *      `QUERYSTRING_PARAMETER_WITHOUT_CONTENT`: an operation's parameters
+   *      break an OpenAPI 3.2 querystring rule the validator rejects (seen
+   *      with `validate: false`); the operation makes no tool;
+   *    - `DUPLICATE_PARAMETER`: a parameter list repeats a `name` and `in`; the
+   *      last one is used. `INVALID_PARAMETER_CONTENT`: a parameter's
+   *      `content` cannot be read as defined (not exactly one media type,
+   *      next to `schema`, a media type that is not an object or is an
+   *      unresolved reference, `itemSchema`). Both are also validator
+   *      warnings (but for the unresolved reference);
+   *    - `COOKIE_CONTENT_NOT_SENDABLE`, `QUERYSTRING_WITH_QUERY_CREDENTIAL`:
+   *      the tool is made, but some calls cannot be built (a JSON cookie
+   *      value other than a number, boolean or null; a credential in the
+   *      query next to a whole query string that is not form-encoded);
+   *    - `UNSUPPORTED_STREAMING_REQUEST_BODY`: a request body declares only
+   *      `itemSchema` (a streamed upload); the tool takes no body input.
    *
    * At most `MAX_DIAGNOSTICS` entries are kept; past that, one final
    * `DIAGNOSTICS_TRUNCATED` entry. Every severity is `warning`.
@@ -1108,8 +1162,11 @@ export class OpenAPIToolGenerator {
    * Records the diagnostics of the path item and operation it builds (see
    * `getDiagnostics()`). Throws a `GenerationError` for an operation
    * `generateTools` skips with a diagnostic: a parameter in a location the
-   * generator does not map (`UNSUPPORTED_PARAMETER_LOCATION`), or no
-   * Security Requirement that can be satisfied (`UNSATISFIABLE_SECURITY`).
+   * generator does not map (`UNSUPPORTED_PARAMETER_LOCATION`), parameters
+   * breaking a querystring rule (`MULTIPLE_QUERYSTRING_PARAMETERS`,
+   * `QUERYSTRING_WITH_QUERY_PARAMETERS`,
+   * `QUERYSTRING_PARAMETER_WITHOUT_CONTENT`), or no Security Requirement that
+   * can be satisfied (`UNSATISFIABLE_SECURITY`).
    */
   async generateTool(pathStr: string, method: string, options: GenerateOptions = {}): Promise<McpOpenAPITool> {
     await this.initialize();
@@ -1175,7 +1232,7 @@ export class OpenAPIToolGenerator {
    * whose location the generator does not map, as a diagnostic; `undefined`
    * when every location is mapped. Reference Objects (left by
    * `dereference: false`) are not checked, as the resolver has always
-   * passed them through. Feature-driven: a `querystring` parameter is caught
+   * passed them through. Feature-driven: a `querystring` parameter is mapped
    * whatever version the document declares.
    */
   private unsupportedParameterLocation(
@@ -1209,6 +1266,203 @@ export class OpenAPIToolGenerator {
   }
 
   /**
+   * Checks an operation's parameters, merged with its path item's as the
+   * resolver merges them (`analyzeParameters`), before its tool is built.
+   * Returns the diagnostic of a reason to skip the operation, `undefined`
+   * when it can be built:
+   *
+   * - `UNSUPPORTED_PARAMETER_LOCATION` (see `unsupportedParameterLocation`);
+   * - the OpenAPI 3.2 querystring rules the validator enforces, for
+   *   `validate: false` (a mapper breaking one could not be serialized): more
+   *   than one `in: querystring` parameter (`MULTIPLE_QUERYSTRING_PARAMETERS`),
+   *   one together with `in: query` parameters, path-level ones included
+   *   (`QUERYSTRING_WITH_QUERY_PARAMETERS`), or one without `content` holding
+   *   a media type (`QUERYSTRING_PARAMETER_WITHOUT_CONTENT`).
+   *
+   * Records as warnings each parameter dropped for repeating a `name` and
+   * `in` in its own list (`DUPLICATE_PARAMETER`) and, for each parameter
+   * that applies, the problems of its `content` (`INVALID_PARAMETER_CONTENT`:
+   * the validator's findings, and a media type left as an unresolved
+   * Reference Object) and a JSON cookie value no cookie can carry
+   * (`COOKIE_CONTENT_NOT_SENDABLE`).
+   *
+   * Returns the merge as well, with a pointer for each parameter, for the
+   * checks that need the operation's security (`wholeQueryCredentialDiagnostics`).
+   */
+  private checkParameters(
+    pathStr: string,
+    entry: OperationEntry,
+    pathItem: unknown,
+  ):
+    | { skip: SpecDiagnostic }
+    | { skip?: undefined; analysis: ParameterAnalysis; pointerOf: (slot: ParameterSlot) => string } {
+    const unsupported = this.unsupportedParameterLocation(pathStr, entry, pathItem);
+    if (unsupported !== undefined) return { skip: unsupported };
+
+    const pathLevel = ownProperty(pathItem, 'parameters');
+    const operationLevel = ownProperty(entry.operation, 'parameters');
+    const listPointer = (level: ParameterSlot['level']): string =>
+      level === 'path'
+        ? jsonPointer('paths', pathStr, 'parameters')
+        : appendPointer(operationPointer(pathStr, entry), 'parameters');
+    const pointerOf = (slot: ParameterSlot): string => appendPointer(listPointer(slot.level), slot.index);
+    const analysis = analyzeParameters(
+      Array.isArray(pathLevel) ? pathLevel : [],
+      Array.isArray(operationLevel) ? operationLevel : [],
+    );
+    for (const { dropped, kept } of analysis.duplicates) {
+      this.addDiagnostic(duplicateParameterDiagnostic(dropped, kept, listPointer(dropped.level)));
+    }
+    if (analysis.querystring) {
+      return { skip: this.querystringDiagnostic(pathStr, entry, analysis.querystring, pointerOf(analysis.querystring.slot)) };
+    }
+    for (const slot of analysis.effective) {
+      const pointer = pointerOf(slot);
+      for (const problem of parameterContentDiagnostics(slot.parameter, pointer)) this.addDiagnostic(problem);
+      const generationOnly = this.parameterUseDiagnostic(slot.parameter, pointer);
+      if (generationOnly !== undefined) this.addDiagnostic(generationOnly);
+    }
+    return { analysis, pointerOf };
+  }
+
+  /**
+   * Problems of a parameter read from `content` that only generation sees
+   * (the validator reads the document before it is dereferenced):
+   *
+   * - `INVALID_PARAMETER_CONTENT`: the media type is a Reference Object
+   *   left unresolved (`dereference: false`, or a `$ref` the dereferencer
+   *   could not follow), so its schema is not read;
+   * - `COOKIE_CONTENT_NOT_SENDABLE`: a cookie parameter sent as JSON whose
+   *   schema allows a string, an object or an array. Their JSON text holds a
+   *   `"` (and an object or array a `,`), which a cookie value cannot carry
+   *   (RFC 6265), so `buildHttpRequest` refuses such a value: only numbers,
+   *   booleans and `null` can be sent. The tool is still made.
+   */
+  private parameterUseDiagnostic(parameter: unknown, pointer: string): SpecDiagnostic | undefined {
+    if (!isSpecObject(parameter) || isReferenceObject(parameter)) return undefined;
+    // Read from `content` only without `schema`, or in the query string
+    const schema = parameter['schema'];
+    if (parameter['in'] !== 'querystring' && schema !== undefined && schema !== null) return undefined;
+    const content = readParameterContent(parameter);
+    if (content.kind !== 'media') return undefined;
+    const label = `Parameter ${describeValue(parameter['name'])} (in: ${describeValue(parameter['in'])})`;
+    const mediaType = describeValue(content.mediaType);
+    if (content.media !== undefined && isReferenceObject(content.media)) {
+      return {
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.INVALID_PARAMETER_CONTENT,
+        message:
+          `${label}: the media type ${mediaType} is a reference that is not resolved, so its schema is not read; ` +
+          describeContentWithoutSchema(content.mediaType),
+        path: pointer,
+      };
+    }
+    if (parameter['in'] !== 'cookie' || !isJsonMediaType(content.mediaType)) return undefined;
+    if (onlyScalarJson(ownProperty(content.media, 'schema'))) return undefined;
+    return {
+      severity: 'warning',
+      code: DIAGNOSTIC_CODES.COOKIE_CONTENT_NOT_SENDABLE,
+      message:
+        `${label} is sent as ${mediaType}, but its schema allows a string, an object or an array, whose JSON text ` +
+        `holds characters a cookie value cannot carry ('"', ','); a call with such a value fails, only a number, ` +
+        `boolean or null can be sent`,
+      path: pointer,
+    };
+  }
+
+  /**
+   * `QUERYSTRING_WITH_QUERY_CREDENTIAL`, one per scheme: the operation's
+   * whole-query parameter is serialized in a media type other than
+   * `application/x-www-form-urlencoded`, so the query string has no
+   * name=value pairs, yet a security scheme can send an API key in the query
+   * string. `buildHttpRequest` refuses to combine them, so a call
+   * authenticating with that scheme fails. The tool is still made.
+   */
+  private wholeQueryCredentialDiagnostics(
+    pathStr: string,
+    entry: OperationEntry,
+    analysis: ParameterAnalysis,
+    pointerOf: (slot: ParameterSlot) => string,
+    securityRequirements: SecurityRequirement[] | undefined,
+  ): SpecDiagnostic[] {
+    const querystring = analysis.effective.find((slot) => ownProperty(slot.parameter, 'in') === 'querystring');
+    if (querystring === undefined) return [];
+    // A checked querystring parameter has a media type
+    const { mediaType } = readParameterContent(querystring.parameter) as { mediaType: string };
+    if (classifyMediaType(mediaType) === 'form') return [];
+    const schemes = new Set(
+      (securityRequirements ?? []).filter((r) => r.type === 'apiKey' && r.in === 'query').map((r) => r.scheme),
+    );
+    return [...schemes].map((scheme) => ({
+      severity: 'warning' as const,
+      code: DIAGNOSTIC_CODES.QUERYSTRING_WITH_QUERY_CREDENTIAL,
+      message:
+        `${operationLabel(entry.method, pathStr)}: parameter ${describeValue(ownProperty(querystring.parameter, 'name'))} ` +
+        `holds the whole query string as ${describeValue(mediaType)}, which has no name=value pairs, but security ` +
+        `scheme ${describeValue(scheme)} sends its API key in the query string; a call using that scheme cannot be ` +
+        `built (send the key in a header or a cookie, or use application/x-www-form-urlencoded)`,
+      path: pointerOf(querystring),
+    }));
+  }
+
+  /** The diagnostic skipping an operation whose parameters break a querystring rule; `pointer` locates `problem.slot`. */
+  private querystringDiagnostic(
+    pathStr: string,
+    entry: OperationEntry,
+    problem: QuerystringProblem,
+    pointer: string,
+  ): SpecDiagnostic {
+    const label = operationLabel(entry.method, pathStr);
+    const name = describeValue(ownProperty(problem.slot.parameter, 'name'));
+    let message: string;
+    if (problem.code === 'MULTIPLE_QUERYSTRING_PARAMETERS') {
+      message =
+        `${label}: ${problem.querystrings} parameters are in: querystring (path-level ones included), but at most ` +
+        `one is allowed, as each holds the whole query string; the operation makes no tool`;
+    } else if (problem.code === 'QUERYSTRING_WITH_QUERY_PARAMETERS') {
+      message =
+        `${label}: parameter ${name} is in: querystring, which holds the whole query string, but the operation also ` +
+        `has parameters in: query (path-level ones included); the operation makes no tool`;
+    } else {
+      const content = readParameterContent(problem.slot.parameter);
+      const found =
+        content.kind === 'absent'
+          ? 'no content'
+          : content.kind === 'empty'
+            ? 'a content with no media type'
+            : `a content that is not a map of media types (${describeValue((content as { value: unknown }).value)})`;
+      message =
+        `${label}: parameter ${name} is in: querystring but has ${found}; it must define content with one media ` +
+        `type, which serializes the whole query string; the operation makes no tool`;
+    }
+    return { severity: 'warning', code: DIAGNOSTIC_CODES[problem.code], message, path: pointer };
+  }
+
+  /**
+   * `UNSUPPORTED_STREAMING_REQUEST_BODY` when the media type a request body
+   * is read in declares `itemSchema` (OpenAPI 3.2, a streamed upload) and no
+   * `schema`: the body is left out of the tool's input.
+   */
+  private streamingRequestBodyDiagnostic(pathStr: string, entry: OperationEntry): SpecDiagnostic | undefined {
+    const content = ownProperty(ownProperty(entry.operation, 'requestBody'), 'content');
+    if (!isSpecObject(content)) return undefined;
+    const mediaType = selectRequestMediaType(content);
+    // The resolver reads the body when its media type has a schema
+    const media = mediaType === undefined ? undefined : ownProperty(content, mediaType);
+    if (!isSpecObject(media) || media['schema']) return undefined;
+    const itemSchema = ownProperty(media, 'itemSchema');
+    if (itemSchema === undefined || itemSchema === null) return undefined;
+    return {
+      severity: 'warning',
+      code: DIAGNOSTIC_CODES.UNSUPPORTED_STREAMING_REQUEST_BODY,
+      message:
+        `${operationLabel(entry.method, pathStr)}: the request body's media type ${describeValue(mediaType)} ` +
+        `declares only itemSchema (a streamed body), which is not supported; the tool takes no body input`,
+      path: appendPointer(operationPointer(pathStr, entry), 'requestBody', 'content', mediaType!, 'itemSchema'),
+    };
+  }
+
+  /**
    * Build the tool for one operation (an entry of `walkPathItem` or
    * `getOperation`) of the initialized document
    */
@@ -1223,10 +1477,12 @@ export class OpenAPIToolGenerator {
     // additionalOperations key as written
     const { method, operation } = entry;
 
-    const unsupported = this.unsupportedParameterLocation(pathStr, entry, pathItem);
-    if (unsupported !== undefined) {
-      throw this.skipOperation(unsupported, { path: pathStr, method });
+    const parameterCheck = this.checkParameters(pathStr, entry, pathItem);
+    if (parameterCheck.skip !== undefined) {
+      throw this.skipOperation(parameterCheck.skip, { path: pathStr, method });
     }
+    const streamingBody = this.streamingRequestBodyDiagnostic(pathStr, entry);
+    if (streamingBody !== undefined) this.addDiagnostic(streamingBody);
 
     // Extract security requirements, once: both the mapper and the metadata
     // read them (an operation's own `security` replaces the document's)
@@ -1251,6 +1507,15 @@ export class OpenAPIToolGenerator {
         );
       }
       securityRequirements = extracted.requirements;
+    }
+    for (const diagnostic of this.wholeQueryCredentialDiagnostics(
+      pathStr,
+      entry,
+      parameterCheck.analysis,
+      parameterCheck.pointerOf,
+      securityRequirements,
+    )) {
+      this.addDiagnostic(diagnostic);
     }
 
     // Schema limits: conversion stops descending at the same depth the final
@@ -1281,9 +1546,11 @@ export class OpenAPIToolGenerator {
       options.includeSecurityInInput,
     );
 
-    // Build response schema
+    // Build response schema, and the streamed response's item schema (OpenAPI
+    // 3.2 `itemSchema`), which is reported in metadata, never as outputSchema
     const responseBuilder = new ResponseBuilder(options, schemaConversion);
     const outputSchema = responseBuilder.build(operation.responses);
+    const responseStream = responseBuilder.buildStream(operation.responses);
 
     // Extension overrides (x-speakeasy-mcp < x-mcp < x-frontmcp); their meta
     // shares the node budget, as $refs in it are dereferenced too
@@ -1318,6 +1585,9 @@ export class OpenAPIToolGenerator {
     const hasFormatResolvers = Object.keys(formatResolvers).length > 0;
     let resolvedInputSchema = hasFormatResolvers ? resolveSchemaFormats(inputSchema, formatResolvers) : inputSchema;
     let resolvedOutputSchema = hasFormatResolvers && outputSchema ? resolveSchemaFormats(outputSchema, formatResolvers) : outputSchema;
+    // The stream's item schema goes through every step an output schema does
+    let itemSchema = responseStream?.itemSchema;
+    if (hasFormatResolvers && itemSchema) itemSchema = resolveSchemaFormats(itemSchema, formatResolvers);
 
     // Bound schema nesting depth (applied last so the final schemas are
     // bounded). Floor of 1: depth 0 would strip the ROOT inputSchema's
@@ -1328,6 +1598,7 @@ export class OpenAPIToolGenerator {
     if (resolvedOutputSchema) {
       resolvedOutputSchema = SchemaBuilder.truncateDepth(resolvedOutputSchema, maxSchemaDepth, truncateOptions);
     }
+    if (itemSchema) itemSchema = SchemaBuilder.truncateDepth(itemSchema, maxSchemaDepth, truncateOptions);
 
     // Trimming controls (after depth truncation, before client targets so the
     // dialect transforms see the final trimmed shape). Description caps run
@@ -1362,6 +1633,7 @@ export class OpenAPIToolGenerator {
       if (resolvedOutputSchema) {
         resolvedOutputSchema = applyTrim(resolvedOutputSchema, false);
       }
+      if (itemSchema) itemSchema = applyTrim(itemSchema, false);
     }
 
     // Client dialect transforms (final step — the emitted schemas must be
@@ -1373,10 +1645,11 @@ export class OpenAPIToolGenerator {
       if (resolvedOutputSchema) {
         resolvedOutputSchema = applyClientTarget(resolvedOutputSchema, options.target, targetOptions);
       }
+      if (itemSchema) itemSchema = applyClientTarget(itemSchema, options.target, targetOptions);
     }
 
     // Response-shaping hints (computed on the FINAL output schema)
-    const responseHints = detectResponseHints(resolvedOutputSchema, mapper);
+    const responseHints = detectResponseHints(resolvedOutputSchema, mapper, responseStream !== undefined);
     if (responseHints) {
       metadata.responseHints = responseHints;
     }
@@ -1469,6 +1742,16 @@ export class OpenAPIToolGenerator {
     const icons =
       overrides.icons ?? (options.inheritDocumentIcons ? iconsFromInfoLogo(document.info) : undefined);
 
+    const toolMetadata = copyValue(metadata, 'The tool metadata');
+    if (responseStream) {
+      // The item schema is a fresh tree already (depth truncation copies), like the output schema
+      toolMetadata.responseStream = {
+        statusCode: responseStream.statusCode,
+        contentType: responseStream.contentType,
+        itemSchema: itemSchema!,
+      };
+    }
+
     return {
       name,
       ...(title !== undefined && { title: copyValue(title, 'The tool title') }),
@@ -1479,7 +1762,7 @@ export class OpenAPIToolGenerator {
       inputSchema: resolvedInputSchema,
       outputSchema: resolvedOutputSchema,
       mapper: mapper.map(copyEntry),
-      metadata: copyValue(metadata, 'The tool metadata'),
+      metadata: toolMetadata,
     };
   }
 
@@ -1634,12 +1917,17 @@ export class OpenAPIToolGenerator {
     // Extract servers
     const servers = operation.servers ?? document.servers;
     if (servers) {
-      metadata.servers = servers.map((server: ServerObject) => ({
-        url: this.options.baseUrl || server.url,
-        description: server.description,
-        // A parsed document's maps hold no `undefined` values
-        variables: server.variables as ServerInfo['variables'],
-      }));
+      metadata.servers = servers.map((server: ServerObject) => {
+        // OpenAPI 3.2 `name`, when the document gives a string
+        const name = ownProperty(server, 'name');
+        return {
+          url: this.options.baseUrl || server.url,
+          ...(typeof name === 'string' && { name }),
+          description: server.description,
+          // A parsed document's maps hold no `undefined` values
+          variables: server.variables as ServerInfo['variables'],
+        };
+      });
     } else if (this.options.baseUrl) {
       metadata.servers = [{ url: this.options.baseUrl }];
     }

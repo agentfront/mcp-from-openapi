@@ -850,6 +850,7 @@ describe('Integration: OpenAPI 3.2 documents (issue #55)', () => {
       ['getPet', 'get'],
       ['queryPet', 'query'],
       ['linkPet', 'LINK'],
+      ['searchByQuerystring', 'query'],
     ]);
     const query = lib.buildHttpRequest(tools[1], { id: '7', q: 'x' });
     expect([query.method, query.url, query.body]).toEqual(['QUERY', 'https://api.example.com/pets/7', '{"q":"x"}']);
@@ -857,10 +858,29 @@ describe('Integration: OpenAPI 3.2 documents (issue #55)', () => {
     expect([link.method, link.url]).toEqual(['LINK', 'https://api.example.com/pets/7']);
     expect(tools[2].metadata.security?.map((s) => s.scheme)).toEqual(['basic']);
 
+    // in: querystring: one whole-query entry, typed by its content's schema
+    expect(tools[3].mapper).toEqual([
+      {
+        inputKey: 'filter',
+        type: 'query',
+        key: 'filter',
+        required: false,
+        serialization: { contentType: 'application/json' },
+        wholeQuery: true,
+      },
+    ]);
+    expect(tools[3].inputSchema.properties).toEqual({
+      filter: {
+        type: 'object',
+        'x-parameter-location': 'query',
+        'x-parameter-content-type': 'application/json',
+        'x-parameter-whole-query': true,
+      },
+    });
+
     expect(generator.getSpecVersion()).toMatchObject({ status: 'supported', family: '3.2', declared: '3.2.0' });
     expect(generator.getDiagnostics().map((d: { code: string; path: string }) => [d.code, d.path])).toEqual([
       ['UNRESOLVED_SECURITY_SCHEME', '/paths/~1pets~1{id}/additionalOperations/LINK/security/1/other#~1components~1securitySchemes~1x'],
-      ['UNSUPPORTED_PARAMETER_LOCATION', '/paths/~1search/query/parameters/0'],
     ]);
   });
 

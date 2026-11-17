@@ -114,6 +114,7 @@ export type {
   ParameterMapper,
   ToolMetadata,
   ResponseHints,
+  ResponseStreamInfo,
   FrontMcpExtensionData,
   SerializationInfo,
   SecurityRequirement,

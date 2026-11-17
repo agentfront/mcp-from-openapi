@@ -7,13 +7,37 @@ import type {
   GenerateOptions,
   MediaTypeObject,
   ResponsesObject,
+  ResponseStreamInfo,
   SchemaConversionOptions,
 } from './types';
 import { isReferenceObject, toJsonSchema } from './types';
 import { collectExampleValues } from './parameter-resolver';
+import { isSpecObject, ownProperty } from './spec';
 
 /**
- * Builds output schemas from OpenAPI response definitions
+ * The text describing a response: its `description`, else (OpenAPI 3.2,
+ * where `description` is optional) its `summary`. `description` is returned
+ * as the document holds it whenever it is present, as before.
+ */
+function responseDescription(response: ResponseObject): unknown {
+  if (response.description !== undefined) return response.description;
+  const summary = ownProperty(response, 'summary');
+  return typeof summary === 'string' ? summary : undefined;
+}
+
+/**
+ * Builds output schemas from OpenAPI response definitions.
+ *
+ * The output schema (`build`) comes from a response's media type chosen by
+ * preference (`application/json`, `application/hal+json`,
+ * `application/problem+json`, `application/xml`, `text/plain`, `text/html`,
+ * else the first): its `schema` describes the complete content. An OpenAPI
+ * 3.2 `itemSchema` describes each item of a sequential media type
+ * (`text/event-stream`, `application/jsonl`, ...) and is reported apart
+ * (`buildStream`), from the media type chosen for streaming, which need not
+ * be the same one. A media type with only `itemSchema` contributes nothing to
+ * the output schema, since a tool declaring one must return the complete
+ * result as structured content, which an unbounded stream is not.
  */
 export class ResponseBuilder {
   private preferredStatusCodes: number[];
@@ -67,6 +91,62 @@ export class ResponseBuilder {
   }
 
   /**
+   * The streamed response of an operation (OpenAPI 3.2):
+   *
+   * - the response: of those with a media type declaring `itemSchema`, the
+   *   one preferred like `includeAllResponses: false` prefers an output
+   *   schema (status codes in `preferredStatusCodes` order, then any 2xx, any
+   *   3xx, the first); `default` only when no status code has one;
+   * - its media type: the first in the response's `content`, in the document's
+   *   key order, that declares `itemSchema`. This is independent of the media
+   *   type `build` reads, so `application/json` next to `text/event-stream`
+   *   gives both an output schema and a stream.
+   *
+   * The item schema is converted with the same limits as output schemas.
+   * `undefined` when no response streams.
+   */
+  buildStream(responses?: ResponsesObject): ResponseStreamInfo | undefined {
+    if (!isSpecObject(responses)) return undefined;
+
+    const candidates: StreamCandidate[] = [];
+    for (const [statusCode, response] of Object.entries(responses)) {
+      if (statusCode === 'default') continue;
+      const code = parseInt(statusCode, 10);
+      if (isNaN(code)) continue;
+      const stream = this.streamOf(response);
+      if (stream) candidates.push({ statusCode: code, ...stream });
+    }
+    if (candidates.length === 0) {
+      const stream = this.streamOf(ownProperty(responses, 'default'));
+      if (stream) candidates.push({ statusCode: 0, ...stream });
+    }
+    if (candidates.length === 0) return undefined;
+
+    const { statusCode, contentType, itemSchema } = this.selectPreferredResponse(candidates);
+    return { statusCode, contentType, itemSchema: toJsonSchema(itemSchema, this.schemaConversion) };
+  }
+
+  /**
+   * The streamed media type of a response and its `itemSchema`, chosen apart
+   * from the media type its output schema comes from: the first in the
+   * response's `content`, in the document's key order, that declares
+   * `itemSchema`. So a response offering `application/json` and
+   * `text/event-stream` gives its output schema from the first and its stream
+   * from the second.
+   */
+  private streamOf(response: unknown): Omit<StreamCandidate, 'statusCode'> | undefined {
+    if (!isSpecObject(response) || isReferenceObject(response)) return undefined;
+    const content = response['content'];
+    if (!isSpecObject(content)) return undefined;
+    for (const contentType of Object.keys(content)) {
+      const itemSchema = ownProperty(content[contentType], 'itemSchema');
+      // A schema is an object or, from 3.1 on, a boolean
+      if (typeof itemSchema === 'boolean' || isSpecObject(itemSchema)) return { contentType, itemSchema };
+    }
+    return undefined;
+  }
+
+  /**
    * Collect the responses that yield an output schema (without converting it)
    */
   private collectResponses(responses: ResponsesObject): ResponseCandidate[] {
@@ -114,11 +194,13 @@ export class ResponseBuilder {
    * Build the output schema of a single response
    */
   private extractResponseSchema({ statusCode, response }: ResponseCandidate): JsonSchema {
+    // `description`, else (OpenAPI 3.2) `summary`
+    const description = responseDescription(response);
     if (!response.content) {
       // Response with no content (e.g., 204 No Content)
       return {
         type: 'null',
-        description: response.description,
+        description,
         'x-status-code': statusCode,
       } as JsonSchema;
     }
@@ -134,8 +216,8 @@ export class ResponseBuilder {
     };
 
     // Add description if not already present
-    if (!schema.description && response.description) {
-      schema.description = response.description;
+    if (!schema.description && description) {
+      schema.description = description as string;
     }
 
     // Media-type-level example(s) are more specific than schema-level ones,
@@ -178,7 +260,7 @@ export class ResponseBuilder {
   /**
    * Select the preferred response based on status code preferences
    */
-  private selectPreferredResponse(candidates: ResponseCandidate[]): ResponseCandidate {
+  private selectPreferredResponse<T extends { statusCode: number }>(candidates: T[]): T {
     // First, try to find exact match in preferred list
     for (const preferredCode of this.preferredStatusCodes) {
       const found = candidates.find((c) => c.statusCode === preferredCode);
@@ -205,4 +287,11 @@ export class ResponseBuilder {
 interface ResponseCandidate {
   statusCode: number;
   response: ResponseObject;
+}
+
+/** A response whose chosen media type declares `itemSchema` (0 for `default`). */
+interface StreamCandidate {
+  statusCode: number;
+  contentType: string;
+  itemSchema: object | boolean;
 }

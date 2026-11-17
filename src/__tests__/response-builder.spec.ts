@@ -584,3 +584,169 @@ describe('ResponseBuilder schemaConversion limits', () => {
     expect(() => new ResponseBuilder({}, { maxNodes: 2 }).build(responses)).toThrow(/maxSchemaNodes/);
   });
 });
+
+describe('ResponseBuilder: OpenAPI 3.2 responses (issue #55)', () => {
+  const event = {
+    type: 'object',
+    required: ['data'],
+    properties: { data: { type: 'string' }, event: { type: 'string' }, retry: { type: 'integer', minimum: 0 } },
+  };
+  const sse = (extra: Record<string, unknown> = {}) => ({
+    description: 'Events',
+    content: { 'text/event-stream': { itemSchema: event, ...extra } },
+  });
+  const json = (description: string) => ({
+    description,
+    content: { 'application/json': { schema: { type: 'object', properties: { message: { type: 'string' } } } } },
+  });
+
+  describe('summary as the description fallback', () => {
+    it('describes a response by its summary when it has no description', () => {
+      const builder = new ResponseBuilder();
+      expect(builder.build({ 204: { summary: 'Deleted' } } as any)).toEqual({
+        type: 'null',
+        description: 'Deleted',
+        'x-status-code': 204,
+      });
+      expect(
+        builder.build({ 200: { summary: 'A pet', content: { 'application/json': { schema: { type: 'object' } } } } } as any),
+      ).toMatchObject({ type: 'object', description: 'A pet', 'x-status-code': 200 });
+    });
+
+    it('keeps description first, as written, and ignores a summary that is not a string', () => {
+      const builder = new ResponseBuilder();
+      expect(builder.build({ 204: { description: 'Gone', summary: 'Deleted' } } as any)).toMatchObject({
+        description: 'Gone',
+      });
+      // an empty description is still the description, as before
+      expect(builder.build({ 204: { description: '', summary: 'Deleted' } } as any)).toMatchObject({ description: '' });
+      expect(builder.build({ 204: { description: null, summary: 'Deleted' } } as any)).toMatchObject({
+        description: null,
+      });
+      const noText: any = builder.build({ 204: { summary: { text: 'x' } } } as any);
+      expect(noText.description).toBeUndefined();
+      expect('description' in noText).toBe(true);
+    });
+  });
+
+  describe('buildStream', () => {
+    it('returns undefined without responses, or when no chosen media type declares itemSchema', () => {
+      const builder = new ResponseBuilder();
+      expect(builder.buildStream(undefined)).toBeUndefined();
+      expect(builder.buildStream('x' as any)).toBeUndefined();
+      expect(builder.buildStream({ 200: json('ok') } as any)).toBeUndefined();
+      expect(
+        builder.buildStream({
+          200: { description: 'no content' },
+          201: null,
+          202: { $ref: '#/components/responses/Stream' },
+          203: { description: 'x', content: [] },
+          204: { description: 'x', content: {} },
+          205: { description: 'x', content: { 'text/event-stream': 'junk' } },
+          206: { description: 'x', content: { 'text/event-stream': { itemSchema: 'a string' } } },
+          207: { description: 'x', content: { 'text/event-stream': { itemSchema: null } } },
+          208: { description: 'x', content: { 'text/event-stream': { itemSchema: [event] } } },
+          nope: sse(),
+        } as any),
+      ).toBeUndefined();
+    });
+
+    it('converts the item schema of the chosen media type, and never adds it to build()', () => {
+      const builder = new ResponseBuilder();
+      const responses = { 200: sse() } as any;
+      expect(builder.build(responses)).toBeUndefined();
+      expect(builder.buildStream(responses)).toEqual({
+        statusCode: 200,
+        contentType: 'text/event-stream',
+        itemSchema: event,
+      });
+    });
+
+    it('reads a media type with both schema and itemSchema both ways', () => {
+      const builder = new ResponseBuilder();
+      const responses = {
+        200: {
+          description: 'Lines',
+          content: { 'application/jsonl': { schema: { type: 'array', items: { type: 'integer' } }, itemSchema: { type: 'integer' } } },
+        },
+      } as any;
+      expect(builder.build(responses)).toMatchObject({ type: 'array', 'x-content-type': 'application/jsonl' });
+      expect(builder.buildStream(responses)).toEqual({
+        statusCode: 200,
+        contentType: 'application/jsonl',
+        itemSchema: { type: 'integer' },
+      });
+    });
+
+    it('chooses the stream media type apart from the output schema one: JSON next to SSE gives both', () => {
+      const responses = {
+        200: { description: 'x', content: { 'application/json': { schema: { type: 'object' } }, 'text/event-stream': { itemSchema: event } } },
+      } as any;
+      const builder = new ResponseBuilder();
+      expect(builder.build(responses)).toMatchObject({ type: 'object', 'x-content-type': 'application/json' });
+      expect(builder.buildStream(responses)).toEqual({ statusCode: 200, contentType: 'text/event-stream', itemSchema: event });
+    });
+
+    it('takes the first media type with itemSchema in document order, whatever the media type', () => {
+      const stream = (content: Record<string, unknown>) =>
+        new ResponseBuilder().buildStream({ 200: { description: 'x', content } } as any)?.contentType;
+      const item = { itemSchema: { type: 'string' } };
+      // no preference for any media type: the first listed wins
+      expect(stream({ 'text/event-stream': item, 'application/jsonl': item })).toBe('text/event-stream');
+      expect(stream({ 'application/jsonl': item, 'text/event-stream': item, 'application/json': {} })).toBe('application/jsonl');
+      expect(stream({ 'multipart/mixed': item, 'application/x-ndjson': item, 'application/jsonl': item })).toBe('multipart/mixed');
+      expect(stream({ 'application/geo+json-seq': item, 'application/json-seq': item })).toBe('application/geo+json-seq');
+      // the key is reported as written, with its parameters and case
+      expect(stream({ 'Text/Event-Stream; charset=utf-8': item, 'application/jsonl': item })).toBe(
+        'Text/Event-Stream; charset=utf-8',
+      );
+      // two vendor media types: the first
+      expect(stream({ 'application/vnd.acme.events+json': item, 'application/vnd.acme.rows+json': item })).toBe(
+        'application/vnd.acme.events+json',
+      );
+      // an unknown media type before a well-known sequential one still wins
+      expect(stream({ 'application/x-custom-stream': item, 'multipart/mixed': item })).toBe('application/x-custom-stream');
+    });
+
+    it('skips media types without itemSchema, wherever they are listed', () => {
+      const stream = (content: Record<string, unknown>) =>
+        new ResponseBuilder().buildStream({ 200: { description: 'x', content } } as any)?.contentType;
+      const item = { itemSchema: { type: 'string' } };
+      expect(stream({ 'application/json': {}, 'application/x-a': item, 'application/x-b': item })).toBe('application/x-a');
+      expect(stream({ 'text/event-stream': { schema: { type: 'string' } }, 'application/jsonl': item })).toBe('application/jsonl');
+      expect(stream({ 'application/json': { schema: { type: 'object' } }, 'text/event-stream': item })).toBe('text/event-stream');
+    });
+
+    it('prefers a stream like includeAllResponses: false prefers a schema, and default only as a fallback', () => {
+      const responses = {
+        201: { description: 'x', content: { 'application/x-ndjson': { itemSchema: { type: 'string' } } } },
+        200: sse(),
+        400: { description: 'x', content: { 'text/event-stream': { itemSchema: { type: 'number' } } } },
+        default: { description: 'x', content: { 'application/json-seq': { itemSchema: { type: 'boolean' } } } },
+      } as any;
+      expect(new ResponseBuilder().buildStream(responses)).toMatchObject({ statusCode: 200 });
+      expect(new ResponseBuilder({ preferredStatusCodes: [201] }).buildStream(responses)).toMatchObject({
+        statusCode: 201,
+        contentType: 'application/x-ndjson',
+      });
+      expect(new ResponseBuilder().buildStream({ 400: responses[400], default: responses.default })).toMatchObject({
+        statusCode: 400,
+      });
+      expect(new ResponseBuilder().buildStream({ default: responses.default, 204: { description: 'x' } })).toEqual({
+        statusCode: 0,
+        contentType: 'application/json-seq',
+        itemSchema: { type: 'boolean' },
+      });
+      expect(new ResponseBuilder().buildStream({ default: null } as any)).toBeUndefined();
+    });
+
+    it('accepts a boolean item schema and applies the conversion limits', () => {
+      const boolean = { 200: { description: 'x', content: { 'multipart/mixed': { itemSchema: true } } } } as any;
+      expect(new ResponseBuilder().buildStream(boolean)?.itemSchema).toEqual({});
+
+      const deep = { 200: sse({ itemSchema: { type: 'object', properties: { a: { type: 'object', properties: { b: { type: 'string' } } } } } }) } as any;
+      expect((new ResponseBuilder({}, { maxDepth: 1 }).buildStream(deep)?.itemSchema as any).properties.a.properties.b).toEqual({});
+      expect(() => new ResponseBuilder({}, { maxNodes: 2 }).buildStream(deep)).toThrow(/maxSchemaNodes/);
+    });
+  });
+});

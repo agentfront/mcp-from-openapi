@@ -7,6 +7,7 @@
 import {
   OpenAPIToolGenerator,
   Validator,
+  buildHttpRequest,
   extractExtensionOverrides,
   fromArazzo,
   isStandardMethod,
@@ -15,8 +16,10 @@ import {
 } from 'mcp-from-openapi';
 import type {
   ArazzoDocument,
+  DiagnosticCode,
   GenerateOptions,
   HTTPMethod,
+  McpOpenAPITool,
   NamingStrategy,
   OAS30,
   OAS31,
@@ -25,12 +28,18 @@ import type {
   OpenAPIVersion,
   OperationObject,
   OperationWithContext,
+  ParameterLocation,
+  ParameterMapper,
   ParameterObject,
   PathItemObject,
   ReferenceObject,
   RequestBodyObject,
+  ResponseHints,
+  ResponseStreamInfo,
   SchemaObject,
   SchemaOrBoolean,
+  SerializationInfo,
+  ServerInfo,
   ServerObject,
   StandardMethod,
   ToolMetadata,
@@ -53,6 +62,8 @@ declare const namerForGetOnly: (path: string, method: 'get') => string;
 declare const namerForStandardOnly: (path: string, method: StandardMethod) => string;
 declare const toolMetadata: ToolMetadata;
 declare const countsByMethod: Record<StandardMethod, number>;
+declare const toolForRequest: McpOpenAPITool;
+declare const computedFlag: boolean;
 
 // ---------------------------------------------------------------------------
 // A misspelt field in a fresh literal (excess property check)
@@ -395,3 +406,61 @@ export const futureVersion: OpenAPIVersion = '4.0.0';
 
 // @ts-expect-error `2.0` is a Swagger version, not an OpenAPI 3.x one
 export const swaggerVersion: OpenAPIVersion = '2.0';
+
+// ---------------------------------------------------------------------------
+// The generated tool: a whole query string, a parameter's media type, a streamed response
+// ---------------------------------------------------------------------------
+
+// @ts-expect-error `wholeQuery` is the literal `true`: an entry that is not a whole query string leaves it out
+export const falseWholeQuery: ParameterMapper = { inputKey: 'filter', type: 'query', key: 'filter', wholeQuery: false };
+
+// @ts-expect-error a computed `boolean` is not `true`: set the marker conditionally (`...(flag ? { wholeQuery: true } : {})`)
+export const computedWholeQuery: ParameterMapper = { inputKey: 'filter', type: 'query', key: 'filter', wholeQuery: computedFlag };
+
+// @ts-expect-error `wholeQuery` is not `wholeBody`: it holds `true`, not the string `'true'`
+export const stringWholeQuery: ParameterMapper = { inputKey: 'filter', type: 'query', key: 'filter', wholeQuery: 'true' };
+
+// @ts-expect-error `querystring` is an OpenAPI parameter location, not a mapper one: the whole query string is a `query` entry marked `wholeQuery`
+export const querystringEntry: ParameterMapper = { inputKey: 'filter', type: 'querystring', key: 'filter' };
+
+// @ts-expect-error `ParameterLocation` is the location a value goes to in the request, which `querystring` is not
+export const querystringLocation: ParameterLocation = 'querystring';
+
+// @ts-expect-error a media type is a string
+export const numericContentType: SerializationInfo = { contentType: 42 };
+
+// @ts-expect-error `itemSchema` is required: a stream without the schema of its items is not described
+export const streamWithoutItems: ResponseStreamInfo = { statusCode: 200, contentType: 'application/jsonl' };
+
+// @ts-expect-error `statusCode` is a number (0 for `default`), not the text a document writes
+export const stringStatusStream: ResponseStreamInfo = { statusCode: '200', contentType: 'application/jsonl', itemSchema: {} };
+
+// @ts-expect-error `contentType` is a string: it names the media type, it is not a flag
+export const flagContentTypeStream: ResponseStreamInfo = { statusCode: 200, contentType: true, itemSchema: {} };
+
+// @ts-expect-error `streaming` is a boolean
+export const stringStreaming: ResponseHints = { streaming: 'yes' };
+
+// @ts-expect-error a server's `name` is a string
+export const numericServerName: ServerInfo = { url: 'https://api.example.com', name: 1 };
+
+// @ts-expect-error `nme` is not a field: the server's name is `name`
+export const misspeltServerInfoName: ServerInfo = { url: 'https://api.example.com', nme: 'production' };
+
+// @ts-expect-error a stream is read from `responseStream`, which only a streamed tool has: it is not `responseStreams`
+export const misreadStream = toolMetadata.responseStreams;
+
+export function queryStringIsOptional(): string {
+  const request = buildHttpRequest(toolForRequest, {});
+  // @ts-expect-error `queryString` is set only when the query is not name/value pairs: narrow `string | undefined` before use
+  const raw: string = request.queryString;
+  return raw;
+}
+
+export function wholeQueryIsNotAlwaysThere(entry: ParameterMapper): true {
+  // @ts-expect-error `wholeQuery` is `true | undefined`: an entry that is not a whole query string leaves it out
+  return entry.wholeQuery;
+}
+
+// @ts-expect-error a misspelt code is not in the registry
+export const misspeltDiagnosticCode: DiagnosticCode = 'QUERYSTRING_PARAMETER_MISSING_CONTENT';

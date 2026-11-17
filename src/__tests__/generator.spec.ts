@@ -5708,7 +5708,7 @@ describe('OpenAPI 3.2 operations, versions and diagnostics (issue #55)', () => {
       expect(codes(generator)).toEqual(['FEATURE_NEWER_THAN_DECLARED_VERSION']);
     });
 
-    it('still skips an operation with a querystring parameter in an older document', async () => {
+    it('maps a querystring parameter in an older document too (feature-driven), with a warning', async () => {
       const spec = clean('3.1.0', {
         '/items': {
           get: op({
@@ -5718,8 +5718,19 @@ describe('OpenAPI 3.2 operations, versions and diagnostics (issue #55)', () => {
         },
       });
       const generator = await OpenAPIToolGenerator.fromJSON(spec);
-      expect(await names(generator)).toEqual([]);
-      expect(codes(generator)).toEqual(['FEATURE_NEWER_THAN_DECLARED_VERSION', 'UNSUPPORTED_PARAMETER_LOCATION']);
+      const [tool] = await generator.generateTools();
+      expect(tool.name).toBe('list');
+      expect(tool.mapper).toEqual([
+        {
+          inputKey: 'q',
+          type: 'query',
+          key: 'q',
+          required: false,
+          serialization: { contentType: 'application/json' },
+          wholeQuery: true,
+        },
+      ]);
+      expect(codes(generator)).toEqual(['FEATURE_NEWER_THAN_DECLARED_VERSION']);
     });
   });
 
@@ -5914,7 +5925,7 @@ describe('OpenAPI 3.2 operations, versions and diagnostics (issue #55)', () => {
       const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
       expect(await generator.generateTools()).toEqual([]);
       const [diagnostic] = generator.getDiagnostics();
-      expect(diagnostic.code).toBe('UNSUPPORTED_PARAMETER_LOCATION');
+      expect(diagnostic.code).toBe('QUERYSTRING_PARAMETER_WITHOUT_CONTENT');
       expect(diagnostic.message.length).toBeLessThan(1300);
       expect(diagnostic.path!.length).toBeLessThan(400);
       for (const text of [diagnostic.message, diagnostic.path!]) expect(text).not.toMatch(/[\u0000-\u001f]/);
@@ -6237,22 +6248,19 @@ describe('OpenAPI 3.2 operations, versions and diagnostics (issue #55)', () => {
   });
 
   describe('parameters in a location the generator does not map', () => {
-    const querystringParameter = {
-      name: 'filter',
-      in: 'querystring',
-      content: { 'application/json': { schema: { type: 'object' } } },
-    };
+    // A Swagger 2.0-style body parameter, which no OpenAPI 3 location maps
+    const bodyParameter = { name: 'filter', in: 'body', schema: { type: 'object' } };
 
     it('skips the operation with a diagnostic instead of leaking into the mapper', async () => {
       const spec = clean('3.2.0', {
         '/search': {
           get: op({ operationId: 'plain' }),
-          query: op({ operationId: 'search', parameters: [querystringParameter] }),
+          query: op({ operationId: 'search', parameters: [bodyParameter] }),
         },
       });
       const warn = silenceWarnings();
       try {
-        const generator = await OpenAPIToolGenerator.fromJSON(spec);
+        const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
         expect(await names(generator)).toEqual(['plain']);
         expect(warn).not.toHaveBeenCalled();
         expect(generator.getDiagnostics()).toEqual([
@@ -6260,8 +6268,8 @@ describe('OpenAPI 3.2 operations, versions and diagnostics (issue #55)', () => {
             severity: 'warning',
             code: 'UNSUPPORTED_PARAMETER_LOCATION',
             message:
-              'QUERY /search: parameter "filter" has location (in) "querystring", which is not mapped to a request ' +
-              '(supported: path, query, header, cookie); the operation makes no tool',
+              'QUERY /search: parameter "filter" has location (in) "body", which is not mapped to a request ' +
+              '(supported: path, query, querystring, header, cookie); the operation makes no tool',
             path: '/paths/~1search/query/parameters/0',
           },
         ]);
@@ -6331,6 +6339,962 @@ describe('OpenAPI 3.2 operations, versions and diagnostics (issue #55)', () => {
 
     it('treat query as read-only and an additional method as not', async () => {
       expect(await namesFor({ readOnlyOnly: true })).toEqual(['list', 'search']);
+    });
+  });
+});
+
+describe('OpenAPI 3.2 parameters and responses (issue #55)', () => {
+  const ok = { '200': { description: 'OK' } };
+  const op = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({ responses: ok, ...extra });
+  const clean = (openapi: string, paths: Record<string, unknown>, extra: Record<string, unknown> = {}): any => ({
+    openapi,
+    info: { title: 'T', version: '1.0.0' },
+    servers: [{ url: 'https://api.example.com' }],
+    paths,
+    ...extra,
+  });
+  const diagnostics = (generator: OpenAPIToolGenerator) => generator.getDiagnostics().map((d) => [d.code, d.path]);
+  const qs = (name = 'q', content: unknown = { 'application/json': { schema: { type: 'object' } } }) => ({
+    name,
+    in: 'querystring',
+    content,
+  });
+
+  describe('parameters defined with content', () => {
+    it('types the input from the media type and serializes the value in it (any version)', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.0.3', {
+          '/pets': {
+            get: op({
+              operationId: 'listPets',
+              parameters: [
+                {
+                  name: 'filter',
+                  in: 'query',
+                  content: {
+                    'application/json': {
+                      schema: { type: 'object', properties: { color: { type: 'string', nullable: true } } },
+                    },
+                  },
+                },
+              ],
+            }),
+          },
+        }),
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.inputSchema.properties).toEqual({
+        filter: {
+          type: 'object',
+          properties: { color: { type: ['string', 'null'] } },
+          'x-parameter-location': 'query',
+          'x-parameter-content-type': 'application/json',
+        },
+      });
+      expect(tool.mapper).toEqual([
+        { inputKey: 'filter', type: 'query', key: 'filter', required: false, serialization: { contentType: 'application/json' } },
+      ]);
+      expect(generator.getDiagnostics()).toEqual([]);
+    });
+
+    it('copies the media type encoding into the mapper, sharing nothing with the document', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', {
+          '/s': {
+            get: op({
+              operationId: 's',
+              parameters: [
+                qs('search', {
+                  'application/x-www-form-urlencoded': {
+                    schema: { type: 'object' },
+                    encoding: { tags: { style: 'pipeDelimited', explode: false } },
+                  },
+                }),
+              ],
+            }),
+          },
+        }),
+      );
+      const [tool] = await generator.generateTools();
+      const encoding = tool.mapper[0].serialization!.encoding!;
+      expect(encoding).toEqual({ tags: { style: 'pipeDelimited', explode: false } });
+      const documentEncoding = (generator.getDocument() as any).paths['/s'].get.parameters[0].content[
+        'application/x-www-form-urlencoded'
+      ].encoding;
+      expect(encoding).not.toBe(documentEncoding);
+      expect(encoding.tags).not.toBe(documentEncoding.tags);
+    });
+
+    it('reads one of several media types with an INVALID_PARAMETER_CONTENT warning, recorded once', async () => {
+      const spec = clean('3.1.0', {
+        '/a': {
+          parameters: [{ name: 'f', in: 'header', content: { 'text/plain': {}, 'application/json': {} } }],
+          get: op({ operationId: 'a' }),
+          post: op({ operationId: 'b' }),
+        },
+      });
+      for (const validate of [true, false]) {
+        const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate });
+        const tools = await generator.generateTools();
+        expect(tools.map((t) => t.mapper[0].serialization)).toEqual([
+          { contentType: 'application/json' },
+          { contentType: 'application/json' },
+        ]);
+        expect(generator.getDiagnostics()).toEqual([
+          {
+            severity: 'warning',
+            code: 'INVALID_PARAMETER_CONTENT',
+            message:
+              'Parameter "f" (in: "header"): content must hold exactly one media type, found 2 media types; ' +
+              '"application/json" is used',
+            path: '/paths/~1a/parameters/0',
+          },
+        ]);
+      }
+    });
+
+    it('reports content of a parameter that applies only, pointing at the operation list', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.0.3', {
+          '/a': {
+            parameters: [{ name: 'f', in: 'query', content: {} }],
+            get: op({ operationId: 'a', parameters: [{ name: 'f', in: 'query', content: 'text/plain' }] }),
+          },
+        }),
+        { validate: false },
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.inputSchema.properties).toEqual({ f: { type: 'string', 'x-parameter-location': 'query' } });
+      expect(diagnostics(generator)).toEqual([['INVALID_PARAMETER_CONTENT', '/paths/~1a/get/parameters/0']]);
+    });
+  });
+
+  describe('in: querystring', () => {
+    it('makes a whole-query mapper entry, alongside path, header and cookie parameters', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', {
+          '/items/{id}': {
+            parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+            query: op({
+              operationId: 'searchItems',
+              parameters: [qs('page'), { name: 'X-Trace', in: 'header', schema: { type: 'string' } }],
+            }),
+          },
+        }),
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.mapper.map((m) => [m.inputKey, m.type, m.wholeQuery])).toEqual([
+        ['id', 'path', undefined],
+        ['page', 'query', true],
+        ['X-Trace', 'header', undefined],
+      ]);
+      // its key is never sent, so it is not a pagination control
+      expect(tool.metadata.responseHints).toBeUndefined();
+      expect(generator.getDiagnostics()).toEqual([]);
+    });
+
+    it('skips an operation with more than one, path-level ones included (validate: false)', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', {
+          '/s': { parameters: [qs('q')], get: op({ operationId: 's', parameters: [qs('r')] }), post: op({ operationId: 'p' }) },
+        }),
+        { validate: false },
+      );
+      expect((await generator.generateTools()).map((t) => t.name)).toEqual(['p']);
+      expect(generator.getDiagnostics()).toEqual([
+        {
+          severity: 'warning',
+          code: 'MULTIPLE_QUERYSTRING_PARAMETERS',
+          message:
+            'GET /s: 2 parameters are in: querystring (path-level ones included), but at most one is allowed, as ' +
+            'each holds the whole query string; the operation makes no tool',
+          path: '/paths/~1s/get/parameters/0',
+        },
+      ]);
+      await expect(generator.generateTool('/s', 'get')).rejects.toThrow(GenerationError);
+      // the validator rejects the same document
+      await expect((await OpenAPIToolGenerator.fromJSON(clean('3.2.0', { '/s': { parameters: [qs('q')], get: op({ operationId: 's', parameters: [qs('r')] }) } }))).generateTools()).rejects.toThrow(ParseError);
+    });
+
+    it('skips an operation combining it with query parameters, path-level ones included', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', {
+          '/s': {
+            parameters: [{ name: 'limit', in: 'query', schema: { type: 'integer' } }],
+            get: op({ operationId: 's', parameters: [qs('filter')] }),
+          },
+        }),
+        { validate: false },
+      );
+      expect(await generator.generateTools()).toEqual([]);
+      expect(generator.getDiagnostics()).toEqual([
+        {
+          severity: 'warning',
+          code: 'QUERYSTRING_WITH_QUERY_PARAMETERS',
+          message:
+            'GET /s: parameter "filter" is in: querystring, which holds the whole query string, but the operation ' +
+            'also has parameters in: query (path-level ones included); the operation makes no tool',
+          path: '/paths/~1s/get/parameters/0',
+        },
+      ]);
+    });
+
+    it('skips an operation whose querystring parameter has no media type', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', {
+          '/a': { parameters: [{ name: 'q', in: 'querystring', schema: { type: 'string' } }], get: op({ operationId: 'a' }) },
+          '/b': { get: op({ operationId: 'b', parameters: [qs('q', {})] }) },
+          '/c': { get: op({ operationId: 'c', parameters: [qs('q', ['application/json'])] }) },
+        }),
+        { validate: false },
+      );
+      expect(await generator.generateTools()).toEqual([]);
+      expect(generator.getDiagnostics().map((d) => [d.path, d.message])).toEqual([
+        [
+          '/paths/~1a/parameters/0',
+          'GET /a: parameter "q" is in: querystring but has no content; it must define content with one media type, ' +
+            'which serializes the whole query string; the operation makes no tool',
+        ],
+        [
+          '/paths/~1b/get/parameters/0',
+          'GET /b: parameter "q" is in: querystring but has a content with no media type; it must define content ' +
+            'with one media type, which serializes the whole query string; the operation makes no tool',
+        ],
+        [
+          '/paths/~1c/get/parameters/0',
+          'GET /c: parameter "q" is in: querystring but has a content that is not a map of media types (an array); ' +
+            'it must define content with one media type, which serializes the whole query string; the operation ' +
+            'makes no tool',
+        ],
+      ]);
+    });
+
+    it('lets an operation querystring parameter override the path-level one', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', {
+          '/s': {
+            parameters: [qs('q', { 'text/plain': {} })],
+            get: op({ operationId: 's', parameters: [qs('q', { 'application/json': { schema: { type: 'object' } } })] }),
+          },
+        }),
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.mapper).toEqual([
+        expect.objectContaining({ inputKey: 'q', wholeQuery: true, serialization: { contentType: 'application/json' } }),
+      ]);
+    });
+  });
+
+  describe('path-level and operation-level parameters', () => {
+    it('lets the operation parameter override the path-level one: one input key, sent once', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.1.0', {
+          '/pets': {
+            parameters: [
+              { name: 'limit', in: 'query', schema: { type: 'integer', maximum: 100 } },
+              { name: 'X-Tenant', in: 'header', required: true, schema: { type: 'string' } },
+            ],
+            get: op({
+              operationId: 'listPets',
+              parameters: [{ name: 'limit', in: 'query', required: true, schema: { type: 'integer', maximum: 20 } }],
+            }),
+          },
+        }),
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.mapper.map((m) => [m.inputKey, m.type, m.key, m.required])).toEqual([
+        ['X-Tenant', 'header', 'X-Tenant', true],
+        ['limit', 'query', 'limit', true],
+      ]);
+      expect((tool.inputSchema.properties as any).limit.maximum).toBe(20);
+      expect(tool.metadata.responseHints).toEqual({ paginationParams: ['limit'] });
+      expect(generator.getDiagnostics()).toEqual([]);
+    });
+
+    it('uses the last of a repeated parameter with a DUPLICATE_PARAMETER warning, once per finding', async () => {
+      const page = (type: string) => ({ name: 'page', in: 'query', schema: { type } });
+      const spec = clean('3.0.3', {
+        '/a': {
+          parameters: [page('string'), page('number')],
+          get: op({ operationId: 'a' }),
+          put: op({ operationId: 'b', parameters: [page('boolean'), page('integer')] }),
+        },
+      });
+      for (const validate of [true, false]) {
+        const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate });
+        const tools = await generator.generateTools();
+        expect(tools.map((t) => [t.name, (t.inputSchema.properties as any).page.type, t.mapper.length])).toEqual([
+          ['a', 'number', 1],
+          ['b', 'integer', 1],
+        ]);
+        expect(diagnostics(generator)).toEqual([
+          ['DUPLICATE_PARAMETER', '/paths/~1a/parameters/0'],
+          ['DUPLICATE_PARAMETER', '/paths/~1a/put/parameters/0'],
+        ]);
+      }
+    });
+
+    it('handles parameters named after Object.prototype members', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        JSON.parse(
+          JSON.stringify(
+            clean('3.0.3', {
+              '/a': {
+                parameters: [
+                  { name: 'constructor', in: 'query', schema: { type: 'string' } },
+                  { name: 'toString', in: 'header', schema: { type: 'string' } },
+                ],
+                get: op({ operationId: 'a', parameters: [{ name: 'constructor', in: 'query', schema: { type: 'integer' } }] }),
+              },
+            }),
+          ),
+        ),
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.mapper.map((m) => m.inputKey)).toEqual(['toString', 'constructor']);
+      expect((tool.inputSchema.properties as any).constructor.type).toBe('integer');
+      expect(({} as any).type).toBeUndefined();
+    });
+  });
+
+  describe('request bodies with only itemSchema', () => {
+    it('records UNSUPPORTED_STREAMING_REQUEST_BODY and makes the tool without a body input', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', {
+          '/upload': {
+            post: op({
+              operationId: 'upload',
+              requestBody: { required: true, content: { 'application/jsonl': { itemSchema: { type: 'object' } } } },
+            }),
+          },
+        }),
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.mapper).toEqual([]);
+      expect(generator.getDiagnostics()).toEqual([
+        {
+          severity: 'warning',
+          code: 'UNSUPPORTED_STREAMING_REQUEST_BODY',
+          message:
+            'POST /upload: the request body\'s media type "application/jsonl" declares only itemSchema (a streamed ' +
+            'body), which is not supported; the tool takes no body input',
+          path: '/paths/~1upload/post/requestBody/content/application~1jsonl/itemSchema',
+        },
+      ]);
+    });
+
+    it('stays silent when the body is read or has nothing to stream', async () => {
+      const body = (content: unknown) => op({ requestBody: { content } });
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', {
+          '/a': { post: body({ 'application/json': { schema: { type: 'string' }, itemSchema: { type: 'string' } } }) },
+          '/b': { post: body({ 'application/json': {}, 'text/event-stream': { itemSchema: {} } }) },
+          '/c': { post: body({ 'text/plain': 'junk' }) },
+          '/d': { post: body({ 'text/plain': { itemSchema: null } }) },
+          '/e': { post: body('junk') },
+          '/f': { post: op({ requestBody: { $ref: '#/nope' } }) },
+        }),
+        { validate: false, dereference: false },
+      );
+      expect((await generator.generateTools()).map((t) => t.metadata.path)).toEqual(['/a', '/b', '/c', '/d', '/e', '/f']);
+      expect(generator.getDiagnostics().filter((d) => d.code === 'UNSUPPORTED_STREAMING_REQUEST_BODY')).toEqual([]);
+    });
+
+    it('keeps the earlier outcome for a request body with an empty content map', async () => {
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const generator = await OpenAPIToolGenerator.fromJSON(
+          clean('3.2.0', { '/a': { post: op({ operationId: 'a', requestBody: { content: {} } }) } }),
+          { validate: false },
+        );
+        expect(await generator.generateTools()).toEqual([]);
+        expect(warn).toHaveBeenCalledWith('Failed to generate tool for POST /a:', 'No content type available in request body');
+        expect(generator.getDiagnostics()).toEqual([]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  });
+
+  describe('streamed responses (itemSchema)', () => {
+    const event = {
+      type: 'object',
+      required: ['data'],
+      properties: {
+        data: { type: 'string', example: 'tick', format: 'uuid' },
+        id: { type: 'string' },
+        retry: { type: 'integer', minimum: 0 },
+      },
+    };
+    const streamDoc = (responses: Record<string, unknown>) =>
+      clean('3.2.0', { '/events': { get: { operationId: 'events', responses } } });
+
+    it('exposes the item schema in metadata, with no outputSchema and a streaming hint', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        streamDoc({ 200: { description: 'Events', content: { 'text/event-stream': { itemSchema: event } } } }),
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.outputSchema).toBeUndefined();
+      expect(tool.metadata.responseStatusCodes).toBeUndefined();
+      expect(tool.metadata.responseHints).toEqual({ streaming: true });
+      expect(tool.metadata.responseStream).toEqual({
+        statusCode: 200,
+        contentType: 'text/event-stream',
+        itemSchema: {
+          type: 'object',
+          required: ['data'],
+          properties: {
+            data: { type: 'string', examples: ['tick'], format: 'uuid' },
+            id: { type: 'string' },
+            retry: { type: 'integer', minimum: 0 },
+          },
+        },
+      });
+      // a fresh tree: changing the document afterwards does not reach the tool
+      (generator.getDocument() as any).paths['/events'].get.responses[200].content['text/event-stream'].itemSchema.type =
+        'string';
+      expect(tool.metadata.responseStream!.itemSchema.type).toBe('object');
+    });
+
+    it('leaves the other responses as they were', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        streamDoc({
+          200: { description: 'Events', content: { 'text/event-stream': { itemSchema: event } } },
+          400: { description: 'Bad', content: { 'application/json': { schema: { type: 'object' } } } },
+        }),
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.outputSchema).toEqual({
+        type: 'object',
+        'x-status-code': 400,
+        description: 'Bad',
+        'x-content-type': 'application/json',
+      });
+      expect(tool.metadata.responseStatusCodes).toEqual([400]);
+      expect(tool.metadata.responseStream?.statusCode).toBe(200);
+    });
+
+    it('keeps outputSchema from schema when the media type has both, and adds the stream', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        streamDoc({
+          200: {
+            description: 'Lines',
+            content: { 'application/jsonl': { schema: { type: 'array', items: event }, itemSchema: event } },
+          },
+        }),
+      );
+      const [tool] = await generator.generateTools({ emitTypeSignatures: true });
+      expect(tool.outputSchema).toMatchObject({ type: 'array', 'x-content-type': 'application/jsonl' });
+      expect(tool.metadata.responseHints).toEqual({ unboundedArray: true, largeResponseRisk: true, streaming: true });
+      expect(tool.metadata.responseStream).toMatchObject({ statusCode: 200, contentType: 'application/jsonl' });
+      expect(tool.metadata.typescript?.signature).toEqual(expect.any(String));
+    });
+
+    it('runs the item schema through formats, depth, trimming and the client target', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        streamDoc({
+          200: {
+            description: 'Events',
+            content: {
+              'text/event-stream': {
+                itemSchema: {
+                  ...event,
+                  description: 'One server-sent event, described at length',
+                  properties: { ...event.properties, nested: { type: 'object', properties: { deep: { type: 'string' } } } },
+                },
+              },
+            },
+          },
+        }),
+      );
+      const [tool] = await generator.generateTools({
+        resolveFormats: true,
+        maxSchemaDepth: 1,
+        stripExamples: true,
+        maxDescriptionLength: 10,
+        target: 'openai',
+      });
+      const item = tool.metadata.responseStream!.itemSchema as any;
+      expect(item.properties.data.examples).toBeUndefined();
+      expect(item.properties.data.pattern).toBeDefined();
+      expect(item.description.length).toBeLessThanOrEqual(10);
+      expect(item.properties.nested.properties).toBeUndefined();
+      expect(item.additionalProperties).toBe(false);
+    });
+
+    it('fails the tool like an output schema when the item schema exceeds the node budget', async () => {
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const generator = await OpenAPIToolGenerator.fromJSON(
+          streamDoc({ 200: { description: 'Events', content: { 'text/event-stream': { itemSchema: event } } } }),
+        );
+        expect(await generator.generateTools({ maxSchemaNodes: 6 })).toEqual([]);
+        expect(String(warn.mock.calls[0][1])).toMatch(/maxSchemaNodes/);
+        await expect(generator.generateTool('/events', 'get', { maxSchemaNodes: 6 })).rejects.toThrow(SchemaError);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  });
+
+  describe('response summary', () => {
+    it('describes a response by its summary when it has no description', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', {
+          '/a': {
+            delete: { operationId: 'a', responses: { 204: { summary: 'Deleted' } } },
+            get: {
+              operationId: 'b',
+              responses: { 200: { summary: 'A pet', content: { 'application/json': { schema: { type: 'object' } } } } },
+            },
+          },
+        }),
+      );
+      const tools = await generator.generateTools();
+      expect(tools.map((t) => (t.outputSchema as any).description)).toEqual(['A pet', 'Deleted']);
+    });
+  });
+
+  describe('server name', () => {
+    it('surfaces a string name in metadata.servers, kept when baseUrl replaces the URL', async () => {
+      const spec = clean(
+        '3.2.0',
+        { '/a': { get: op({ operationId: 'a' }) } },
+        {
+          servers: [
+            { url: 'https://eu.example.com', name: 'eu', description: 'Europe' },
+            { url: 'https://us.example.com', name: 7 },
+            { url: 'https://other.example.com' },
+          ],
+        },
+      );
+      const [tool] = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTools();
+      expect(tool.metadata.servers).toEqual([
+        { url: 'https://eu.example.com', name: 'eu', description: 'Europe' },
+        { url: 'https://us.example.com' },
+        { url: 'https://other.example.com' },
+      ]);
+      expect(Object.keys(tool.metadata.servers![0]).slice(0, 3)).toEqual(['url', 'name', 'description']);
+      expect('name' in tool.metadata.servers![1]).toBe(false);
+
+      const [based] = await (await OpenAPIToolGenerator.fromJSON(spec, { baseUrl: 'https://proxy.example.com' })).generateTools();
+      expect(based.metadata.servers![0]).toEqual({ url: 'https://proxy.example.com', name: 'eu', description: 'Europe' });
+    });
+  });
+
+  describe('Example Object dataValue', () => {
+    it('prefers dataValue over value in parameter and media type examples', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', {
+          '/a': {
+            post: op({
+              operationId: 'a',
+              parameters: [
+                {
+                  name: 'color',
+                  in: 'query',
+                  schema: { type: 'array', items: { type: 'string' } },
+                  examples: {
+                    list: { dataValue: ['blue', 'black'], serializedValue: 'color=blue,black' },
+                    legacy: { value: ['red'] },
+                    serializedOnly: { serializedValue: 'color=green' },
+                  },
+                },
+              ],
+              requestBody: {
+                content: {
+                  'application/json': {
+                    schema: { type: 'object', properties: { name: { type: 'string' } } },
+                    examples: { ada: { dataValue: { name: 'Ada' }, value: { name: 'not used' } } },
+                  },
+                },
+              },
+            }),
+          },
+        }),
+      );
+      const [tool] = await generator.generateTools({ includeExamples: true });
+      expect((tool.inputSchema.properties as any).color.examples).toEqual([['blue', 'black'], ['red']]);
+      expect((tool.inputSchema.properties as any).name.examples).toEqual(['Ada']);
+    });
+  });
+
+  describe('hostile shapes', () => {
+    it('reads an enormous content map once, bounded in time and in the diagnostic', async () => {
+      const content = Object.fromEntries(Array.from({ length: 50_000 }, (_, i) => [`x-type/${i}`, {}]));
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', { '/a': { get: op({ operationId: 'a', parameters: [{ name: 'f', in: 'query', content }] }) } }),
+        { validate: false },
+      );
+      const started = Date.now();
+      const [tool] = await generator.generateTools();
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(tool.mapper[0].serialization).toEqual({ contentType: 'x-type/0' });
+      const [diagnostic] = generator.getDiagnostics();
+      expect(diagnostic.message).toContain('found 50000 media types; "x-type/0" is used');
+    });
+
+    it('never throws on content, media types and parameters of the wrong shape', async () => {
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const parameters = [
+          { name: 'a', in: 'query', content: 5 },
+          { name: 'b', in: 'query', content: { 'application/json': null } },
+          { name: 'c', in: 'cookie', content: { 'application/json': [] } },
+          { name: 'd', in: 'query', content: { 'application/json': { schema: 'junk', encoding: 5, examples: 'x' } } },
+          { name: 5, in: 'query', content: { 'text/plain': {} } },
+        ];
+        const generator = await OpenAPIToolGenerator.fromJSON(
+          clean('3.2.0', { '/a': { get: op({ operationId: 'a', parameters }) } }),
+          { validate: false },
+        );
+        const [tool] = await generator.generateTools({ includeExamples: true });
+        expect(warn).not.toHaveBeenCalled();
+        expect(tool.mapper.map((m) => [m.inputKey, m.type, m.serialization?.contentType ?? null, m.wholeQuery ?? false])).toEqual([
+          ['a', 'query', null, false],
+          ['b', 'query', 'application/json', false],
+          ['c', 'cookie', 'application/json', false],
+          ['d', 'query', 'application/json', false],
+          // a name that is not a string is kept as it was
+          [5, 'query', 'text/plain', false],
+        ]);
+        expect(diagnostics(generator)).toEqual([
+          ['INVALID_PARAMETER_CONTENT', '/paths/~1a/get/parameters/0'],
+          ['INVALID_PARAMETER_CONTENT', '/paths/~1a/get/parameters/1'],
+          ['INVALID_PARAMETER_CONTENT', '/paths/~1a/get/parameters/2'],
+          // no Media Type Object: the JSON value is unconstrained, so it may be a string
+          ['COOKIE_CONTENT_NOT_SENDABLE', '/paths/~1a/get/parameters/2'],
+        ]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('lists only codes of the DIAGNOSTIC_CODES registry for the new findings', () => {
+      for (const code of [
+        'MULTIPLE_QUERYSTRING_PARAMETERS',
+        'QUERYSTRING_WITH_QUERY_PARAMETERS',
+        'QUERYSTRING_PARAMETER_WITHOUT_CONTENT',
+        'INVALID_PARAMETER_CONTENT',
+        'DUPLICATE_PARAMETER',
+        'UNSUPPORTED_STREAMING_REQUEST_BODY',
+      ]) {
+        expect(DIAGNOSTIC_CODES).toHaveProperty(code, code);
+      }
+    });
+  });
+});
+
+describe('OpenAPI 3.2 parameters and responses: review fixes (issue #55)', () => {
+  const ok = { '200': { description: 'OK' } };
+  const op = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({ responses: ok, ...extra });
+  const clean = (openapi: string, paths: Record<string, unknown>, extra: Record<string, unknown> = {}): any => ({
+    openapi,
+    info: { title: 'T', version: '1.0.0' },
+    servers: [{ url: 'https://api.example.com' }],
+    paths,
+    ...extra,
+  });
+  const diagnostics = (generator: OpenAPIToolGenerator) => generator.getDiagnostics().map((d) => [d.code, d.path]);
+  const json = (schema: unknown = { type: 'object' }) => ({ 'application/json': { schema } });
+
+  describe('header names in any case', () => {
+    it('lets an operation header override a path-level one spelt differently, sending the operation spelling once', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.1.0', {
+          '/a': {
+            parameters: [{ name: 'X-Id', in: 'header', required: true, schema: { type: 'string' } }],
+            get: op({ operationId: 'a', parameters: [{ name: 'x-id', in: 'header', schema: { type: 'integer' } }] }),
+          },
+        }),
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.mapper).toEqual([
+        { inputKey: 'x-id', type: 'header', key: 'x-id', required: false, serialization: undefined },
+      ]);
+      expect(tool.inputSchema).toEqual({
+        type: 'object',
+        properties: { 'x-id': { type: 'integer', 'x-parameter-location': 'header', 'x-mcp-header': 'x-id' } },
+        additionalProperties: false,
+      });
+      expect(generator.getDiagnostics()).toEqual([]);
+    });
+
+    it('reports a header repeated in one list in another case, and keeps query and cookie names exact', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.1.0', {
+          '/a': {
+            get: op({
+              operationId: 'a',
+              parameters: [
+                { name: 'X-Trace', in: 'header', schema: { type: 'string' } },
+                { name: 'x-trace', in: 'header', schema: { type: 'string' } },
+                { name: 'id', in: 'query', schema: { type: 'string' } },
+                { name: 'ID', in: 'query', schema: { type: 'string' } },
+                { name: 'sid', in: 'cookie', schema: { type: 'string' } },
+                { name: 'SID', in: 'cookie', schema: { type: 'string' } },
+              ],
+            }),
+          },
+        }),
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.mapper.map((m) => [m.key, m.type])).toEqual([
+        ['x-trace', 'header'],
+        ['id', 'query'],
+        ['ID', 'query'],
+        ['sid', 'cookie'],
+        ['SID', 'cookie'],
+      ]);
+      expect(diagnostics(generator)).toEqual([['DUPLICATE_PARAMETER', '/paths/~1a/get/parameters/0']]);
+    });
+  });
+
+  describe('content without a media schema', () => {
+    it('keeps a string for a non-JSON media type, so the type signature stays string', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.0.3', {
+          '/a': {
+            get: op({
+              operationId: 'getA',
+              parameters: [
+                { name: 'token', in: 'cookie', required: true, content: { 'text/plain': {} } },
+                { name: 'filter', in: 'query', required: true, content: { 'application/json': {} } },
+              ],
+            }),
+          },
+        }),
+      );
+      const [tool] = await generator.generateTools({ emitTypeSignatures: true });
+      expect((tool.inputSchema.properties as any).token).toEqual({
+        type: 'string',
+        'x-parameter-location': 'cookie',
+        'x-parameter-content-type': 'text/plain',
+      });
+      expect((tool.inputSchema.properties as any).filter).toEqual({
+        'x-parameter-location': 'query',
+        'x-parameter-content-type': 'application/json',
+      });
+      expect(tool.metadata.typescript?.signature).toMatch(/token: string/);
+    });
+  });
+
+  describe('schema and content together', () => {
+    it('warns, reads schema, and records the finding once whether validating or not', async () => {
+      const spec = clean('3.1.0', {
+        '/a': {
+          get: op({
+            operationId: 'a',
+            parameters: [{ name: 'f', in: 'query', schema: { type: 'string' }, content: json() }],
+          }),
+        },
+      });
+      for (const validate of [true, false]) {
+        const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate });
+        const [tool] = await generator.generateTools();
+        expect((tool.inputSchema.properties as any).f.type).toBe('string');
+        expect(generator.getDiagnostics()).toEqual([
+          {
+            severity: 'warning',
+            code: 'INVALID_PARAMETER_CONTENT',
+            message:
+              'Parameter "f" (in: "query"): defines both schema and content, but must define only one; content is ' +
+              'ignored and schema is used',
+            path: '/paths/~1a/get/parameters/0',
+          },
+        ]);
+      }
+    });
+  });
+
+  describe('media types that give no schema', () => {
+    it('reports a media type left as an unresolved reference (generation only)', async () => {
+      const ref = { $ref: '#/components/mediaTypes/Filter' };
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', {
+          '/a': {
+            get: op({
+              operationId: 'a',
+              parameters: [
+                { name: 'j', in: 'query', content: { 'application/json': ref } },
+                { name: 't', in: 'query', content: { 'text/plain': ref } },
+                { name: 'c', in: 'cookie', content: { 'application/json': ref } },
+                { $ref: '#/components/parameters/P' },
+              ],
+            }),
+          },
+        }),
+        { validate: false, dereference: false },
+      );
+      const [tool] = await generator.generateTools();
+      expect((tool.inputSchema.properties as any).t.type).toBe('string');
+      expect(generator.getDiagnostics().map((d) => [d.path, d.message.slice(d.message.indexOf('): ') + 3)])).toEqual([
+        [
+          '/paths/~1a/get/parameters/0',
+          'the media type "application/json" is a reference that is not resolved, so its schema is not read; the value is unconstrained',
+        ],
+        [
+          '/paths/~1a/get/parameters/1',
+          'the media type "text/plain" is a reference that is not resolved, so its schema is not read; the value is read as a string',
+        ],
+        [
+          '/paths/~1a/get/parameters/2',
+          'the media type "application/json" is a reference that is not resolved, so its schema is not read; the value is unconstrained',
+        ],
+      ]);
+    });
+
+    it('reports a null media type and an itemSchema in a parameter, with the validator, once', async () => {
+      const spec = clean('3.2.0', {
+        '/a': {
+          get: op({
+            operationId: 'a',
+            parameters: [
+              { name: 'n', in: 'query', content: { 'application/json': null } },
+              { name: 'i', in: 'query', content: { 'application/jsonl': { itemSchema: { type: 'string' } } } },
+            ],
+          }),
+        },
+      });
+      for (const validate of [true, false]) {
+        const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate });
+        await generator.generateTools();
+        expect(diagnostics(generator)).toEqual([
+          ['INVALID_PARAMETER_CONTENT', '/paths/~1a/get/parameters/0'],
+          ['INVALID_PARAMETER_CONTENT', '/paths/~1a/get/parameters/1'],
+        ]);
+      }
+    });
+  });
+
+  describe('streams next to an output schema', () => {
+    it('gives the output schema from JSON and the stream from SSE in one response', async () => {
+      const event = { type: 'object', properties: { data: { type: 'string' } } };
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', {
+          '/chat': {
+            post: op({
+              operationId: 'chat',
+              responses: {
+                200: {
+                  description: 'A reply, whole or streamed',
+                  content: {
+                    'application/json': { schema: { type: 'object', properties: { reply: { type: 'string' } } } },
+                    'text/event-stream': { itemSchema: event },
+                  },
+                },
+              },
+            }),
+          },
+        }),
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.outputSchema).toMatchObject({ 'x-content-type': 'application/json', 'x-status-code': 200 });
+      expect(tool.metadata.responseStream).toEqual({ statusCode: 200, contentType: 'text/event-stream', itemSchema: event });
+      expect(tool.metadata.responseHints).toEqual({ streaming: true });
+    });
+  });
+
+  describe('JSON cookie values', () => {
+    it('warns when the schema allows a value whose JSON text a cookie cannot carry, once per parameter', async () => {
+      const cookie = (name: string, content: unknown, extra: Record<string, unknown> = {}) => ({
+        name,
+        in: 'cookie',
+        content,
+        ...extra,
+      });
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.0.3', {
+          '/a': {
+            parameters: [cookie('prefs', json({ type: 'object' }))],
+            get: op({
+              operationId: 'a',
+              parameters: [
+                cookie('count', json({ type: 'integer' })),
+                cookie('ratio', json({ type: ['number', 'null'] })),
+                cookie('flag', json({ type: 'boolean' })),
+                cookie('any', json({})),
+                cookie('none', json({ type: [] })),
+                cookie('name', { 'application/vnd.x+json': { schema: { type: 'string' } } }),
+                cookie('plain', { 'text/plain': { schema: { type: 'string' } } }),
+                cookie('styled', undefined, { schema: { type: 'string' } }),
+                { name: 'h', in: 'header', content: json({ type: 'object' }) },
+              ],
+            }),
+            put: op({ operationId: 'b' }),
+          },
+        }),
+      );
+      const tools = await generator.generateTools();
+      expect(tools).toHaveLength(2);
+      expect(diagnostics(generator)).toEqual([
+        ['COOKIE_CONTENT_NOT_SENDABLE', '/paths/~1a/parameters/0'],
+        ['COOKIE_CONTENT_NOT_SENDABLE', '/paths/~1a/get/parameters/3'],
+        ['COOKIE_CONTENT_NOT_SENDABLE', '/paths/~1a/get/parameters/4'],
+        ['COOKIE_CONTENT_NOT_SENDABLE', '/paths/~1a/get/parameters/5'],
+      ]);
+      expect(generator.getDiagnostics()[0].message).toBe(
+        'Parameter "prefs" (in: "cookie") is sent as "application/json", but its schema allows a string, an object ' +
+          'or an array, whose JSON text holds characters a cookie value cannot carry (\'"\', \',\'); a call with such a ' +
+          'value fails, only a number, boolean or null can be sent',
+      );
+    });
+  });
+
+  describe('a whole query string next to a query credential', () => {
+    const schemes = {
+      securitySchemes: {
+        key: { type: 'apiKey', in: 'query', name: 'api_key' },
+        other: { type: 'apiKey', in: 'query', name: 'token' },
+        hdr: { type: 'apiKey', in: 'header', name: 'X-Key' },
+      },
+    };
+    const search = (contentType: string, security?: unknown[]) =>
+      op({
+        operationId: `s${Math.abs(contentType.length)}`,
+        parameters: [{ name: 'q', in: 'querystring', content: { [contentType]: { schema: { type: 'object' } } } }],
+        ...(security && { security }),
+      });
+
+    it('warns once per scheme that can put a credential in the query, naming it', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean(
+          '3.2.0',
+          { '/s': { get: search('application/json', [{ key: [] }, { hdr: [] }, { key: [], other: [] }]) } },
+          { components: schemes },
+        ),
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.mapper.map((m) => m.inputKey)).toEqual(['q', 'key', 'hdr', 'key', 'other']);
+      expect(generator.getDiagnostics()).toEqual([
+        {
+          severity: 'warning',
+          code: 'QUERYSTRING_WITH_QUERY_CREDENTIAL',
+          message:
+            'GET /s: parameter "q" holds the whole query string as "application/json", which has no name=value pairs, ' +
+            'but security scheme "key" sends its API key in the query string; a call using that scheme cannot be ' +
+            'built (send the key in a header or a cookie, or use application/x-www-form-urlencoded)',
+          path: '/paths/~1s/get/parameters/0',
+        },
+        expect.objectContaining({ code: 'QUERYSTRING_WITH_QUERY_CREDENTIAL', message: expect.stringContaining('"other"') }),
+      ]);
+    });
+
+    it('stays silent for a form-encoded query string, a header credential, or no security', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean(
+          '3.2.0',
+          {
+            '/a': { get: search('application/x-www-form-urlencoded; charset=utf-8', [{ key: [] }]) },
+            '/b': { get: search('application/json', [{ hdr: [] }]) },
+            '/c': { get: search('text/plain') },
+            '/d': { get: op({ operationId: 'd', security: [{ key: [] }] }) },
+          },
+          { components: schemes },
+        ),
+      );
+      expect(await generator.generateTools()).toHaveLength(4);
+      expect(generator.getDiagnostics()).toEqual([]);
     });
   });
 });

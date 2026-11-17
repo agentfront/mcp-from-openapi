@@ -1060,3 +1060,1489 @@ describe('mapper locations', () => {
     expect(read(buildHttpRequest(tool, { x: 'secret' }))).toBe('secret');
   });
 });
+
+/**
+ * Catch a RequestBuildError (and only one) from a call, so its message and
+ * context can be checked.
+ */
+function buildFailure(call: () => unknown): RequestBuildError {
+  try {
+    call();
+  } catch (error) {
+    expect(error).toBeInstanceOf(RequestBuildError);
+    return error as RequestBuildError;
+  }
+  throw new Error('expected a RequestBuildError');
+}
+
+/** A tool at /foo on https://example.com, as in the OpenAPI 3.2.1 querystring examples */
+function fooTool(mapper: ParameterMapper[]): McpOpenAPITool {
+  return makeTool(mapper, { path: '/foo', method: 'get', servers: [{ url: 'https://example.com' }] });
+}
+
+describe('style: cookie (OpenAPI 3.2 "Style Values", "Style Examples")', () => {
+  // The Style Examples value set: a parameter named `color` with
+  //   string -> "blue", array -> ["blue", "black", "brown"], object -> { "R": 100, "G": 200, "B": 150 }
+  const VALUES = {
+    string: 'blue',
+    array: ['blue', 'black', 'brown'],
+    object: { R: 100, G: 200, B: 150 },
+  } as const;
+  const cookieTool = (explode?: boolean) =>
+    fooTool([{ inputKey: 'color', type: 'cookie', key: 'color', style: 'cookie', ...(explode !== undefined && { explode }) }]);
+
+  // | cookie | true | color= | color=blue | color=blue; color=black; color=brown | R=100; G=200; B=150 |
+  // explode defaults to true for `cookie` ("Fixed Fields for use with schema": explode)
+  it.each([
+    [true, 'string', 'color=blue'],
+    [true, 'array', 'color=blue; color=black; color=brown'],
+    [true, 'object', 'R=100; G=200; B=150'],
+    [undefined, 'string', 'color=blue'],
+    [undefined, 'array', 'color=blue; color=black; color=brown'],
+    [undefined, 'object', 'R=100; G=200; B=150'],
+    // | cookie | false | color= | color=blue | n/a | n/a |
+    [false, 'string', 'color=blue'],
+  ] as const)('explode %p, %s value: Cookie header %j', (explode, kind, expected) => {
+    const built = buildHttpRequest(cookieTool(explode), { color: VALUES[kind] });
+
+    expect(built.headers['Cookie']).toBe(expected);
+    expect(built.url).toBe('https://example.com/foo');
+  });
+
+  // | cookie | false | ... | n/a | n/a |: the Cookie header forbids the
+  // unencoded commas these would need (3.2.1, "Fixed Fields for use with schema")
+  it.each(['array', 'object'] as const)('explode false with an %s value is n/a and throws', (kind) => {
+    const error = buildFailure(() => buildHttpRequest(cookieTool(false), { color: VALUES[kind] }));
+
+    expect(error.message).toMatch(/style 'cookie' with explode false, which cannot serialize/);
+    expect(error.message).toContain(kind === 'array' ? 'an array' : 'an object');
+    expect(error.context).toEqual({ param: 'color', location: 'cookie', style: 'cookie' });
+  });
+
+  // The `undefined` column (`color=`): an absent or null value is not sent,
+  // as for every other parameter of this builder
+  it.each([{}, { color: undefined }, { color: null }])('does not send an absent value (%p)', (input) => {
+    const built = buildHttpRequest(cookieTool(), input);
+
+    expect(built.headers['Cookie']).toBeUndefined();
+    expect(built.cookies).toEqual({});
+  });
+
+  it('serializes the specification example of an exploded cookie object verbatim', () => {
+    // Parameter Object Examples: "A cookie parameter with an exploded object (the default for style: cookie)"
+    //   dataValue: { greeting: 'Hello%2C%20world!', code: 42 }  serializedValue: "greeting=Hello%2C%20world!; code=42"
+    const tool = fooTool([{ inputKey: 'cookie', type: 'cookie', key: 'cookie', style: 'cookie' }]);
+    const built = buildHttpRequest(tool, { cookie: { greeting: 'Hello%2C%20world!', code: 42 } });
+
+    expect(built.headers['Cookie']).toBe('greeting=Hello%2C%20world!; code=42');
+    expect(built.cookies).toEqual({ greeting: 'Hello%2C%20world!', code: '42' });
+  });
+
+  it('keeps every pair of an exploded array in the Cookie header and the first value in `cookies`', () => {
+    const built = buildHttpRequest(cookieTool(), { color: VALUES.array });
+
+    expect(built.cookies).toEqual({ color: 'blue' });
+    expect(built.headers['Cookie']).toBe('color=blue; color=black; color=brown');
+  });
+
+  it.each([
+    ['a comma', 'a,b'],
+    ['a space', 'a b'],
+    ['a semicolon', 'a;b'],
+    ['a double quote', 'a"b'],
+    ['a backslash', 'a\\b'],
+    ['CR LF', 'a\r\nb'],
+    ['NUL', 'a\u0000b'],
+  ])('applies no escaping, so a value with %s is rejected (RFC 6265 cookie-octet)', (_label, bad) => {
+    for (const value of [bad, [bad], { k: bad }]) {
+      const error = buildFailure(() => buildHttpRequest(cookieTool(), { color: value }));
+
+      expect(error.message).toMatch(/cookie-octet violation/);
+    }
+  });
+
+  it('checks every cookie name it sends: the property names of an exploded object, not the unused parameter name', () => {
+    const tool = fooTool([{ inputKey: 'c', type: 'cookie', key: 'not a token', style: 'cookie' }]);
+
+    expect(buildHttpRequest(tool, { c: { ok: 1 } }).headers['Cookie']).toBe('ok=1');
+    expect(() => buildHttpRequest(tool, { c: 'v' })).toThrow(/Invalid cookie name 'not a token'/);
+    expect(() => buildHttpRequest(tool, { c: ['v'] })).toThrow(/Invalid cookie name 'not a token'/);
+    expect(() => buildHttpRequest(cookieTool(), { color: { 'bad name': 1 } })).toThrow(/Invalid cookie name 'bad name'/);
+    expect(() => buildHttpRequest(cookieTool(), { color: { 'a\r\nb': 1 } })).toThrow(/Invalid cookie name/);
+  });
+
+  it('skips undefined object properties and rejects null or nested ones', () => {
+    expect(buildHttpRequest(cookieTool(), { color: { R: 1, G: undefined } }).headers['Cookie']).toBe('R=1');
+    expect(() => buildHttpRequest(cookieTool(), { color: { R: null } })).toThrow(/received null/);
+    expect(() => buildHttpRequest(cookieTool(), { color: { R: [1] } })).toThrow(/received an array/);
+    expect(() => buildHttpRequest(cookieTool(), { color: [{ R: 1 }] })).toThrow(/received object/);
+  });
+
+  it('sends no cookie for an empty array or object', () => {
+    expect(buildHttpRequest(cookieTool(), { color: [] }).headers['Cookie']).toBeUndefined();
+    expect(buildHttpRequest(cookieTool(), { color: {} }).headers['Cookie']).toBeUndefined();
+  });
+
+  it('folds style: cookie pairs together with other cookie parameters and credentials, in mapper order', () => {
+    const tool = fooTool([
+      { inputKey: 'session', type: 'cookie', key: 'session', security: { scheme: 's', type: 'apiKey', apiKeyIn: 'cookie' } },
+      { inputKey: 'color', type: 'cookie', key: 'color', style: 'cookie' },
+      { inputKey: 'theme', type: 'cookie', key: 'theme' },
+    ]);
+    const built = buildHttpRequest(tool, { session: 'tok', color: ['blue', 'black'], theme: 'dark' });
+
+    expect(built.headers['Cookie']).toBe('session=tok; color=blue; color=black; theme=dark');
+    expect(built.cookies).toEqual({ session: 'tok', color: 'blue', theme: 'dark' });
+  });
+
+  it('serializes a large exploded array without spreading it into a call', () => {
+    const many = Array.from({ length: 100_000 }, (_, i) => `v${i}`);
+    const built = buildHttpRequest(cookieTool(), { color: many });
+
+    expect(built.headers['Cookie'].split('; ')).toHaveLength(100_000);
+    expect(built.headers['Cookie'].endsWith('color=v99999')).toBe(true);
+  });
+});
+
+describe('cookie parameters without style: cookie keep their output', () => {
+  // The default style for `in: cookie` is `form`. OpenAPI 3.2.1 calls
+  // `explode: false` invalid with cookies, and a comma-joined array is what
+  // form + explode false produces; this builder has always comma-joined
+  // arrays, whatever style/explode say, and keeps doing so.
+  it.each([
+    [undefined, undefined],
+    ['form', undefined],
+    ['form', true],
+    ['form', false],
+    [undefined, false],
+  ])('style %p, explode %p: an array is comma-joined, a primitive sent as is', (style, explode) => {
+    const tool = fooTool([
+      { inputKey: 'c', type: 'cookie', key: 'c', ...(style && { style }), ...(explode !== undefined && { explode }) },
+    ]);
+
+    expect(buildHttpRequest(tool, { c: ['a', 'b'] }).headers['Cookie']).toBe('c=a,b');
+    expect(buildHttpRequest(tool, { c: 7 }).headers['Cookie']).toBe('c=7');
+    expect(() => buildHttpRequest(tool, { c: { R: 1 } })).toThrow(/must serialize to a primitive; received object/);
+  });
+});
+
+describe('parameters defined with content (OpenAPI "Fixed Fields for use with content")', () => {
+  const contentTool = (type: 'path' | 'query' | 'header' | 'cookie', contentType: unknown, key = 'p') =>
+    makeTool([{ inputKey: 'p', type, key, required: true, serialization: { contentType } as any }], {
+      path: type === 'path' ? `/t/{${key}}` : '/t',
+      method: 'get',
+      servers: [{ url: 'https://example.com' }],
+    });
+
+  describe('in the query', () => {
+    it('sends the percent-encoded JSON text (the specification `coordinates` example)', () => {
+      // in: query, name: coordinates, content: application/json
+      //   dataValue: { lat: 40.6, long: -73.9 }
+      //   serializedValue: coordinates=%7B%22lat%22%3A40.6%2C%22long%22%3A-73.9%7D
+      const built = buildHttpRequest(contentTool('query', 'application/json', 'coordinates'), {
+        p: { lat: 40.6, long: -73.9 },
+      });
+
+      expect(built.url).toBe('https://example.com/t?coordinates=%7B%22lat%22%3A40.6%2C%22long%22%3A-73.9%7D');
+      expect(built.query).toEqual({ coordinates: ['{"lat":40.6,"long":-73.9}'] });
+      expect(built.queryString).toBeUndefined();
+    });
+
+    it.each(['application/json', 'application/vnd.api+json', 'Application/JSON; charset=utf-8', ' application/json '])(
+      'treats %j as JSON',
+      (contentType) => {
+        expect(buildHttpRequest(contentTool('query', contentType), { p: 'x' }).url).toBe('https://example.com/t?p=%22x%22');
+      },
+    );
+
+    it('sends JSON for every JSON value: arrays, numbers, booleans, strings', () => {
+      const call = (p: unknown) => buildHttpRequest(contentTool('query', 'application/json'), { p }).query['p'];
+
+      expect(call([1, 'a', null])).toEqual(['[1,"a",null]']);
+      expect(call(0)).toEqual(['0']);
+      expect(call(false)).toEqual(['false']);
+      expect(call('')).toEqual(['""']);
+    });
+
+    it('sends another media type as the value itself, percent-encoded', () => {
+      const call = (p: unknown) => buildHttpRequest(contentTool('query', 'text/plain'), { p }).url;
+
+      expect(call('a b&c=d/é')).toBe('https://example.com/t?p=a%20b%26c%3Dd%2F%C3%A9');
+      expect(call(42)).toBe('https://example.com/t?p=42');
+      expect(call(true)).toBe('https://example.com/t?p=true');
+      expect(call(10n)).toBe('https://example.com/t?p=10');
+    });
+
+    it.each([
+      ['an object', { a: 1 }],
+      ['an array', ['a']],
+      ['a function', () => 1],
+      ['a symbol', Symbol('s')],
+    ])('refuses %s for a media type that is not JSON or a form', (label, p) => {
+      const error = buildFailure(() => buildHttpRequest(contentTool('query', 'text/plain'), { p }));
+
+      expect(error.message).toBe(
+        `query parameter 'p' is sent as text/plain, which needs a string or another primitive; received ${label}`,
+      );
+      expect(error.context).toEqual({ param: 'p', location: 'query', contentType: 'text/plain' });
+    });
+
+    it('encodes a form-urlencoded value once as a form and again as one query value', () => {
+      // The form string's own `&` and `=` must not split the outer query
+      const built = buildHttpRequest(contentTool('query', 'application/x-www-form-urlencoded'), {
+        p: { a: '1', b: 'x y+z', tags: ['t1', 't2'] },
+      });
+
+      expect(built.query['p']).toEqual(['a=1&b=x+y%2Bz&tags=t1&tags=t2']);
+      expect(built.url).toBe('https://example.com/t?p=a%3D1%26b%3Dx%2By%252Bz%26tags%3Dt1%26tags%3Dt2');
+      expect(new URL(built.url).searchParams.get('p')).toBe('a=1&b=x+y%2Bz&tags=t1&tags=t2');
+    });
+
+    it('refuses a form-urlencoded value that is not an object', () => {
+      const error = buildFailure(() =>
+        buildHttpRequest(contentTool('query', 'application/x-www-form-urlencoded'), { p: 'a=1' }),
+      );
+
+      expect(error.message).toBe(
+        `query parameter 'p' is sent as application/x-www-form-urlencoded, which needs an object; received "a=1"`,
+      );
+    });
+
+    it('ignores style, explode and allowReserved, which do not apply to content', () => {
+      const tool = makeTool(
+        [
+          {
+            inputKey: 'p',
+            type: 'query',
+            key: 'p',
+            style: 'deepObject',
+            explode: true,
+            allowReserved: true,
+            serialization: { contentType: 'application/json' },
+          },
+        ],
+        { path: '/t' },
+      );
+
+      expect(buildHttpRequest(tool, { p: { a: '/' } }).url).toBe('https://api.example.com/t?p=%7B%22a%22%3A%22%2F%22%7D');
+    });
+
+    it('treats null like an absent value, as for every non-body parameter', () => {
+      const tool = contentTool('query', 'application/json');
+
+      expect(() => buildHttpRequest(tool, { p: null })).toThrow(/Required query parameter 'p'/);
+    });
+  });
+
+  describe('in the path', () => {
+    it('percent-encodes the serialized value', () => {
+      expect(buildHttpRequest(contentTool('path', 'application/json'), { p: { a: '1/2' } }).url).toBe(
+        'https://example.com/t/%7B%22a%22%3A%221%2F2%22%7D',
+      );
+      expect(buildHttpRequest(contentTool('path', 'text/plain'), { p: '../x y' }).url).toBe(
+        'https://example.com/t/..%2Fx%20y',
+      );
+      expect(buildHttpRequest(contentTool('path', 'application/x-www-form-urlencoded'), { p: { a: 'b c' } }).url).toBe(
+        'https://example.com/t/a%3Db%2Bc',
+      );
+    });
+
+    it('takes a replacement pattern in a path key or value literally', () => {
+      const tool = makeTool([{ inputKey: 'p', type: 'path', key: 'a$&b', style: 'matrix', required: true }], {
+        path: '/t/{a$&b}',
+      });
+
+      expect(buildHttpRequest(tool, { p: 'v' }).url).toBe('https://api.example.com/t/;a$&b=v');
+    });
+  });
+
+  describe('in a header', () => {
+    it('sends the JSON text unchanged, without percent-encoding', () => {
+      const built = buildHttpRequest(contentTool('header', 'application/json', 'X-Filter'), {
+        p: { name: 'Ada Lovelace', tags: ['a', 'b'] },
+      });
+
+      expect(built.headers['X-Filter']).toBe('{"name":"Ada Lovelace","tags":["a","b"]}');
+    });
+
+    it('cannot be used for header injection: JSON escapes CR, LF and NUL inside strings', () => {
+      const built = buildHttpRequest(contentTool('header', 'application/json', 'X-Filter'), {
+        p: { s: 'a\r\nX-Injected: 1\u0000' },
+      });
+
+      expect(built.headers['X-Filter']).toBe('{"s":"a\\r\\nX-Injected: 1\\u0000"}');
+      expect(built.headers['X-Filter']).not.toMatch(/[\r\n\u0000]/);
+    });
+
+    it('rejects CR, LF or NUL in a value sent as is (any other media type)', () => {
+      for (const bad of ['a\r\nX-Injected: 1', 'a\nb', 'a\u0000b']) {
+        expect(() => buildHttpRequest(contentTool('header', 'text/plain', 'X-T'), { p: bad })).toThrow(/header injection/);
+      }
+      expect(buildHttpRequest(contentTool('header', 'text/plain', 'X-T'), { p: 'W/"etag"' }).headers['X-T']).toBe(
+        'W/"etag"',
+      );
+    });
+  });
+
+  describe('in a cookie', () => {
+    it('sends the serialized text unchanged when it is a valid cookie value', () => {
+      expect(buildHttpRequest(contentTool('cookie', 'application/json'), { p: 42 }).headers['Cookie']).toBe('p=42');
+      expect(buildHttpRequest(contentTool('cookie', 'text/plain'), { p: 'abc%2C' }).headers['Cookie']).toBe('p=abc%2C');
+      expect(buildHttpRequest(contentTool('cookie', 'text/plain'), { p: 'v' }).cookies).toEqual({ p: 'v' });
+    });
+
+    it('rejects text the Cookie header cannot carry: JSON strings and objects (quotes), commas', () => {
+      for (const p of [{ a: 1 }, 'abc', [1, 2]]) {
+        expect(() => buildHttpRequest(contentTool('cookie', 'application/json'), { p })).toThrow(/cookie-octet violation/);
+      }
+      expect(() => buildHttpRequest(contentTool('cookie', 'text/plain'), { p: 'a,b' })).toThrow(/cookie-octet violation/);
+      expect(() => buildHttpRequest(contentTool('cookie', 'text/plain', 'bad name'), { p: 'v' })).toThrow(
+        /Invalid cookie name/,
+      );
+    });
+  });
+
+  it.each([
+    ['a number', 42, '42'],
+    ['an empty string', '', '""'],
+    ['parameters only', '; charset=utf-8', '"; charset=utf-8"'],
+    ['null', null, 'null'],
+  ])('rejects a serialization.contentType that is %s', (_label, contentType, shown) => {
+    const error = buildFailure(() => buildHttpRequest(contentTool('query', contentType), { p: 'x' }));
+
+    expect(error.message).toBe(`query parameter 'p' (input key 'p') has an invalid media type ${shown} in serialization.contentType`);
+    expect(error.context).toEqual({ param: 'p', inputKey: 'p', location: 'query' });
+  });
+});
+
+describe('whole-query parameters (OpenAPI 3.2 in: querystring)', () => {
+  const wholeQueryTool = (contentType: string | undefined, extra: ParameterMapper[] = [], required = false) =>
+    fooTool([
+      {
+        inputKey: 'q',
+        type: 'query',
+        key: 'q',
+        wholeQuery: true,
+        required,
+        ...(contentType !== undefined && { serialization: { contentType } }),
+      },
+      ...extra,
+    ]);
+  const apiKey = (type: 'query' | 'header' | 'cookie' = 'query'): ParameterMapper => ({
+    inputKey: 'key',
+    type,
+    key: 'api_key',
+    security: { scheme: 'k', type: 'apiKey', apiKeyName: 'api_key', apiKeyIn: type },
+  });
+
+  describe('application/x-www-form-urlencoded', () => {
+    it('makes the object properties the query pairs (the specification example)', () => {
+      // in: querystring, name: metadata, content: application/x-www-form-urlencoded
+      //   dataValue: { foo: 'a + b', bar: true }   serializedValue: foo=a+%2B+b&bar=true
+      const built = buildHttpRequest(wholeQueryTool('application/x-www-form-urlencoded'), {
+        q: { foo: 'a + b', bar: true },
+      });
+
+      expect(built.url).toBe('https://example.com/foo?foo=a+%2B+b&bar=true');
+      expect(built.query).toEqual({ foo: ['a + b'], bar: ['true'] });
+      expect(built.queryString).toBeUndefined();
+    });
+
+    it('serializes object properties as JSON text (the specification "URL Encoded Form with JSON Values" example)', () => {
+      const built = buildHttpRequest(wholeQueryTool('application/x-www-form-urlencoded'), {
+        q: {
+          id: 'f81d4fae-7dec-11d0-a765-00a0c91e6bf6',
+          address: { streetAddress: '123 Example Dr.', city: 'Somewhere', state: 'CA', zip: '99999+1234' },
+        },
+      });
+
+      expect(built.url).toBe(
+        'https://example.com/foo?id=f81d4fae-7dec-11d0-a765-00a0c91e6bf6&address=%7B%22streetAddress%22%3A%22123+Example+Dr.%22%2C%22city%22%3A%22Somewhere%22%2C%22state%22%3A%22CA%22%2C%22zip%22%3A%2299999%2B1234%22%7D',
+      );
+    });
+
+    // The same serializer as a form body, so both behave identically
+    it.each([
+      ['scalars', { a: 'x y', n: 1, b: false, z: null }],
+      ['arrays (one pair per item)', { tags: ['a', 'b c'], empty: [] }],
+      ['objects (JSON text)', { o: { k: [1, { d: 'e' }] } }],
+      ['undefined properties (left out)', { keep: 1, drop: undefined }],
+      ['reserved characters', { 'k&=': 'v&=+%#/?' }],
+    ])('serializes %s exactly as a form body does', (_label, value) => {
+      const query = buildHttpRequest(wholeQueryTool('application/x-www-form-urlencoded'), { q: value });
+      const body = buildHttpRequest(
+        withUploadPath(
+          makeTool([
+            { inputKey: 'b', type: 'body', key: 'b', wholeBody: true, serialization: { contentType: 'application/x-www-form-urlencoded' } },
+          ]),
+        ),
+        { b: value },
+      );
+
+      expect(query.url).toBe(`https://example.com/foo${body.body ? `?${body.body}` : ''}`);
+    });
+
+    it('fails like a form body on an array item that is not a primitive', () => {
+      expect(() =>
+        buildHttpRequest(wholeQueryTool('application/x-www-form-urlencoded'), { q: { tags: [{ a: 1 }] } }),
+      ).toThrow("query parameter 'tags' must serialize to a primitive; received object");
+    });
+
+    it.each([
+      ['a string', 'a=1&b=2', '"a=1&b=2"'],
+      ['an array', [['a', '1']], 'an array'],
+      ['a number', 3, '3'],
+    ])('refuses %s: a form needs an object', (_label, q, shown) => {
+      const error = buildFailure(() => buildHttpRequest(wholeQueryTool('application/x-www-form-urlencoded'), { q }));
+
+      expect(error.message).toBe(
+        `Whole-query parameter 'q' is sent as application/x-www-form-urlencoded, which needs an object; received ${shown}`,
+      );
+      expect(error.context).toEqual({
+        param: 'q',
+        inputKey: 'q',
+        location: 'query',
+        contentType: 'application/x-www-form-urlencoded',
+      });
+    });
+
+    it('sends nothing for an empty object', () => {
+      const built = buildHttpRequest(wholeQueryTool('application/x-www-form-urlencoded'), { q: {} });
+
+      expect(built.url).toBe('https://example.com/foo');
+      expect(built.query).toEqual({});
+    });
+
+    it('appends a query credential as one more form pair, in mapper order', () => {
+      const after = buildHttpRequest(wholeQueryTool('application/x-www-form-urlencoded', [apiKey()]), {
+        q: { foo: 'a b' },
+        key: 'tok en',
+      });
+      expect(after.url).toBe('https://example.com/foo?foo=a+b&api_key=tok+en');
+      expect(after.query).toEqual({ foo: ['a b'], api_key: ['tok en'] });
+
+      const before = buildHttpRequest(
+        fooTool([apiKey(), { inputKey: 'q', type: 'query', key: 'q', wholeQuery: true, serialization: { contentType: 'application/x-www-form-urlencoded' } }]),
+        { q: { foo: 'a' }, key: 'k' },
+      );
+      expect(before.url).toBe('https://example.com/foo?api_key=k&foo=a');
+    });
+
+    it('ignores the Encoding Objects, as a form body does', () => {
+      const tool = fooTool([
+        {
+          inputKey: 'q',
+          type: 'query',
+          key: 'q',
+          wholeQuery: true,
+          serialization: {
+            contentType: 'application/x-www-form-urlencoded',
+            encoding: { id: { contentType: 'application/json' }, list: { style: 'form', explode: false } },
+          },
+        },
+      ]);
+
+      expect(buildHttpRequest(tool, { q: { id: 'x', list: ['a', 'b'] } }).url).toBe('https://example.com/foo?id=x&list=a&list=b');
+    });
+
+    it('serializes a large object without recursion or argument spreading', () => {
+      const many = Array.from({ length: 200_000 }, (_, i) => i);
+      const built = buildHttpRequest(wholeQueryTool('application/x-www-form-urlencoded'), { q: { n: many } });
+
+      expect(built.query['n']).toHaveLength(200_000);
+      expect(built.url.endsWith('&n=199999')).toBe(true);
+    });
+  });
+
+  describe('JSON', () => {
+    it('makes the percent-encoded JSON text the query string (the specification example)', () => {
+      // in: querystring, name: json, content: application/json
+      //   dataValue: { numbers: [1, 2], flag: null }
+      //   full URL: https://example.com/foo?%7B%22numbers%22%3A%5B1%2C2%5D%2C%22flag%22%3Anull%7D
+      const built = buildHttpRequest(wholeQueryTool('application/json'), { q: { numbers: [1, 2], flag: null } });
+
+      expect(built.url).toBe('https://example.com/foo?%7B%22numbers%22%3A%5B1%2C2%5D%2C%22flag%22%3Anull%7D');
+      expect(built.queryString).toBe('%7B%22numbers%22%3A%5B1%2C2%5D%2C%22flag%22%3Anull%7D');
+      expect(built.query).toEqual({});
+    });
+
+    it('serializes any JSON value, +json media types included', () => {
+      expect(buildHttpRequest(wholeQueryTool('application/json'), { q: 'abc' }).url).toBe('https://example.com/foo?%22abc%22');
+      expect(buildHttpRequest(wholeQueryTool('application/problem+json'), { q: [1] }).url).toBe('https://example.com/foo?%5B1%5D');
+    });
+
+    it('cannot add a query credential to a query string that has no pairs', () => {
+      const error = buildFailure(() =>
+        buildHttpRequest(wholeQueryTool('application/json', [apiKey()]), { q: { a: 1 }, key: 'secret' }),
+      );
+
+      expect(error.message).toBe(
+        "Security parameter 'api_key' cannot be added to the query string: whole-query parameter 'q' is serialized as application/json, which has no name=value pairs to add a credential to; send the credential in a header or a cookie instead",
+      );
+      expect(error.context).toEqual({ param: 'api_key', location: 'query', wholeQuery: 'q' });
+    });
+
+    it('sends the credential when the whole-query value is absent, and other credentials always', () => {
+      expect(buildHttpRequest(wholeQueryTool('application/json', [apiKey()]), { key: 'secret' }).url).toBe(
+        'https://example.com/foo?api_key=secret',
+      );
+      expect(buildHttpRequest(wholeQueryTool('application/json', [apiKey()]), { q: 1 }).url).toBe('https://example.com/foo?1');
+
+      const header = buildHttpRequest(wholeQueryTool('application/json', [apiKey('header')]), { q: 1, key: 'k' });
+      expect(header.url).toBe('https://example.com/foo?1');
+      expect(header.headers['api_key']).toBe('k');
+    });
+
+    it('serializes 1000 levels of nesting and refuses 1001', () => {
+      let ok: unknown = 0;
+      for (let i = 0; i < 1000; i++) ok = [ok];
+      expect(buildHttpRequest(wholeQueryTool('application/json'), { q: ok }).queryString).toBe(
+        `${'%5B'.repeat(1000)}0${'%5D'.repeat(1000)}`,
+      );
+
+      const error = buildFailure(() => buildHttpRequest(wholeQueryTool('application/json'), { q: [ok] }));
+      expect(error.message).toBe("query parameter 'q' cannot be serialized as JSON: it nests deeper than 1000 levels");
+      expect(error.context).toEqual({ param: 'q', location: 'query' });
+    });
+
+    it('refuses a value nested far deeper than the stack allows without overflowing', () => {
+      let deep: Record<string, unknown> = {};
+      for (let i = 0; i < 200_000; i++) deep = { d: deep };
+
+      expect(() => buildHttpRequest(wholeQueryTool('application/json'), { q: deep })).toThrow(
+        /cannot be serialized as JSON: it nests deeper than 1000 levels/,
+      );
+    });
+
+    it('refuses a cyclic value', () => {
+      const cyclic: Record<string, unknown> = { a: 1 };
+      cyclic['self'] = { back: [cyclic] };
+
+      expect(() => buildHttpRequest(wholeQueryTool('application/json'), { q: cyclic })).toThrow(
+        "query parameter 'q' cannot be serialized as JSON: it contains itself (a cycle)",
+      );
+      const loop: unknown[] = [];
+      loop.push(loop);
+      expect(() => buildHttpRequest(wholeQueryTool('application/json'), { q: loop })).toThrow(/a cycle/);
+      // inside a form value too
+      expect(() =>
+        buildHttpRequest(wholeQueryTool('application/x-www-form-urlencoded'), { q: { inner: cyclic } }),
+      ).toThrow("query parameter 'inner' cannot be serialized as JSON: it contains itself (a cycle)");
+    });
+
+    it('serializes an object shared (not cyclic) at several places, each time', () => {
+      const shared = { s: 1 };
+      const built = buildHttpRequest(wholeQueryTool('application/json'), { q: { a: shared, b: [shared, shared] } });
+
+      expect(decodeURIComponent(built.queryString!)).toBe('{"a":{"s":1},"b":[{"s":1},{"s":1}]}');
+    });
+
+    it('counts the depth of a shared object at its deepest position', () => {
+      // `chain` is 600 levels deep: reached first at depth 2, then under 500 wrappers
+      let chain: unknown = 0;
+      for (let i = 0; i < 600; i++) chain = [chain];
+      let wrapped: unknown = chain;
+      for (let i = 0; i < 500; i++) wrapped = [wrapped];
+
+      expect(() => buildHttpRequest(wholeQueryTool('application/json'), { q: [chain, wrapped] })).toThrow(
+        /nests deeper than 1000 levels/,
+      );
+      expect(buildHttpRequest(wholeQueryTool('application/json'), { q: [chain, chain] }).queryString).toBeDefined();
+    });
+
+    it('refuses a value with exponentially many paths at once, instead of letting JSON.stringify walk them all', () => {
+      // 2^40 paths through 40 shared objects. Every property read is counted,
+      // and a read past the budget throws: whatever walks the value one path
+      // at a time (JSON.stringify without the guard) fails fast with "walked
+      // too far" instead of running for hours. The guard walks each object
+      // once, so it needs two reads per object.
+      let reads = 0;
+      const counted = (child: unknown) => ({
+        get a() {
+          if (++reads > 10_000) throw new Error('walked too far');
+          return child;
+        },
+        get b() {
+          if (++reads > 10_000) throw new Error('walked too far');
+          return child;
+        },
+      });
+      let node: unknown = {};
+      for (let i = 0; i < 40; i++) node = counted(node);
+
+      expect(() => buildHttpRequest(wholeQueryTool('application/json'), { q: node })).toThrow(
+        "query parameter 'q' cannot be serialized as JSON: its JSON text would be longer than 536870888 characters",
+      );
+      expect(reads).toBeLessThanOrEqual(80);
+    });
+
+    it('bounds the JSON text length wherever it grows: a value, a shared object, a finished one', () => {
+      // one 600,000-character string, referenced many times
+      const s = 'x'.repeat(600_000);
+      const half = () => Array(500).fill(s); // about 3e8 characters: fits on its own
+      const call = (q: unknown) => () => buildHttpRequest(wholeQueryTool('application/json'), { q });
+
+      expect(call(Array(1000).fill(s))).toThrow(/its JSON text would be longer than 536870888 characters/);
+      const shared = half();
+      expect(call([shared, shared])).toThrow(/its JSON text would be longer than 536870888 characters/);
+      expect(call([half(), half()])).toThrow(/its JSON text would be longer than 536870888 characters/);
+      expect(buildHttpRequest(wholeQueryTool('application/json'), { q: Array(10).fill(s) }).queryString).toHaveLength(
+        10 * 600_000 + 10 * 6 + 9 * 3 + 6,
+      );
+    });
+
+    it('leaves out the object members JSON leaves out, and writes null for them in arrays', () => {
+      const built = buildHttpRequest(wholeQueryTool('application/json'), {
+        q: { u: undefined, f: () => 1, s: Symbol('s'), keep: 1, list: [undefined, () => 1] },
+      });
+
+      expect(decodeURIComponent(built.queryString!)).toBe('{"keep":1,"list":[null,null]}');
+    });
+
+    it('turns what JSON.stringify refuses into a RequestBuildError', () => {
+      expect(() => buildHttpRequest(wholeQueryTool('application/json'), { q: { n: 1n } })).toThrow(
+        "query parameter 'q' cannot be serialized as JSON: Do not know how to serialize a BigInt",
+      );
+      const multiLine = { toJSON: () => { throw new Error('first line\nsecond line'); } };
+      expect(() => buildHttpRequest(wholeQueryTool('application/json'), { q: multiLine })).toThrow(
+        /^query parameter 'q' cannot be serialized as JSON: first line$/,
+      );
+      const thrower = { toJSON: () => { throw 'plain'; } };
+      expect(() => buildHttpRequest(wholeQueryTool('application/json'), { q: thrower })).toThrow(
+        `query parameter 'q' cannot be serialized as JSON: "plain"`,
+      );
+      expect(() => buildHttpRequest(wholeQueryTool('application/json'), { q: () => 1 })).toThrow(
+        "query parameter 'q' has no JSON representation; received a function",
+      );
+    });
+
+    it('serializes a large array', () => {
+      const many = Array.from({ length: 1_000_000 }, () => 7);
+      const built = buildHttpRequest(wholeQueryTool('application/json'), { q: many });
+
+      expect(built.queryString).toBe(`%5B${Array(1_000_000).fill('7').join('%2C')}%5D`);
+    });
+  });
+
+  describe('other media types', () => {
+    it('percent-encodes the value as the query string (the specification JSONPath example)', () => {
+      // in: querystring, name: selector, content: application/jsonpath, example: $.a.b[1:1]
+      //   full URL: https://example.com/foo?%24.a.b%5B1%3A1%5D
+      const built = buildHttpRequest(wholeQueryTool('application/jsonpath'), { q: '$.a.b[1:1]' });
+
+      expect(built.url).toBe('https://example.com/foo?%24.a.b%5B1%3A1%5D');
+      expect(built.queryString).toBe('%24.a.b%5B1%3A1%5D');
+      expect(built.query).toEqual({});
+    });
+
+    it('percent-encodes everything in a text/plain value, delimiters included', () => {
+      // "Extending Support for Querystring Formats": a format defined outside OpenAPI
+      expect(buildHttpRequest(wholeQueryTool('text/plain'), { q: 'a[0]=1&b=x y' }).url).toBe(
+        'https://example.com/foo?a%5B0%5D%3D1%26b%3Dx%20y',
+      );
+      expect(buildHttpRequest(wholeQueryTool('text/plain'), { q: 'a\r\n\u0000' }).queryString).toBe('a%0D%0A%00');
+    });
+
+    it('gives an empty string as an empty queryString and a URL without ?', () => {
+      const built = buildHttpRequest(wholeQueryTool('text/plain'), { q: '' });
+
+      expect(built.url).toBe('https://example.com/foo');
+      expect(built.queryString).toBe('');
+    });
+
+    it('needs a primitive', () => {
+      expect(() => buildHttpRequest(wholeQueryTool('text/plain'), { q: { a: 1 } })).toThrow(
+        "query parameter 'q' is sent as text/plain, which needs a string or another primitive; received an object",
+      );
+    });
+
+    it('refuses a query credential', () => {
+      expect(() => buildHttpRequest(wholeQueryTool('text/plain', [apiKey()]), { q: 'x', key: 'k' })).toThrow(
+        /cannot be added to the query string: whole-query parameter 'q' is serialized as text\/plain/,
+      );
+    });
+  });
+
+  describe('mapper rules', () => {
+    it.each([{ q: 'x' }, {}])('needs a media type, whatever the input holds (%p)', (input) => {
+      const error = buildFailure(() => buildHttpRequest(wholeQueryTool(undefined), input));
+
+      expect(error.message).toBe(
+        "Whole-query parameter 'q' (input key 'q') needs serialization.contentType: the media type its value is serialized in",
+      );
+      expect(error.context).toEqual({ param: 'q', inputKey: 'q', location: 'query' });
+      expect(() => buildHttpRequest(wholeQueryTool(42 as any), input)).toThrow(
+        "query parameter 'q' (input key 'q') has an invalid media type 42 in serialization.contentType",
+      );
+    });
+
+    it('is optional unless required', () => {
+      expect(buildHttpRequest(wholeQueryTool('application/json'), {}).url).toBe('https://example.com/foo');
+      expect(() => buildHttpRequest(wholeQueryTool('application/json', [], true), {})).toThrow(
+        "Required query parameter 'q' (input key 'q') is missing",
+      );
+    });
+
+    it('cannot be combined with another query parameter, whatever the input holds', () => {
+      const other: ParameterMapper = { inputKey: 'limit', type: 'query', key: 'limit' };
+      for (const mapper of [
+        [{ inputKey: 'q', type: 'query', key: 'q', wholeQuery: true, serialization: { contentType: 'text/plain' } }, other],
+        [other, { inputKey: 'q', type: 'query', key: 'q', wholeQuery: true, serialization: { contentType: 'text/plain' } }],
+      ] as ParameterMapper[][]) {
+        for (const input of [{}, { q: 'x', limit: 1 }]) {
+          const error = buildFailure(() => buildHttpRequest(fooTool(mapper), input));
+
+          expect(error.message).toBe(
+            "Whole-query parameter 'q' (input key 'q') is the entire query string, so it cannot be combined with the query parameter 'limit' (input key 'limit')",
+          );
+          expect(error.context).toEqual({ param: 'q', inputKey: 'q', location: 'query', conflictsWith: 'limit' });
+        }
+      }
+      // a content query parameter counts too, and only the first one is named
+      const content: ParameterMapper = { inputKey: 'c', type: 'query', key: 'c', serialization: { contentType: 'application/json' } };
+      expect(() => buildHttpRequest(wholeQueryTool('text/plain', [content, other]), {})).toThrow(
+        /cannot be combined with the query parameter 'c'/,
+      );
+    });
+
+    it('allows only one whole-query parameter', () => {
+      const tool = fooTool([
+        { inputKey: 'a', type: 'query', key: 'a', wholeQuery: true, serialization: { contentType: 'text/plain' } },
+        { inputKey: 'b', type: 'query', key: 'b', wholeQuery: true, serialization: { contentType: 'text/plain' } },
+      ]);
+      const error = buildFailure(() => buildHttpRequest(tool, {}));
+
+      expect(error.message).toBe("A tool has at most one whole-query parameter; found 'a' and 'b'");
+      expect(error.context).toEqual({ param: 'b', inputKey: 'b', location: 'query' });
+    });
+
+    it.each([
+      ['header', undefined],
+      ['body', undefined],
+      ['cookie', undefined],
+      ['query', { scheme: 'k', type: 'apiKey' }],
+    ])('is only valid on a non-security query entry (%s, security %p)', (type, security) => {
+      const tool = fooTool([
+        { inputKey: 'w', type: type as any, key: 'w', wholeQuery: true, security: security as any, serialization: { contentType: 'text/plain' } },
+      ]);
+      const error = buildFailure(() => buildHttpRequest(tool, { w: 'x' }));
+
+      expect(error.message).toBe(
+        "Mapper entry 'w' (input key 'w') is marked wholeQuery, which only a non-security query parameter can be",
+      );
+      expect(error.context).toEqual({ param: 'w', inputKey: 'w', location: type });
+    });
+
+    it('may sit next to path, header, cookie and body parameters', () => {
+      const tool = makeTool(
+        [
+          { inputKey: 'id', type: 'path', key: 'id', required: true },
+          { inputKey: 'q', type: 'query', key: 'q', wholeQuery: true, serialization: { contentType: 'application/json' } },
+          { inputKey: 'h', type: 'header', key: 'X-H' },
+          { inputKey: 'c', type: 'cookie', key: 'c' },
+          { inputKey: 'b', type: 'body', key: 'b' },
+        ],
+        { method: 'query' },
+      );
+      const built = buildHttpRequest(tool, { id: '1', q: { a: 1 }, h: 'h', c: 'c', b: 2 });
+
+      expect(built.method).toBe('QUERY');
+      expect(built.url).toBe('https://api.example.com/things/1?%7B%22a%22%3A1%7D');
+      expect(built.headers).toEqual({ 'X-H': 'h', Cookie: 'c=c', 'content-type': 'application/json' });
+      expect(built.body).toBe('{"b":2}');
+    });
+  });
+});
+
+describe('own-property reads and hostile names', () => {
+  const NAMES = ['constructor', '__proto__', 'hasOwnProperty', 'toString', 'valueOf'];
+
+  it.each(NAMES)('does not read an inherited %s as an input value', (name) => {
+    const tool = makeTool(
+      [
+        { inputKey: name, type: 'header', key: 'X-H' },
+        { inputKey: `${name}_q`, type: 'query', key: name },
+        { inputKey: name, type: 'cookie', key: 'c' },
+        { inputKey: name, type: 'body', key: 'b' },
+      ],
+      { path: '/t' },
+    );
+    const built = buildHttpRequest(tool, {});
+
+    expect(built.url).toBe('https://api.example.com/t');
+    expect(built.headers).toEqual({});
+    expect(built.cookies).toEqual({});
+    expect(built.body).toBeUndefined();
+    expect(() => buildHttpRequest(makeTool([{ inputKey: name, type: 'path', key: 'id', required: true }]), {})).toThrow(
+      /Required path parameter 'id'/,
+    );
+  });
+
+  it.each(NAMES)('sends a parameter named %s in every location', (name) => {
+    const tool = makeTool(
+      [
+        { inputKey: 'h', type: 'header', key: name },
+        { inputKey: 'q', type: 'query', key: name },
+        { inputKey: 'c', type: 'cookie', key: name },
+        { inputKey: 'b', type: 'body', key: name },
+      ],
+      { path: '/t' },
+    );
+    const input = JSON.parse('{"h":"hv","q":"qv","c":"cv","b":"bv"}');
+    const built = buildHttpRequest(tool, input);
+
+    expect(built.url).toBe(`https://api.example.com/t?${name}=qv`);
+    expect(Object.getOwnPropertyDescriptor(built.query, name)?.value).toEqual(['qv']);
+    expect(Object.getOwnPropertyDescriptor(built.headers, name)?.value).toBe('hv');
+    expect(Object.getOwnPropertyDescriptor(built.cookies, name)?.value).toBe('cv');
+    expect(built.headers['Cookie']).toBe(`${name}=cv`);
+    expect(built.body).toBe(`{"${name}":"bv"}`);
+    expect(Object.keys(built.rawBody as object)).toEqual([name]);
+  });
+
+  it.each(NAMES)('reads an own input key %s, as JSON.parse creates it', (name) => {
+    const tool = makeTool([{ inputKey: name, type: 'query', key: 'q', required: true }], { path: '/t' });
+
+    expect(buildHttpRequest(tool, JSON.parse(`{"${name}":"v"}`)).url).toBe('https://api.example.com/t?q=v');
+  });
+
+  it('returns ordinary objects and pollutes no prototype', () => {
+    const tool = makeTool(
+      [
+        { inputKey: 'h', type: 'header', key: '__proto__' },
+        { inputKey: 'q', type: 'query', key: '__proto__' },
+        { inputKey: 'c', type: 'cookie', key: '__proto__' },
+        { inputKey: 'b', type: 'body', key: '__proto__' },
+        { inputKey: 'o', type: 'query', key: 'o' },
+      ],
+      { path: '/t' },
+    );
+    const built = buildHttpRequest(tool, JSON.parse('{"h":"1","q":"2","c":"3","b":{"polluted":true},"o":{"constructor":"4"}}'));
+
+    for (const record of [built.headers, built.query, built.cookies, built.rawBody]) {
+      expect(Object.getPrototypeOf(record)).toBe(Object.prototype);
+      expect(Object.keys(record as object)).toContain('__proto__');
+    }
+    expect(built.query).toEqual(JSON.parse('{"__proto__":["2"],"constructor":["4"]}'));
+    // an exploded object cannot add to (or stand in for) the `__proto__` query parameter
+    expect(() => buildHttpRequest(tool, JSON.parse('{"o":{"__proto__":"4"}}'))).toThrow(
+      "names the query parameter '__proto__', which this tool reserves for the query parameter '__proto__' (input key 'q')",
+    );
+    expect(built.body).toBe('{"__proto__":{"polluted":true}}');
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+    expect((built.rawBody as Record<string, unknown>)['polluted']).toBeUndefined();
+  });
+
+  it('serializes own __proto__ keys inside values', () => {
+    const value = JSON.parse('{"__proto__":"x","constructor":"y"}');
+    const deep = makeTool([{ inputKey: 'f', type: 'query', key: 'f', style: 'deepObject' }], { path: '/t' });
+    const whole = fooTool([
+      { inputKey: 'q', type: 'query', key: 'q', wholeQuery: true, serialization: { contentType: 'application/x-www-form-urlencoded' } },
+    ]);
+    const cookie = fooTool([{ inputKey: 'c', type: 'cookie', key: 'c', style: 'cookie' }]);
+
+    expect(buildHttpRequest(deep, { f: value }).url).toBe('https://api.example.com/t?f[__proto__]=x&f[constructor]=y');
+    expect(buildHttpRequest(whole, { q: value }).url).toBe('https://example.com/foo?__proto__=x&constructor=y');
+    expect(buildHttpRequest(cookie, { c: value }).headers['Cookie']).toBe('__proto__=x; constructor=y');
+  });
+
+  it('percent-encodes CR, LF and NUL in the query and the path', () => {
+    const tool = makeTool([
+      { inputKey: 'id', type: 'path', key: 'id', required: true },
+      { inputKey: 'q', type: 'query', key: 'q\r\n' },
+    ]);
+
+    expect(buildHttpRequest(tool, { id: 'a\r\n\u0000', q: 'b\r\n\u0000' }).url).toBe(
+      'https://api.example.com/things/a%0D%0A%00?q%0D%0A=b%0D%0A%00',
+    );
+  });
+
+  it('treats null or undefined input as no values and refuses another non-object', () => {
+    const optional = makeTool([{ inputKey: 'q', type: 'query', key: 'q' }], { path: '/t' });
+
+    expect(buildHttpRequest(optional, null as any).url).toBe('https://api.example.com/t');
+    expect(buildHttpRequest(optional, undefined as any).url).toBe('https://api.example.com/t');
+    expect(() => buildHttpRequest(makeTool([{ inputKey: 'id', type: 'path', key: 'id', required: true }]), null as any)).toThrow(
+      /Required path parameter 'id'/,
+    );
+    for (const input of ['q', 1, true]) {
+      const error = buildFailure(() => buildHttpRequest(optional, input as any));
+      expect(error.message).toMatch(/^Tool input must be an object; received /);
+    }
+  });
+
+  it('serializes a large array in a form query parameter', () => {
+    const many = Array.from({ length: 200_000 }, (_, i) => i);
+    const built = buildHttpRequest(makeTool([{ inputKey: 'q', type: 'query', key: 'q' }], { path: '/t' }), { q: many });
+
+    expect(built.query['q']).toHaveLength(200_000);
+  });
+});
+
+describe('tool shape (hand-made or tampered tools)', () => {
+  it.each([
+    ['null', null],
+    ['a string', 'tool'],
+    ['a tool without metadata', { mapper: [] }],
+    ['a tool whose metadata is a string', { mapper: [], metadata: 'get /x' }],
+  ])('refuses %s', (_label, tool) => {
+    expect(() => buildHttpRequest(tool as any, {})).toThrow('Tool must be an object with a metadata object');
+  });
+
+  it('refuses a path that is not a string', () => {
+    expect(() => buildHttpRequest(makeTool([], { path: 42 as any }), {})).toThrow('Tool path must be a string; received 42');
+  });
+
+  it.each([
+    ['not an array', { 0: { inputKey: 'a', type: 'query', key: 'a' } }, 'Tool mapper must be an array; received an object'],
+    ['an entry that is null', [null], 'Mapper entry 0 must be an object; received null'],
+    ['an entry that is a string', ['query'], 'Mapper entry 0 must be an object; received "query"'],
+    [
+      'a key that is not a string',
+      [{ inputKey: 'a', type: 'query', key: 7 }],
+      'Mapper entry 0 must have a string key and inputKey; received key 7 and inputKey "a"',
+    ],
+    [
+      'an inputKey that is not a string',
+      [{ inputKey: { toString: () => 'a' }, type: 'query', key: 'a' }],
+      'Mapper entry 0 must have a string key and inputKey; received key "a" and inputKey an object',
+    ],
+  ])('refuses a mapper with %s', (_label, mapper, message) => {
+    const tool = { ...makeTool([], { path: '/t' }), mapper: mapper as any };
+
+    expect(() => buildHttpRequest(tool, { a: 'x' })).toThrow(message);
+  });
+
+  it('refuses a server URL or a baseUrl that is not a string', () => {
+    expect(() => buildHttpRequest(makeTool([], { path: '/t', servers: [{ url: 1 } as any] }), {})).toThrow(
+      'Server URL must be a string; received 1',
+    );
+    expect(() => buildHttpRequest(makeTool([], { path: '/t', servers: [{} as any] }), {})).toThrow(
+      'Server URL must be a string; received undefined',
+    );
+    expect(() => buildHttpRequest(makeTool([], { path: '/t' }), {}, { baseUrl: 5 as any })).toThrow(
+      'Base URL must be a string; received 5',
+    );
+  });
+
+  it('refuses a body media type that is not a string, and reads null as the JSON default', () => {
+    const tool = (contentType: unknown) =>
+      makeTool([{ inputKey: 'b', type: 'body', key: 'b', serialization: { contentType } as any }], { path: '/t' });
+
+    expect(() => buildHttpRequest(tool(['application/json']), { b: 1 })).toThrow(
+      "body parameter 'b' (input key 'b') has an invalid media type an array in serialization.contentType",
+    );
+    expect(buildHttpRequest(tool(null), { b: 1 }).body).toBe('{"b":1}');
+  });
+});
+
+describe('names the input chooses cannot take a name the tool reserves', () => {
+  const credential = (type: 'query' | 'cookie' | 'header', key: string): ParameterMapper => ({
+    inputKey: 'cred',
+    type,
+    key,
+    security: { scheme: 'keyScheme', type: 'apiKey', apiKeyName: key, apiKeyIn: type },
+  });
+  const formWhole: ParameterMapper = {
+    inputKey: 'q',
+    type: 'query',
+    key: 'q',
+    wholeQuery: true,
+    serialization: { contentType: 'application/x-www-form-urlencoded' },
+  };
+  const cookieObject: ParameterMapper = { inputKey: 'c', type: 'cookie', key: 'c', style: 'cookie' };
+  // style form, explode true: the defaults
+  const explodedQuery: ParameterMapper = { inputKey: 'o', type: 'query', key: 'o' };
+
+  describe('(a) the property names of a form whole query', () => {
+    const message =
+      "The input of query parameter 'q' (input key 'q') names the query parameter 'api_key', which this tool reserves for the credential of security scheme 'keyScheme'";
+
+    it.each([
+      ['comes after it', [formWhole, credential('query', 'api_key')]],
+      ['comes before it', [credential('query', 'api_key'), formWhole]],
+    ])('refuses a property named like a query credential whose entry %s, supplied or not', (_label, mapper) => {
+      for (const input of [
+        { q: { api_key: 'attacker' }, cred: 'real' },
+        { q: { api_key: 'attacker' } },
+        { q: { foo: 'x', api_key: ['a', 'b'] } },
+      ]) {
+        const error = buildFailure(() => buildHttpRequest(fooTool(mapper), input));
+
+        expect(error.message).toBe(message);
+        expect(error.context).toEqual({ param: 'q', inputKey: 'q', location: 'query', name: 'api_key', reservedBy: 'cred' });
+      }
+    });
+
+    it('compares names exactly: another case or another location is not the credential', () => {
+      const exact = buildHttpRequest(fooTool([formWhole, credential('query', 'api_key')]), {
+        q: { API_KEY: 'x', api_key2: 'y' },
+        cred: 'real',
+      });
+      expect(exact.url).toBe('https://example.com/foo?API_KEY=x&api_key2=y&api_key=real');
+
+      for (const type of ['header', 'cookie'] as const) {
+        const built = buildHttpRequest(fooTool([formWhole, credential(type, 'api_key')]), { q: { api_key: 'x' }, cred: 'real' });
+        expect(built.url).toBe('https://example.com/foo?api_key=x');
+      }
+    });
+
+    it('still appends the real credential after the input pairs', () => {
+      const built = buildHttpRequest(fooTool([formWhole, credential('query', 'api_key')]), { q: { foo: 'a' }, cred: 'real' });
+
+      expect(built.url).toBe('https://example.com/foo?foo=a&api_key=real');
+      expect(built.query).toEqual({ foo: ['a'], api_key: ['real'] });
+    });
+  });
+
+  describe('(b) the property names of an exploded style: cookie object', () => {
+    it.each([
+      ['comes after it', [cookieObject, credential('cookie', 'session')]],
+      ['comes before it', [credential('cookie', 'session'), cookieObject]],
+    ])('refuses a property named like a cookie credential whose entry %s, supplied or not', (_label, mapper) => {
+      for (const input of [{ c: { session: 'attacker' }, cred: 'real' }, { c: { theme: 'dark', session: 'attacker' } }]) {
+        const error = buildFailure(() => buildHttpRequest(fooTool(mapper), input));
+
+        expect(error.message).toBe(
+          "The input of cookie parameter 'c' (input key 'c') names the cookie 'session', which this tool reserves for the credential of security scheme 'keyScheme'",
+        );
+        expect(error.context).toEqual({ param: 'c', inputKey: 'c', location: 'cookie', name: 'session', reservedBy: 'cred' });
+      }
+    });
+
+    it.each([
+      ['given', { theme: 'dark', c: { theme: 'evil' } }],
+      ['absent', { c: { theme: 'evil' } }],
+    ])('refuses a property named like a sibling cookie parameter (sibling value %s)', (_label, input) => {
+      for (const mapper of [
+        [{ inputKey: 'theme', type: 'cookie', key: 'theme' }, cookieObject],
+        [cookieObject, { inputKey: 'theme', type: 'cookie', key: 'theme' }],
+      ] as ParameterMapper[][]) {
+        const error = buildFailure(() => buildHttpRequest(fooTool(mapper), input));
+
+        expect(error.message).toBe(
+          "The input of cookie parameter 'c' (input key 'c') names the cookie 'theme', which this tool reserves for the cookie parameter 'theme' (input key 'theme')",
+        );
+        expect(error.context).toEqual({ param: 'c', inputKey: 'c', location: 'cookie', name: 'theme', reservedBy: 'theme' });
+      }
+    });
+
+    it('refuses two inputs naming the same cookie instead of keeping only one', () => {
+      const tool = fooTool([cookieObject, { inputKey: 'd', type: 'cookie', key: 'd', style: 'cookie' }]);
+      const error = buildFailure(() => buildHttpRequest(tool, { c: { theme: 'a' }, d: { theme: 'b' } }));
+
+      expect(error.message).toBe(
+        "The input of cookie parameter 'd' (input key 'd') names the cookie 'theme', which the input of cookie parameter 'c' (input key 'c') names too",
+      );
+      expect(error.context).toEqual({ param: 'd', inputKey: 'd', location: 'cookie', name: 'theme', reservedBy: 'c' });
+      expect(buildHttpRequest(tool, { c: { theme: 'a' }, d: { size: 'b' } }).headers['Cookie']).toBe('theme=a; size=b');
+    });
+
+    it('allows the parameter own name, and names used by other locations', () => {
+      const tool = fooTool([
+        cookieObject,
+        { inputKey: 'theme', type: 'query', key: 'theme' },
+        { inputKey: 'h', type: 'header', key: 'session' },
+        credential('header', 'X-Key'),
+      ]);
+      const built = buildHttpRequest(tool, { c: { c: 'own', theme: 'evil', session: 's', 'X-Key': 'k' }, theme: 'q' });
+
+      expect(built.headers['Cookie']).toBe('c=own; theme=evil; session=s; X-Key=k');
+      expect(built.url).toBe('https://example.com/foo?theme=q');
+    });
+  });
+
+  describe('(c) the property names of an exploded form object in the query', () => {
+    it.each([
+      ['comes after it', [explodedQuery, credential('query', 'api_key')]],
+      ['comes before it', [credential('query', 'api_key'), explodedQuery]],
+    ])('refuses a property named like a query credential whose entry %s, supplied or not', (_label, mapper) => {
+      for (const input of [{ o: { api_key: 'attacker' }, cred: 'real' }, { o: { page: 1, api_key: 'attacker' } }]) {
+        const error = buildFailure(() => buildHttpRequest(fooTool(mapper), input));
+
+        expect(error.message).toBe(
+          "The input of query parameter 'o' (input key 'o') names the query parameter 'api_key', which this tool reserves for the credential of security scheme 'keyScheme'",
+        );
+        expect(error.context).toEqual({ param: 'o', inputKey: 'o', location: 'query', name: 'api_key', reservedBy: 'cred' });
+      }
+    });
+
+    it.each([
+      ['given', { page: 1, o: { page: 99 } }],
+      ['absent', { o: { page: 99 } }],
+    ])('refuses a property named like a sibling query parameter (sibling value %s)', (_label, input) => {
+      const tool = fooTool([explodedQuery, { inputKey: 'pageNumber', type: 'query', key: 'page' }]);
+      const error = buildFailure(() => buildHttpRequest(tool, input));
+
+      expect(error.message).toBe(
+        "The input of query parameter 'o' (input key 'o') names the query parameter 'page', which this tool reserves for the query parameter 'page' (input key 'pageNumber')",
+      );
+    });
+
+    it('names the first other entry when several share the name, the exploded entry itself excluded', () => {
+      const sharing = fooTool([
+        { ...explodedQuery, key: 'page' },
+        { inputKey: 'pageNumber', type: 'query', key: 'page' },
+        credential('query', 'page'),
+      ]);
+
+      expect(() => buildHttpRequest(sharing, { o: { page: 2 } })).toThrow(
+        "names the query parameter 'page', which this tool reserves for the query parameter 'page' (input key 'pageNumber')",
+      );
+    });
+
+    it('applies to every exploded object, whatever the style', () => {
+      const tool = fooTool([{ ...explodedQuery, style: 'spaceDelimited', explode: true }, credential('query', 'api_key')]);
+
+      expect(() => buildHttpRequest(tool, { o: { api_key: 'x' } })).toThrow(/names the query parameter 'api_key'/);
+    });
+
+    it('leaves alone the names the input does not choose: explode false, deepObject, arrays, the own name', () => {
+      const call = (mapper: Partial<ParameterMapper>, o: unknown) =>
+        buildHttpRequest(fooTool([{ ...explodedQuery, ...mapper }, credential('query', 'api_key')]), { o }).url;
+
+      expect(call({ explode: false }, { api_key: 'x' })).toBe('https://example.com/foo?o=api_key%2Cx');
+      expect(call({ style: 'deepObject' }, { api_key: 'x' })).toBe('https://example.com/foo?o[api_key]=x');
+      expect(call({}, ['api_key'])).toBe('https://example.com/foo?o=api_key');
+      expect(call({}, { o: 1, other: 2 })).toBe('https://example.com/foo?o=1&other=2');
+    });
+  });
+});
+
+describe('null properties of a form are left out, like undefined ones', () => {
+  it('in a form whole query', () => {
+    const tool = fooTool([
+      { inputKey: 'q', type: 'query', key: 'q', wholeQuery: true, serialization: { contentType: 'application/x-www-form-urlencoded' } },
+    ]);
+    const built = buildHttpRequest(tool, { q: { q: 'cats', page: null } });
+
+    expect(built.url).toBe('https://example.com/foo?q=cats');
+    expect(built.query).toEqual({ q: ['cats'] });
+  });
+
+  it('in a form content parameter', () => {
+    const tool = fooTool([{ inputKey: 'p', type: 'query', key: 'p', serialization: { contentType: 'application/x-www-form-urlencoded' } }]);
+
+    expect(buildHttpRequest(tool, { p: { q: 'cats', page: null } }).url).toBe('https://example.com/foo?p=q%3Dcats');
+  });
+
+  it('in a form body: `a=1&z=null` before, `a=1` now; a JSON body keeps null', () => {
+    const flattened = makeTool(
+      [
+        { inputKey: 'a', type: 'body', key: 'a', serialization: { contentType: 'application/x-www-form-urlencoded' } },
+        { inputKey: 'z', type: 'body', key: 'z', serialization: { contentType: 'application/x-www-form-urlencoded' } },
+      ],
+      { path: '/t' },
+    );
+    expect(buildHttpRequest(flattened, { a: 1, z: null }).body).toBe('a=1');
+
+    const whole = makeTool(
+      [{ inputKey: 'b', type: 'body', key: 'b', wholeBody: true, serialization: { contentType: 'application/x-www-form-urlencoded' } }],
+      { path: '/t' },
+    );
+    expect(buildHttpRequest(whole, { b: { a: 1, z: null } }).body).toBe('a=1');
+
+    const json = makeTool([{ inputKey: 'z', type: 'body', key: 'z' }], { path: '/t' });
+    expect(buildHttpRequest(json, { z: null }).body).toBe('{"z":null}');
+  });
+
+  it('still refuses null as an array item', () => {
+    const whole = makeTool(
+      [{ inputKey: 'b', type: 'body', key: 'b', wholeBody: true, serialization: { contentType: 'application/x-www-form-urlencoded' } }],
+      { path: '/t' },
+    );
+
+    expect(() => buildHttpRequest(whole, { b: { tags: [null] } })).toThrow("body parameter 'tags' must serialize to a primitive; received null");
+  });
+});
+
+describe('header values hold only what HTTP allows (RFC 9110 field-value)', () => {
+  const headerTool = (mapper: Partial<ParameterMapper> = {}) =>
+    makeTool([{ inputKey: 'h', type: 'header', key: 'X-H', ...mapper } as ParameterMapper], { path: '/t' });
+
+  it.each([
+    ['VT', '\u000b', '000B'],
+    ['DEL', '\u007f', '007F'],
+    ['another C0 control', '\u0001', '0001'],
+    ['č', 'č', '010D'],
+    ['a CJK character', '中', '4E2D'],
+    ['U+2028', ' ', '2028'],
+    ['an emoji', '😀', 'D83D'],
+    ['a lone surrogate', '\udc00', 'DC00'],
+  ])('refuses %s', (_label, character, code) => {
+    const error = buildFailure(() => buildHttpRequest(headerTool(), { h: `ab${character}` }));
+
+    expect(error.message).toBe(
+      `Header 'X-H' value contains U+${code} at index 2, which a header value cannot hold (only tab, space, visible ASCII and U+0080 to U+00FF)`,
+    );
+    expect(error.context).toEqual({ header: 'X-H' });
+  });
+
+  it('accepts tab, space, visible ASCII and U+0080 to U+00FF', () => {
+    const value = 'a\tb c~!"\u0080éÿ';
+
+    expect(buildHttpRequest(headerTool(), { h: value }).headers['X-H']).toBe(value);
+  });
+
+  it('keeps the injection message for CR, LF and NUL', () => {
+    expect(() => buildHttpRequest(headerTool(), { h: 'a\r\n中' })).toThrow(/possible header injection/);
+  });
+
+  it('applies to credentials and to header parameters sent as text', () => {
+    const secured = headerTool({ security: { scheme: 'k', type: 'apiKey', apiKeyIn: 'header' } });
+    expect(() => buildHttpRequest(secured, { h: 'tök中' })).toThrow(/U\+4E2D at index 3/);
+
+    expect(() => buildHttpRequest(headerTool({ serialization: { contentType: 'text/plain' } }), { h: '中' })).toThrow(
+      /U\+4E2D at index 0/,
+    );
+  });
+
+  it('writes a JSON content header in ASCII, which parses back to the same value', () => {
+    const value = { name: 'Zoë 中 😀', del: '\u007f', ключ: 1 };
+    const built = buildHttpRequest(headerTool({ serialization: { contentType: 'application/json' } }), { h: value });
+
+    expect(built.headers['X-H']).toBe(
+      '{"name":"Zo\\u00eb \\u4e2d \\ud83d\\ude00","del":"\\u007f","\\u043a\\u043b\\u044e\\u0447":1}',
+    );
+    expect(JSON.parse(built.headers['X-H'])).toEqual(value);
+  });
+
+  it('keeps UTF-8 JSON elsewhere: in the query it is percent-encoded', () => {
+    const tool = fooTool([{ inputKey: 'p', type: 'query', key: 'p', serialization: { contentType: 'application/json' } }]);
+
+    expect(buildHttpRequest(tool, { p: 'é' }).url).toBe('https://example.com/foo?p=%22%C3%A9%22');
+  });
+
+  describe('cookie values', () => {
+    const cookie = (mapper: Partial<ParameterMapper>) =>
+      fooTool([{ inputKey: 'c', type: 'cookie', key: 'c', ...mapper } as ParameterMapper]);
+
+    it('without style: cookie: U+0080 to U+00FF still pass, a character above U+00FF is refused', () => {
+      expect(buildHttpRequest(cookie({}), { c: 'é' }).headers['Cookie']).toBe('c=é');
+      expect(() => buildHttpRequest(cookie({}), { c: '中' })).toThrow(/cookie-octet violation/);
+    });
+
+    it('with style: cookie or content: RFC 6265 cookie-octets only', () => {
+      for (const mapper of [{ style: 'cookie' }, { serialization: { contentType: 'text/plain' } }]) {
+        expect(() => buildHttpRequest(cookie(mapper), { c: 'é' })).toThrow(/cookie-octet violation/);
+        expect(buildHttpRequest(cookie(mapper), { c: "!#$%&'()*+-./:<=>?@[]^_`{|}~" }).headers['Cookie']).toBe(
+          "c=!#$%&'()*+-./:<=>?@[]^_`{|}~",
+        );
+      }
+    });
+  });
+});
+
+describe('lone surrogates are refused by every encoder', () => {
+  const message = (location: string, param: string) =>
+    `${location} parameter '${param}' contains a lone surrogate (an unpaired UTF-16 code unit), which has no UTF-8 encoding`;
+
+  it.each(['a\ud800b', 'a\udc00', '\udc00\ud800', '\ud800'])('in a query value or name (%j), which used to throw a URIError', (lone) => {
+    const tool = fooTool([{ inputKey: 'p', type: 'query', key: 'p' }]);
+
+    const value = buildFailure(() => buildHttpRequest(tool, { p: lone }));
+    expect(value.message).toBe(message('query', 'p'));
+    expect(value.context).toEqual({ param: 'p', location: 'query' });
+
+    expect(buildFailure(() => buildHttpRequest(tool, { p: { [lone]: 1 } })).message).toBe(message('query', lone));
+  });
+
+  it('in a path value or object key', () => {
+    const tool = makeTool([{ inputKey: 'id', type: 'path', key: 'id', required: true }]);
+
+    expect(() => buildHttpRequest(tool, { id: '\ud800' })).toThrow(message('path', 'id'));
+    expect(() => buildHttpRequest(tool, { id: { ['\ud800']: 1 } })).toThrow(message('path', 'id'));
+  });
+
+  it('in a whole query, form or not, and in a query credential', () => {
+    const whole = (contentType: string, extra: ParameterMapper[] = []) =>
+      fooTool([{ inputKey: 'q', type: 'query', key: 'q', wholeQuery: true, serialization: { contentType } }, ...extra]);
+
+    expect(() => buildHttpRequest(whole('text/plain'), { q: 'a\ud800' })).toThrow(message('query', 'q'));
+    expect(() => buildHttpRequest(whole('application/x-www-form-urlencoded'), { q: { k: 'a\ud800' } })).toThrow(
+      message('query', 'k'),
+    );
+    expect(() => buildHttpRequest(whole('application/x-www-form-urlencoded'), { q: { ['k\ud800']: 'v' } })).toThrow(
+      message('query', 'k\ud800'),
+    );
+    const credential: ParameterMapper = { inputKey: 'cred', type: 'query', key: 'api_key', security: { scheme: 'k', type: 'apiKey' } };
+    expect(() => buildHttpRequest(whole('application/x-www-form-urlencoded', [credential]), { q: {}, cred: '\ud800' })).toThrow(
+      message('query', 'api_key'),
+    );
+  });
+
+  it('in a form body, which used to send U+FFFD in its place, and in a form content parameter', () => {
+    const body = makeTool(
+      [{ inputKey: 'b', type: 'body', key: 'b', wholeBody: true, serialization: { contentType: 'application/x-www-form-urlencoded' } }],
+      { path: '/t' },
+    );
+    expect(() => buildHttpRequest(body, { b: { k: 'a\ud800' } })).toThrow(message('body', 'k'));
+
+    const content = fooTool([{ inputKey: 'p', type: 'header', key: 'X-P', serialization: { contentType: 'application/x-www-form-urlencoded' } }]);
+    expect(() => buildHttpRequest(content, { p: { k: '\udc00' } })).toThrow(message('header', 'k'));
+  });
+
+  it('accepts a surrogate pair, and JSON keeps a lone surrogate as an escape', () => {
+    const tool = fooTool([{ inputKey: 'p', type: 'query', key: 'p' }]);
+    expect(buildHttpRequest(tool, { p: '😀' }).url).toBe('https://example.com/foo?p=%F0%9F%98%80');
+
+    const json = fooTool([{ inputKey: 'q', type: 'query', key: 'q', wholeQuery: true, serialization: { contentType: 'application/json' } }]);
+    const built = buildHttpRequest(json, { q: '\ud800' });
+    expect(built.queryString).toBe('%22%5Cud800%22');
+    expect(JSON.parse(decodeURIComponent(built.queryString!))).toBe('\ud800');
+  });
+});
+
+/**
+ * One classification of a media type (`classifyMediaType`) serves the input
+ * schema of a `content` parameter without a schema (parameter-resolver spec,
+ * 'one media-type classification ...') and what buildHttpRequest accepts for it
+ * here: JSON text, a form string, or the value itself.
+ */
+describe('one media-type classification for content parameters and whole queries', () => {
+  const JSON_VALUE = { a: 1, b: 'x y' };
+  const FORM_VALUE = { a: '1', b: 'x y' };
+
+  /** The media types of each class, as the tests of both sides name them */
+  const JSON_TYPES = ['application/json', 'application/json; charset=utf-8', 'Application/JSON', 'application/problem+json'];
+  const FORM_TYPES = ['application/x-www-form-urlencoded', 'application/x-www-form-urlencoded; charset=utf-8'];
+  const OTHER_TYPES = ['text/json', 'text/plain', 'application/xml'];
+
+  type Where = 'query' | 'header' | 'path' | 'whole query';
+  const WHERE: Where[] = ['query', 'header', 'path', 'whole query'];
+
+  const toolFor = (where: Where, contentType: unknown) =>
+    where === 'whole query'
+      ? fooTool([{ inputKey: 'p', type: 'query', key: 'p', wholeQuery: true, serialization: { contentType } as any }])
+      : makeTool([{ inputKey: 'p', type: where, key: 'p', required: true, serialization: { contentType } as any }], {
+          path: where === 'path' ? '/t/{p}' : '/t',
+          method: 'get',
+          servers: [{ url: 'https://example.com' }],
+        });
+
+  /** The text the value is sent as, decoded from its location */
+  const sentText = (where: Where, contentType: unknown, value: unknown): string => {
+    const built = buildHttpRequest(toolFor(where, contentType), { p: value });
+    const url = new URL(built.url);
+    switch (where) {
+      case 'query':
+        return built.query['p'][0];
+      case 'header':
+        return built.headers['p'];
+      case 'path':
+        return decodeURIComponent(url.pathname.split('/').pop()!);
+      default:
+        return decodeURIComponent(url.search.slice(1));
+    }
+  };
+
+  const refusal = (where: Where, contentType: unknown, value: unknown): string =>
+    buildFailure(() => buildHttpRequest(toolFor(where, contentType), { p: value })).message;
+
+  describe.each(WHERE)('in %s', (where) => {
+    it.each(JSON_TYPES)('writes any value as JSON text for %j', (contentType) => {
+      expect(sentText(where, contentType, JSON_VALUE)).toBe('{"a":1,"b":"x y"}');
+      expect(sentText(where, contentType, 'x')).toBe('"x"');
+      expect(sentText(where, contentType, [1, null])).toBe('[1,null]');
+      expect(sentText(where, contentType, 7)).toBe('7');
+    });
+
+    it.each(FORM_TYPES)('form-encodes an object for %j and refuses a string', (contentType) => {
+      expect(sentText(where, contentType, FORM_VALUE)).toBe('a=1&b=x+y');
+      expect(refusal(where, contentType, 'a=1')).toContain(
+        'is sent as application/x-www-form-urlencoded, which needs an object; received "a=1"',
+      );
+    });
+
+    it.each(OTHER_TYPES)('sends the value itself for %j and refuses an object', (contentType) => {
+      expect(sentText(where, contentType, 'x y')).toBe('x y');
+      expect(sentText(where, contentType, 7)).toBe('7');
+      expect(refusal(where, contentType, JSON_VALUE)).toContain(
+        `is sent as ${contentType}, which needs a string or another primitive; received an object`,
+      );
+    });
+
+    it.each([
+      ['an empty string', ''],
+      ['a media type that is only parameters', '; charset=utf-8'],
+      ['a number', 42],
+      ['null', null],
+      ['an array', ['application/json']],
+      ['an object', { 'application/json': {} }],
+    ])('refuses %s as the media type', (_label, contentType) => {
+      expect(refusal(where, contentType, 'x')).toContain('has an invalid media type');
+    });
+  });
+
+  describe('generated by the generator from an OpenAPI 3.2 document, a content parameter without a schema', () => {
+    const documentFor = (mediaType: string) => ({
+      openapi: '3.2.0',
+      info: { title: 'Media types', version: '1.0.0' },
+      servers: [{ url: 'https://api.example.com' }],
+      paths: {
+        '/items': {
+          get: {
+            operationId: 'listItems',
+            parameters: [{ name: 'p', in: 'query', content: { [mediaType]: {} } }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+        '/search': {
+          get: {
+            operationId: 'search',
+            parameters: [{ name: 'q', in: 'querystring', content: { [mediaType]: {} } }],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    });
+
+    /** The input property of a generated tool, and the tool */
+    const generate = async (mediaType: string, path: '/items' | '/search', key: 'p' | 'q') => {
+      const generator = await OpenAPIToolGenerator.fromJSON(documentFor(mediaType) as any);
+      const tool = await generator.generateTool(path, 'get');
+      return { tool, property: (tool!.inputSchema.properties as any)[key] };
+    };
+
+    it('JSON: the input is unconstrained and the builder writes any value as JSON text', async () => {
+      for (const mediaType of JSON_TYPES) {
+        const items = await generate(mediaType, '/items', 'p');
+        const search = await generate(mediaType, '/search', 'q');
+
+        expect(items.property.type).toBeUndefined();
+        expect(search.property.type).toBeUndefined();
+        for (const value of [{ a: 1 }, ['x'], 'x', 3, true]) {
+          const text = JSON.stringify(value);
+          expect(buildHttpRequest(items.tool!, { p: value }).query['p']).toEqual([text]);
+          expect(buildHttpRequest(search.tool!, { q: value }).queryString).toBe(encodeURIComponent(text));
+        }
+      }
+    });
+
+    it('form: the input is an object and the builder form-encodes it', async () => {
+      for (const mediaType of FORM_TYPES) {
+        const items = await generate(mediaType, '/items', 'p');
+        const search = await generate(mediaType, '/search', 'q');
+
+        expect(items.property.type).toBe('object');
+        expect(search.property.type).toBe('object');
+        expect(buildHttpRequest(items.tool!, { p: { a: '1', b: 'x y' } }).query['p']).toEqual(['a=1&b=x+y']);
+        const built = buildHttpRequest(search.tool!, { q: { a: '1', b: 'x y' } });
+        expect(built.url).toBe('https://api.example.com/search?a=1&b=x+y');
+        expect(built.query).toEqual({ a: ['1'], b: ['x y'] });
+      }
+    });
+
+    it('other: the input is a string and the builder sends it as written', async () => {
+      for (const mediaType of OTHER_TYPES) {
+        const items = await generate(mediaType, '/items', 'p');
+        const search = await generate(mediaType, '/search', 'q');
+
+        expect(items.property.type).toBe('string');
+        expect(search.property.type).toBe('string');
+        expect(buildHttpRequest(items.tool!, { p: 'x y' }).url).toBe('https://api.example.com/items?p=x%20y');
+        expect(buildHttpRequest(search.tool!, { q: 'x y' }).url).toBe('https://api.example.com/search?x%20y');
+      }
+    });
+  });
+});

@@ -6,11 +6,13 @@
  * (see README.md).
  */
 import type {
+  BuiltHttpRequest,
   DIAGNOSTIC_CODES,
   DiagnosticCode,
   ExampleObject,
   GenerateOptions,
   HTTPMethod,
+  JsonSchema,
   MediaTypeObject,
   OAS30,
   OAS31,
@@ -18,17 +20,24 @@ import type {
   OpenAPIToolGenerator,
   OpenAPIVersion,
   OperationLayout,
+  ParameterLocation,
+  ParameterMapper,
   ParameterObject,
   ReferenceObject,
+  ResponseHints,
   ResponseObject,
+  ResponseStreamInfo,
   SchemaObject,
   SchemaOrBoolean,
+  SerializationInfo,
+  ServerInfo,
   SpecDiagnostic,
   SpecFamily,
   SpecVersionInfo,
   SpecVersionStatus,
   StandardMethod,
   ToolMetadata,
+  buildHttpRequest,
   resolveOperationLayout,
 } from 'mcp-from-openapi';
 
@@ -401,6 +410,20 @@ export type DiagnosticCodes = [
       DiagnosticCode
     >
   >,
+  // parameters (OpenAPI 3.2 `querystring`, `content`) and streamed bodies
+  Expect<
+    Extends<
+      | 'MULTIPLE_QUERYSTRING_PARAMETERS'
+      | 'QUERYSTRING_WITH_QUERY_PARAMETERS'
+      | 'QUERYSTRING_PARAMETER_WITHOUT_CONTENT'
+      | 'INVALID_PARAMETER_CONTENT'
+      | 'DUPLICATE_PARAMETER'
+      | 'UNSUPPORTED_STREAMING_REQUEST_BODY',
+      DiagnosticCode
+    >
+  >,
+  Expect<Equal<(typeof DIAGNOSTIC_CODES)['MULTIPLE_QUERYSTRING_PARAMETERS'], 'MULTIPLE_QUERYSTRING_PARAMETERS'>>,
+  Expect<Equal<(typeof DIAGNOSTIC_CODES)['UNSUPPORTED_STREAMING_REQUEST_BODY'], 'UNSUPPORTED_STREAMING_REQUEST_BODY'>>,
 ];
 
 /** Which operations a version defines: the layout `listOperations` and `getOperation` take. */
@@ -410,4 +433,71 @@ export type OperationLayoutShape = [
   Expect<Equal<OperationLayout['additionalOperations'], boolean>>,
   Expect<Equal<ReturnType<typeof resolveOperationLayout>, OperationLayout>>,
   Expect<Equal<Parameters<typeof resolveOperationLayout>, [version: SpecVersionInfo]>>,
+];
+
+// ---------------------------------------------------------------------------
+// The generated tool: the mapper, the metadata and the built request (see tools.types.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * A mapper entry names an input key, a location and the parameter. `wholeQuery` marks the entry whose value IS
+ * the whole query string (OpenAPI 3.2 `in: querystring`) and holds the literal `true`, never `false`: an entry
+ * either is one or leaves it out. `wholeBody` is the older marker and holds a plain boolean.
+ */
+export type MapperShape = [
+  Expect<Equal<RequiredKeys<ParameterMapper>, 'inputKey' | 'type' | 'key'>>,
+  Expect<Extends<'wholeQuery' | 'wholeBody' | 'serialization', OptionalKeys<ParameterMapper>>>,
+  Expect<Equal<ParameterMapper['wholeQuery'], true | undefined>>,
+  Expect<Equal<ParameterMapper['wholeBody'], boolean | undefined>>,
+  Expect<Equal<ParameterMapper['serialization'], SerializationInfo | undefined>>,
+  // `querystring` is an OpenAPI location, not a mapper one: the whole query string is a `query` entry
+  Expect<Equal<ParameterMapper['type'], ParameterLocation>>,
+  Expect<Equal<ParameterLocation, 'path' | 'query' | 'header' | 'cookie' | 'body'>>,
+  Expect<Not<Extends<'querystring', ParameterLocation>>>,
+];
+
+/**
+ * `serialization` holds nothing required. `contentType` is the media type a body, a parameter defined with
+ * `content` or a whole query string is serialized in.
+ */
+export type SerializationShape = [
+  Expect<Equal<RequiredKeys<SerializationInfo>, never>>,
+  Expect<Equal<OptionalKeys<SerializationInfo>, 'contentType' | 'encoding' | 'binary'>>,
+  Expect<Equal<SerializationInfo['contentType'], string | undefined>>,
+  Expect<Equal<SerializationInfo['binary'], boolean | undefined>>,
+];
+
+/** A streamed response (OpenAPI 3.2 `itemSchema`): the status code, the media type and the schema of each item. */
+export type ResponseStreamShape = [
+  Expect<Equal<RequiredKeys<ResponseStreamInfo>, 'statusCode' | 'contentType' | 'itemSchema'>>,
+  Expect<Equal<OptionalKeys<ResponseStreamInfo>, never>>,
+  Expect<Equal<ResponseStreamInfo['statusCode'], number>>,
+  Expect<Equal<ResponseStreamInfo['contentType'], string>>,
+  Expect<Equal<ResponseStreamInfo['itemSchema'], JsonSchema>>,
+  // present only on a tool whose response streams
+  Expect<Extends<'responseStream' | 'responseHints', OptionalKeys<ToolMetadata>>>,
+  Expect<Equal<ToolMetadata['responseStream'], ResponseStreamInfo | undefined>>,
+  Expect<Equal<ToolMetadata['responseHints'], ResponseHints | undefined>>,
+  Expect<Equal<RequiredKeys<ResponseHints>, never>>,
+  Expect<Equal<ResponseHints['streaming'], boolean | undefined>>,
+];
+
+/** A server's `name` (OpenAPI 3.2) is optional, like its description. */
+export type ServerInfoShape = [
+  Expect<Equal<RequiredKeys<ServerInfo>, 'url'>>,
+  Expect<Equal<OptionalKeys<ServerInfo>, 'name' | 'description' | 'variables'>>,
+  Expect<Equal<ServerInfo['name'], string | undefined>>,
+  Expect<Equal<NonNullable<ToolMetadata['servers']>[number], ServerInfo>>,
+];
+
+/**
+ * The built request always has the URL and the query pairs; `queryString` is there only when the query is a single
+ * serialized value, not name/value pairs, and `url` stays the authoritative form.
+ */
+export type BuiltRequestShape = [
+  Expect<Extends<'url' | 'method' | 'headers' | 'query' | 'cookies', RequiredKeys<BuiltHttpRequest>>>,
+  Expect<Extends<'queryString', OptionalKeys<BuiltHttpRequest>>>,
+  Expect<Equal<BuiltHttpRequest['queryString'], string | undefined>>,
+  Expect<Equal<BuiltHttpRequest['query'], Record<string, string[]>>>,
+  Expect<Equal<ReturnType<typeof buildHttpRequest>, BuiltHttpRequest>>,
 ];

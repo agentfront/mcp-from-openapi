@@ -1,5 +1,11 @@
 import type { OpenAPIDocument, ValidationResult, ValidationErrorDetail, ValidationWarning } from './types';
-import { LEGACY_PATH_KEY_MAX_LENGTH, MAX_DIAGNOSTICS } from './types';
+import { DIAGNOSTIC_CODES, LEGACY_PATH_KEY_MAX_LENGTH, MAX_DIAGNOSTICS, isReferenceObject } from './types';
+import {
+  analyzeParameters,
+  describeContentWithoutSchema,
+  readParameterContent,
+  type ParameterSlot,
+} from './parameter-resolver';
 import {
   LATEST_SPEC_FAMILY,
   SPEC_DIAGNOSTIC_CODES,
@@ -217,6 +223,107 @@ export function skippedOperationDiagnostics(
   return found;
 }
 
+/** `"limit" (in: "query")`: a parameter in a message, its name and location bounded and escaped. */
+function parameterText(parameter: Record<string, unknown>): string {
+  return `${describeValue(parameter['name'])} (in: ${describeValue(parameter['in'])})`;
+}
+
+/**
+ * The `INVALID_PARAMETER_CONTENT` warnings for a parameter's `content`, each
+ * saying what generation does instead; none when it has no `content` or
+ * `content` holds one usable media type:
+ *
+ * - the parameter defines both `schema` and `content`, which OpenAPI
+ *   forbids: `content` is ignored (`schema` is, for `in: querystring`);
+ * - `content` does not hold exactly one media type: of several, one is
+ *   used; an empty one or one that is not a map is ignored. A querystring
+ *   parameter without a media type is not covered: that is
+ *   `QUERYSTRING_PARAMETER_WITHOUT_CONTENT`;
+ * - the media type used is not a Media Type Object (`null`, a string, ...);
+ * - the media type used declares `itemSchema`, which describes the items of
+ *   a stream and is not read for a parameter.
+ *
+ * `pointer` locates the parameter. Shared with the generator, so both report
+ * the same diagnostics. A media type left as a Reference Object is not
+ * reported here: before dereferencing that is normal (the generator reports
+ * one it reads unresolved).
+ */
+export function parameterContentDiagnostics(parameter: unknown, pointer: string): SpecDiagnostic[] {
+  if (!isSpecObject(parameter) || isReferenceObject(parameter)) return [];
+  const content = readParameterContent(parameter);
+  if (content.kind === 'absent') return [];
+  const querystring = parameter['in'] === 'querystring';
+  const schema = parameter['schema'];
+  const found: SpecDiagnostic[] = [];
+  const warn = (problem: string): void => {
+    found.push({
+      severity: 'warning',
+      code: DIAGNOSTIC_CODES.INVALID_PARAMETER_CONTENT,
+      message: `Parameter ${parameterText(parameter)}: ${problem}`,
+      path: pointer,
+    });
+  };
+
+  if (schema !== undefined && schema !== null) {
+    // A parameter with both reads `schema`, but a querystring one reads `content`
+    if (!querystring) {
+      warn('defines both schema and content, but must define only one; content is ignored and schema is used');
+      return found;
+    }
+    if (content.kind === 'media') {
+      warn('defines both schema and content, but must define only one; schema is ignored and content is used');
+    }
+  }
+  if (content.kind !== 'media') {
+    if (!querystring) {
+      const what = content.kind === 'empty' ? 'no media type' : describeValue(content.value);
+      warn(
+        `content must hold exactly one media type, found ${what}; content is ignored and the value is read as a string`,
+      );
+    }
+    return found;
+  }
+
+  const mediaType = describeValue(content.mediaType);
+  if (content.count > 1) {
+    warn(`content must hold exactly one media type, found ${content.count} media types; ${mediaType} is used`);
+  }
+  const media = ownProperty(ownProperty(parameter, 'content'), content.mediaType);
+  if (content.media === undefined) {
+    warn(
+      `the media type ${mediaType} is not a Media Type Object (found ${describeValue(media)}); ` +
+        describeContentWithoutSchema(content.mediaType),
+    );
+  } else if (ownProperty(media, 'itemSchema') !== undefined) {
+    const hasSchema = ownProperty(media, 'schema') !== undefined && ownProperty(media, 'schema') !== null;
+    warn(
+      `the media type ${mediaType} declares itemSchema, which describes the items of a stream and is not read for a ` +
+        `parameter; ${hasSchema ? 'its schema is used' : describeContentWithoutSchema(content.mediaType)}`,
+    );
+  }
+  return found;
+}
+
+/**
+ * The `DUPLICATE_PARAMETER` warning for a parameter dropped because a later
+ * one in its own list (`kept`) has the same `name` and `in`. `listPointer`
+ * locates the list. Shared with the generator.
+ */
+export function duplicateParameterDiagnostic(
+  dropped: ParameterSlot,
+  kept: ParameterSlot,
+  listPointer: string,
+): SpecDiagnostic {
+  return {
+    severity: 'warning',
+    code: DIAGNOSTIC_CODES.DUPLICATE_PARAMETER,
+    message:
+      `Parameter ${parameterText(dropped.parameter as Record<string, unknown>)} appears again at index ${kept.index} ` +
+      `of the same list, but a parameter list must not repeat a name and location; this one is ignored`,
+    path: appendPointer(listPointer, dropped.index),
+  };
+}
+
 /**
  * Validates OpenAPI documents with the rules of the version they declare.
  *
@@ -233,8 +340,12 @@ export function skippedOperationDiagnostics(
  * - `responses` is required in 3.0 only (`NO_RESPONSES`); when present it
  *   must not be empty in any version.
  * - Parameter locations come from the declared version; `querystring` (3.2)
- *   in an older document is a warning. It must use `content`, appear at most
- *   once per operation, and not be combined with `in: query` parameters.
+ *   in an older document is a warning. It must use `content` with a media
+ *   type, appear at most once per operation, and not be combined with
+ *   `in: query` parameters.
+ * - Warnings, as generation copes with them: a parameter's `content` that
+ *   does not hold exactly one media type (`INVALID_PARAMETER_CONTENT`), and
+ *   a parameter list repeating a `name` and `in` (`DUPLICATE_PARAMETER`).
  * - `errors` and `warnings` each keep at most `MAX_DIAGNOSTICS` entries, then
  *   one `DIAGNOSTICS_TRUNCATED` entry.
  *
@@ -397,7 +508,7 @@ export class Validator {
       );
       // A path-level violation is reported once, here, not again for each operation
       const pathLevelQuerystringValid = this.validateQuerystringUse(
-        resolvedPathLevel,
+        effectiveParameters(resolvedPathLevel, []),
         pathLevelPointer,
         `Path ${messageText(path)}`,
         context,
@@ -616,10 +727,19 @@ export class Validator {
 
       if (location === 'querystring') {
         // OpenAPI 3.2: the whole query string is serialized by a media type
-        if (!param['content']) {
+        const content = readParameterContent(param);
+        if (content.kind === 'absent') {
           errors.push({
             message: `Parameter '${name}' in: querystring must define content (a media type and its schema), not schema`,
             path: appendPointer(pointer, i),
+            code: 'QUERYSTRING_PARAMETER_WITHOUT_CONTENT',
+          });
+        } else if (content.kind !== 'media') {
+          errors.push({
+            message:
+              `Parameter '${name}' in: querystring must define content with one media type, found ` +
+              `${content.kind === 'empty' ? 'none' : describeValue(content.value)}`,
+            path: appendPointer(pointer, i, 'content'),
             code: 'QUERYSTRING_PARAMETER_WITHOUT_CONTENT',
           });
         }
@@ -630,18 +750,25 @@ export class Validator {
           code: 'MISSING_PARAMETER_SCHEMA',
         });
       }
+
+      // `content`: one usable media type, and not together with `schema`
+      warnings.push(...parameterContentDiagnostics(param, appendPointer(pointer, i)).map(toFinding));
+    }
+
+    // A list must not repeat a parameter (`name` and `in`)
+    for (const { dropped, kept } of analyzeParameters(parameters, []).duplicates) {
+      warnings.push(toFinding(duplicateParameterDiagnostic(dropped, kept, pointer)));
     }
   }
 }
 
 /**
- * An operation's parameters merged with its path item's: an operation-level
- * parameter replaces the path-level one with the same `name` and `in`
- * (OpenAPI Operation Object `parameters`). Unresolved entries are kept as
- * they are.
+ * An operation's parameters merged with its path item's as generation merges
+ * them (`analyzeParameters`): an operation-level parameter replaces the
+ * path-level one with the same `name` and `in` (OpenAPI Operation Object
+ * `parameters`; a header name in any case), and of a repeated one in a list
+ * the last is kept. Unresolved entries are kept as they are.
  */
 function effectiveParameters(pathLevel: unknown[], operationLevel: unknown[]): unknown[] {
-  const key = (p: Record<string, unknown>): string => boundedKey(p['in'], p['name']);
-  const overriding = new Set(operationLevel.filter(isSpecObject).map(key));
-  return [...pathLevel.filter((p) => !isSpecObject(p) || !overriding.has(key(p))), ...operationLevel];
+  return analyzeParameters(pathLevel, operationLevel).effective.map((slot) => slot.parameter);
 }

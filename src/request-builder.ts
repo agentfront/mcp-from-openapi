@@ -1,6 +1,7 @@
 import type { McpOpenAPITool, ParameterLocation, ParameterMapper } from './types';
 import { RequestBuildError } from './errors';
 import { describeValue, isHttpToken, isRefusedMethod, wireMethod } from './spec';
+import { FORM_URLENCODED, JSON_MEDIA_TYPE, classifyMediaType, mediaTypeEssence } from './media-type';
 
 /**
  * Options for {@link buildHttpRequest}.
@@ -15,9 +16,16 @@ export interface BuildHttpRequestOptions {
 
 /**
  * The composed HTTP request. Pure data — nothing has been sent.
+ *
+ * The records (`headers`, `query`, `cookies`) are ordinary objects whose keys
+ * are all own properties: a parameter named `constructor` or `__proto__` is an
+ * own key like any other, never an inherited member.
  */
 export interface BuiltHttpRequest {
-  /** Fully composed URL: base + expanded path + encoded query string */
+  /**
+   * Fully composed URL: base + expanded path + encoded query string. Always
+   * authoritative: send this, rather than re-encoding `query`.
+   */
   url: string;
 
   /**
@@ -34,10 +42,34 @@ export interface BuiltHttpRequest {
    */
   headers: Record<string, string>;
 
-  /** Query parameters as sent (unencoded values, one array per key) */
+  /**
+   * Query parameters as sent: unencoded values, one array per name.
+   *
+   * A whole-query parameter (`mapper.wholeQuery`, OpenAPI 3.2
+   * `in: querystring`) in `application/x-www-form-urlencoded` contributes its
+   * name/value pairs here like any other query parameter. In any other media
+   * type the whole query string is one serialized value, not name/value
+   * pairs: it is not in this record (which is then empty, as such a tool has
+   * no other query parameter) but in `queryString`.
+   */
   query: Record<string, string[]>;
 
-  /** Cookie parameters (also folded into the `Cookie` header) */
+  /**
+   * The query string exactly as it appears in `url` after the `?`
+   * (percent-encoded), present only when it is not made of name/value pairs:
+   * a whole-query parameter (OpenAPI 3.2 `in: querystring`) serialized in a
+   * media type other than `application/x-www-form-urlencoded`, such as the
+   * JSON text of the value. Absent otherwise. An empty serialized value gives
+   * `''` and a `url` without `?`.
+   */
+  queryString?: string;
+
+  /**
+   * Cookie parameters, one value per cookie name (also folded into the
+   * `Cookie` header). An exploded array with `style: cookie` sends its name
+   * once per item: the `Cookie` header carries every pair and this record
+   * the first value, so the `Cookie` header is the authoritative form.
+   */
   cookies: Record<string, string>;
 
   /** Selected request body content type (also in headers, except multipart) */
@@ -59,10 +91,41 @@ const RESERVED_DECODE: Record<string, string> = {
   '%40': '@', '%24': '$', '%26': '&', '%2B': '+', '%2C': ',', '%3B': ';', '%3D': '=',
 };
 
-function encodeValue(value: string, allowReserved?: boolean): string {
+/** A UTF-16 surrogate without its pair: it has no UTF-8 encoding */
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+/**
+ * Every string this builder percent-encodes or form-encodes must have a
+ * UTF-8 encoding. A lone surrogate has none: `encodeURIComponent` throws a
+ * bare `URIError` on it and `URLSearchParams` silently replaces it with
+ * U+FFFD, so both encoders check here first and refuse it the same way.
+ */
+function assertWellFormed(text: string, param: string, location: string): void {
+  if (LONE_SURROGATE.test(text)) {
+    throw new RequestBuildError(
+      `${location} parameter '${param}' contains a lone surrogate (an unpaired UTF-16 code unit), which has no UTF-8 encoding`,
+      { param, location },
+    );
+  }
+}
+
+/** Percent-encode one URL component (RFC 3986), `allowReserved` keeping reserved characters */
+function percentEncode(value: string, param: string, location: string, allowReserved?: boolean): string {
+  assertWellFormed(value, param, location);
   const encoded = encodeURIComponent(value);
   if (!allowReserved) return encoded;
   return encoded.replace(/%3A|%2F|%3F|%23|%5B|%5D|%40|%24|%26|%2B|%2C|%3B|%3D/gi, (m) => RESERVED_DECODE[m.toUpperCase()]);
+}
+
+/** Form-encode name/value pairs (WHATWG `application/x-www-form-urlencoded`: space as `+`) */
+function formEncode(pairs: ReadonlyArray<readonly [name: string, value: string, ...rest: unknown[]]>, location: string): string {
+  const params = new URLSearchParams();
+  for (const [name, value] of pairs) {
+    assertWellFormed(name, name, location);
+    assertWellFormed(value, name, location);
+    params.append(name, value);
+  }
+  return params.toString();
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -82,6 +145,36 @@ function primitiveString(value: unknown, paramName: string, location: string): s
 }
 
 /**
+ * A record that is safe for any key: no prototype, so `constructor`,
+ * `toString` and `__proto__` are ordinary own keys (assigning `__proto__`
+ * creates a property instead of changing a prototype).
+ */
+function createRecord<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
+/**
+ * Copy a {@link createRecord} record into an ordinary object (the shape
+ * consumers have always received), every key defined as an own data
+ * property, so `__proto__` stays a key. Key order is the source's.
+ */
+function toPlainRecord<T>(source: Record<string, T>): Record<string, T> {
+  const plain: Record<string, T> = {};
+  for (const key of Object.keys(source)) {
+    Object.defineProperty(plain, key, { value: source[key], writable: true, enumerable: true, configurable: true });
+  }
+  return plain;
+}
+
+/**
+ * The input value for `key`, read as an own property: an inherited member
+ * (`toString`, `constructor`) is never a parameter value.
+ */
+function readInput(input: object | undefined, key: string): unknown {
+  return input !== undefined && Object.hasOwn(input, key) ? (input as Record<string, unknown>)[key] : undefined;
+}
+
+/**
  * Serialize a PATH parameter per its style/explode (OpenAPI serialization
  * table). Returns the UNENCODED replacement string; percent-encoding is
  * applied per primitive component here.
@@ -90,7 +183,8 @@ function serializePathValue(mapper: ParameterMapper, value: unknown): string {
   const style = mapper.style ?? 'simple';
   const explode = mapper.explode ?? false;
   const name = mapper.key;
-  const enc = (v: unknown) => encodeValue(primitiveString(v, name, 'path'));
+  const enc = (v: unknown) => percentEncode(primitiveString(v, name, 'path'), name, 'path');
+  const encKey = (k: string) => percentEncode(k, name, 'path');
 
   if (Array.isArray(value)) {
     if (style === 'label') {
@@ -108,18 +202,18 @@ function serializePathValue(mapper: ParameterMapper, value: unknown): string {
     const entries = Object.entries(value);
     if (style === 'label') {
       return explode
-        ? entries.map(([k, v]) => `.${encodeValue(k)}=${enc(v)}`).join('')
-        : `.${entries.map(([k, v]) => `${encodeValue(k)},${enc(v)}`).join(',')}`;
+        ? entries.map(([k, v]) => `.${encKey(k)}=${enc(v)}`).join('')
+        : `.${entries.map(([k, v]) => `${encKey(k)},${enc(v)}`).join(',')}`;
     }
     if (style === 'matrix') {
       return explode
-        ? entries.map(([k, v]) => `;${encodeValue(k)}=${enc(v)}`).join('')
-        : `;${name}=${entries.map(([k, v]) => `${encodeValue(k)},${enc(v)}`).join(',')}`;
+        ? entries.map(([k, v]) => `;${encKey(k)}=${enc(v)}`).join('')
+        : `;${name}=${entries.map(([k, v]) => `${encKey(k)},${enc(v)}`).join(',')}`;
     }
     // simple
     return explode
-      ? entries.map(([k, v]) => `${encodeValue(k)}=${enc(v)}`).join(',')
-      : entries.map(([k, v]) => `${encodeValue(k)},${enc(v)}`).join(',');
+      ? entries.map(([k, v]) => `${encKey(k)}=${enc(v)}`).join(',')
+      : entries.map(([k, v]) => `${encKey(k)},${enc(v)}`).join(',');
   }
 
   const core = enc(value);
@@ -131,8 +225,14 @@ function serializePathValue(mapper: ParameterMapper, value: unknown): string {
 /**
  * Serialize a QUERY parameter per its style/explode into `[key, value]`
  * pairs. Values are raw (unencoded); keys may gain deepObject brackets.
+ * `claimName` sees every pair name the INPUT chooses: the property names of
+ * an exploded object, which replace the parameter's own name on the wire.
  */
-function serializeQueryPairs(mapper: ParameterMapper, value: unknown): Array<[string, string]> {
+function serializeQueryPairs(
+  mapper: ParameterMapper,
+  value: unknown,
+  claimName: (name: string) => void,
+): Array<[string, string]> {
   const style = mapper.style ?? 'form';
   // OpenAPI explode default: true for `form`, false for every other style
   const explode = mapper.explode ?? style === 'form';
@@ -171,7 +271,10 @@ function serializeQueryPairs(mapper: ParameterMapper, value: unknown): Array<[st
     const entries = Object.entries(value).filter(([, v]) => v !== undefined);
     if (explode) {
       // form + explode: the parameter name disappears, each field is a pair
-      return entries.map(([k, v]) => [k, str(v)] as [string, string]);
+      return entries.map(([k, v]) => {
+        claimName(k);
+        return [k, str(v)] as [string, string];
+      });
     }
     return [[name, entries.map(([k, v]) => `${k},${str(v)}`).join(',')]];
   }
@@ -197,6 +300,50 @@ function serializeHeaderValue(mapper: ParameterMapper, value: unknown): string {
   return str(value);
 }
 
+/**
+ * Serialize a cookie parameter with OpenAPI 3.2 `style: cookie` ("Style
+ * Values", "Style Examples"): name/value pairs joined by `; ` in the Cookie
+ * header, values sent as given with no percent-encoding or other escaping.
+ * Returns each cookie name with its values: a primitive is `[name, [v]]`; an
+ * exploded array repeats the name (`color=blue; color=black`); an exploded
+ * object makes each property its own cookie (`R=100; G=200`). An array or
+ * object with `explode: false` is _n/a_ in the table (OpenAPI 3.2.1: the
+ * Cookie header forbids the unencoded commas it would need), so it throws.
+ * `claimName` sees each cookie name the INPUT chooses (an exploded object's
+ * property names).
+ */
+function serializeCookieStyle(
+  mapper: ParameterMapper,
+  value: unknown,
+  claimName: (name: string) => void,
+): Array<[string, string[]]> {
+  const name = mapper.key;
+  const str = (v: unknown) => primitiveString(v, name, 'cookie');
+  if (!Array.isArray(value) && !isPlainObject(value)) {
+    return [[name, [str(value)]]];
+  }
+  if (mapper.explode === false) {
+    throw new RequestBuildError(
+      `Cookie parameter '${name}' has style 'cookie' with explode false, which cannot serialize ${
+        Array.isArray(value) ? 'an array' : 'an object'
+      } (n/a in the OpenAPI style table: it would need commas, which the Cookie header forbids)`,
+      { param: name, location: 'cookie', style: 'cookie' },
+    );
+  }
+  if (Array.isArray(value)) {
+    const values: string[] = [];
+    for (const item of value) values.push(str(item));
+    return values.length > 0 ? [[name, values]] : [];
+  }
+  const groups: Array<[string, string[]]> = [];
+  for (const [k, v] of Object.entries(value)) {
+    if (v === undefined) continue;
+    claimName(k);
+    groups.push([k, [str(v)]]);
+  }
+  return groups;
+}
+
 function assertHeaderSafe(name: string, value: string): void {
   // Header NAMES come from the spec (mapper.key) — untrusted under
   // secureDefaults, so they get the RFC 7230 token check too.
@@ -209,6 +356,19 @@ function assertHeaderSafe(name: string, value: string): void {
       header: name,
     });
   }
+  // RFC 9110 field-value: tab, space, visible ASCII and obs-text (0x80-0xFF).
+  // Anything else (another control, DEL, a character above U+00FF) is
+  // refused by HTTP clients when the request is sent; refuse it here, where
+  // the parameter is known.
+  // eslint-disable-next-line no-control-regex
+  const invalid = /[^\t\x20-\x7e\x80-\xff]/.exec(value);
+  if (invalid) {
+    const codePoint = invalid[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, '0');
+    throw new RequestBuildError(
+      `Header '${name}' value contains U+${codePoint} at index ${invalid.index}, which a header value cannot hold (only tab, space, visible ASCII and U+0080 to U+00FF)`,
+      { header: name },
+    );
+  }
 }
 
 function assertCookieName(name: string): void {
@@ -217,14 +377,25 @@ function assertCookieName(name: string): void {
   }
 }
 
-function assertCookieValue(name: string, value: string): void {
-  // Values are sent VERBATIM (no percent-encoding — '=' etc. are legal
-  // cookie-octets and servers compare raw values), so characters that break
-  // the Cookie header structure must fail loudly: CTLs, whitespace, DQUOTE,
-  // semicolon, backslash. Comma is tolerated although RFC 6265 excludes it —
-  // OpenAPI's own cookie serialization comma-joins arrays.
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f\x7f\s";\\]/.test(value)) {
+/**
+ * Values are sent VERBATIM (no percent-encoding — '=' etc. are legal
+ * cookie-octets and servers compare raw values), so characters that break the
+ * Cookie header structure must fail loudly.
+ *
+ * - `strict` (`style: cookie` and `content` cookies, new in this form): only
+ *   RFC 6265 cookie-octets, `%x21 / %x23-2B / %x2D-3A / %x3C-5B / %x5D-7E`.
+ * - Otherwise (cookie parameters without `style: cookie`, as they have always
+ *   been checked): no CTL, whitespace, DQUOTE, semicolon or backslash, and no
+ *   character above U+00FF, which no header can carry. Comma and the bytes
+ *   0x80-0xFF are tolerated, because arrays have always been comma-joined.
+ */
+function assertCookieValue(name: string, value: string, strict = false): void {
+  if (
+    strict
+      ? !/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*$/.test(value)
+      : // eslint-disable-next-line no-control-regex
+        /[\x00-\x1f\x7f\s";\\]|[^\x00-\xff]/.test(value)
+  ) {
     throw new RequestBuildError(
       `Cookie '${name}' value contains characters that break the Cookie header (RFC 6265 cookie-octet violation)`,
       { cookie: name },
@@ -266,6 +437,11 @@ function formatSecurityValue(mapper: ParameterMapper, value: string): string {
 function resolveServerUrl(tool: McpOpenAPITool): string {
   const server = tool.metadata.servers?.[0];
   if (!server) return '';
+  if (typeof server.url !== 'string') {
+    throw new RequestBuildError(`Server URL must be a string; received ${describeValue(server.url)}`, {
+      baseUrl: server.url,
+    });
+  }
   let url = server.url;
   if (server.variables) {
     for (const [name, variable] of Object.entries(server.variables)) {
@@ -277,7 +453,215 @@ function resolveServerUrl(tool: McpOpenAPITool): string {
   return url;
 }
 
-const JSON_CONTENT = /^application\/(.+\+)?json$/i;
+/**
+ * Deepest nesting {@link jsonText} serializes: the limit `copyJsonValue`
+ * applies to spec values. Far beyond any real parameter, and far below the
+ * depth at which `JSON.stringify` exhausts the stack.
+ */
+const MAX_JSON_DEPTH = 1000;
+
+/**
+ * Longest JSON text {@link jsonText} produces: V8's maximum string length
+ * (`buffer.constants.MAX_STRING_LENGTH` in Node). A longer text cannot exist,
+ * and V8's `JSON.stringify` only reports that after walking the whole value,
+ * which for an object shared at many places (2^40 paths through 40 arrays)
+ * never ends — so {@link assertJsonTree} refuses such a value first.
+ */
+const MAX_JSON_TEXT_LENGTH = 2 ** 29 - 24;
+
+/**
+ * Reject a value `JSON.stringify` would recurse too deep into or never finish,
+ * before calling it: a cycle (an object that contains itself), nesting deeper
+ * than {@link MAX_JSON_DEPTH}, or a text longer than
+ * {@link MAX_JSON_TEXT_LENGTH} (judged by a lower bound of its length).
+ *
+ * Walked with an explicit stack, so the check itself never overflows. An
+ * object reached again through another reference (shared, not cyclic) is not
+ * walked again: its height and length bound are remembered, so the walk is
+ * linear in the distinct objects and their slots.
+ */
+function assertJsonTree(root: unknown, param: string, location: string): void {
+  if (root === null || typeof root !== 'object') return;
+  const fail = (reason: string): never => {
+    throw new RequestBuildError(`${location} parameter '${param}' cannot be serialized as JSON: ${reason}`, {
+      param,
+      location,
+    });
+  };
+  const tooDeep = `it nests deeper than ${MAX_JSON_DEPTH} levels`;
+  const tooLong = `its JSON text would be longer than ${MAX_JSON_TEXT_LENGTH} characters`;
+  const done = new Map<object, { height: number; length: number }>();
+  const onPath = new Set<object>();
+  // `length` is a lower bound of the node's JSON text: brackets, commas,
+  // quoted keys and strings, and at least one character per other value
+  const stack: Array<{
+    node: object;
+    keys: string[] | undefined;
+    slots: number;
+    next: number;
+    members: number;
+    height: number;
+    length: number;
+  }> = [];
+  const enter = (node: object): void => {
+    if (stack.length >= MAX_JSON_DEPTH) fail(tooDeep);
+    onPath.add(node);
+    const keys = Array.isArray(node) ? undefined : Object.keys(node);
+    const slots = keys === undefined ? (node as unknown[]).length : keys.length;
+    stack.push({ node, keys, slots, next: 0, members: 0, height: 1, length: 2 });
+  };
+  enter(root);
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1];
+    if (frame.next < frame.slots) {
+      const index = frame.next++;
+      const key = frame.keys?.[index];
+      const child: unknown = (frame.node as Record<string, unknown>)[key ?? index];
+      if (key !== undefined) {
+        // an object member JSON.stringify leaves out
+        if (child === undefined || typeof child === 'function' || typeof child === 'symbol') continue;
+        frame.length += key.length + 3;
+      }
+      if (frame.members++ > 0) frame.length += 1;
+      if (child === null || typeof child !== 'object') {
+        frame.length += typeof child === 'string' ? child.length + 2 : 1;
+      } else {
+        if (onPath.has(child)) fail('it contains itself (a cycle)');
+        const known = done.get(child);
+        if (known === undefined) {
+          enter(child);
+          continue;
+        }
+        if (stack.length + known.height > MAX_JSON_DEPTH) fail(tooDeep);
+        frame.height = Math.max(frame.height, known.height + 1);
+        frame.length += known.length;
+      }
+      if (frame.length > MAX_JSON_TEXT_LENGTH) fail(tooLong);
+      continue;
+    }
+    stack.pop();
+    onPath.delete(frame.node);
+    done.set(frame.node, { height: frame.height, length: frame.length });
+    if (stack.length > 0) {
+      const parent = stack[stack.length - 1];
+      parent.height = Math.max(parent.height, frame.height + 1);
+      parent.length += frame.length;
+      if (parent.length > MAX_JSON_TEXT_LENGTH) fail(tooLong);
+    }
+  }
+}
+
+/**
+ * The JSON text of a parameter value (minimal whitespace, as `JSON.stringify`
+ * writes it). A cyclic or too deeply nested value, and anything
+ * `JSON.stringify` refuses (a BigInt, a throwing `toJSON`) or cannot represent
+ * (a function), is a {@link RequestBuildError}.
+ */
+function jsonText(value: unknown, param: string, location: string): string {
+  assertJsonTree(value, param, location);
+  let text: string | undefined;
+  try {
+    text = JSON.stringify(value);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message.split('\n', 1)[0] : describeValue(error);
+    throw new RequestBuildError(`${location} parameter '${param}' cannot be serialized as JSON: ${reason}`, {
+      param,
+      location,
+    });
+  }
+  if (text === undefined) {
+    throw new RequestBuildError(
+      `${location} parameter '${param}' has no JSON representation; received ${describeValue(value)}`,
+      { param, location },
+    );
+  }
+  return text;
+}
+
+/**
+ * The name/value pairs of an `application/x-www-form-urlencoded` object: the
+ * one serializer behind form bodies and form whole-query parameters, so both
+ * behave identically. It applies the Encoding Object defaults (OpenAPI
+ * "Encoding Object" default `contentType` table, "Encoding By Name"): an
+ * array property gives one pair per item, each item a primitive; an object
+ * property is its JSON text (`application/json`); any other value its string
+ * form (`text/plain`). An undefined or null property is left out, as for an
+ * absent parameter (a form has no way to write null). Explicit Encoding
+ * Objects (`serialization.encoding`) are not applied.
+ */
+function formPairs(
+  value: Record<string, unknown>,
+  location: string,
+  toJson: (value: Record<string, unknown>, name: string) => string,
+): Array<[string, string]> {
+  const pairs: Array<[string, string]> = [];
+  for (const [k, v] of Object.entries(value)) {
+    if (v === undefined || v === null) continue;
+    if (Array.isArray(v)) {
+      for (const item of v) pairs.push([k, primitiveString(item, k, location)]);
+    } else {
+      pairs.push([k, isPlainObject(v) ? toJson(v, k) : String(v)]);
+    }
+  }
+  return pairs;
+}
+
+/**
+ * Serialize a value in the media type of a parameter defined with `content`
+ * (OpenAPI "Fixed Fields for use with `content`"), before the location's own
+ * escaping, by the media type's class (`classifyMediaType`, which gives the
+ * input schema of a `content` parameter that declares none): JSON text for
+ * `application/json` and `application/*+json`, a form string for
+ * `application/x-www-form-urlencoded` (the value must be an object), and for
+ * any other media type, `text/json` included, the value itself, which must be
+ * a string or another primitive.
+ *
+ * In a header, JSON text is written in ASCII: every character from U+007F up
+ * is a `\uXXXX` escape (always inside a JSON string, where the escape means
+ * the same character), so the value is always a sendable header value.
+ */
+function serializeContent(mapper: ParameterMapper, value: unknown, contentType: string, location: string): string {
+  const mediaClass = classifyMediaType(contentType);
+  if (mediaClass === 'json') {
+    const text = jsonText(value, mapper.key, location);
+    return location === 'header'
+      ? text.replace(/[\u007f-￿]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
+      : text;
+  }
+  if (mediaClass === 'form') {
+    if (!isPlainObject(value)) {
+      throw new RequestBuildError(
+        `${location} parameter '${mapper.key}' is sent as ${FORM_URLENCODED}, which needs an object; received ${describeValue(value)}`,
+        { param: mapper.key, location, contentType },
+      );
+    }
+    return formEncode(formPairs(value, location, (v, name) => jsonText(v, name, location)), location);
+  }
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  throw new RequestBuildError(
+    `${location} parameter '${mapper.key}' is sent as ${contentType}, which needs a string or another primitive; received ${describeValue(value)}`,
+    { param: mapper.key, location, contentType },
+  );
+}
+
+/**
+ * The media type a non-body parameter is serialized in: set for a parameter
+ * defined with `content` and for a whole-query parameter, absent for one
+ * defined with `schema` (which uses style/explode).
+ */
+function parameterMediaType(mapper: ParameterMapper): string | undefined {
+  const contentType: unknown = mapper.serialization?.contentType;
+  if (contentType === undefined) return undefined;
+  if (typeof contentType !== 'string' || mediaTypeEssence(contentType) === '') {
+    throw new RequestBuildError(
+      `${mapper.type} parameter '${mapper.key}' (input key '${mapper.inputKey}') has an invalid media type ${describeValue(contentType)} in serialization.contentType`,
+      { param: mapper.key, inputKey: mapper.inputKey, location: mapper.type },
+    );
+  }
+  return contentType;
+}
 
 /** Where a mapper entry can put its value */
 const MAPPER_LOCATIONS: ReadonlySet<ParameterLocation> = new Set(['path', 'query', 'header', 'cookie', 'body']);
@@ -307,24 +691,161 @@ function resolveWireMethod(method: unknown): string {
 }
 
 /**
+ * The mapper entries that put each name on the wire, for the locations where
+ * the input can choose names too (an exploded object's property names).
+ */
+interface ReservedNames {
+  query: Map<string, ParameterMapper[]>;
+  cookie: Map<string, ParameterMapper[]>;
+}
+
+/**
+ * Check the mapper's shape before any value is read (a tool may be hand-made
+ * or tampered with): an array of objects with string `key` and `inputKey`,
+ * and whole-query rules (OpenAPI 3.2 "Parameter Locations": `querystring`
+ * MUST NOT appear more than once, nor with any `in: query` parameter; it
+ * MUST use `content`, so the entry needs `serialization.contentType`). These
+ * are structural, so they fail whatever values the input holds. Returns the
+ * whole-query entry, if any, and the names the tool reserves.
+ */
+function checkMapper(mapper: unknown): { wholeQuery: ParameterMapper | undefined; reserved: ReservedNames } {
+  if (!Array.isArray(mapper)) {
+    throw new RequestBuildError(`Tool mapper must be an array; received ${describeValue(mapper)}`, {});
+  }
+  let wholeQuery: ParameterMapper | undefined;
+  let otherQuery: ParameterMapper | undefined;
+  const reserved: ReservedNames = { query: new Map(), cookie: new Map() };
+  for (const [index, entry] of (mapper as unknown[]).entries()) {
+    if (entry === null || typeof entry !== 'object') {
+      throw new RequestBuildError(`Mapper entry ${index} must be an object; received ${describeValue(entry)}`, {
+        index,
+      });
+    }
+    const typed = entry as ParameterMapper;
+    const { key, inputKey, type } = typed;
+    if (typeof key !== 'string' || typeof inputKey !== 'string') {
+      throw new RequestBuildError(
+        `Mapper entry ${index} must have a string key and inputKey; received key ${describeValue(key)} and inputKey ${describeValue(inputKey)}`,
+        { index },
+      );
+    }
+    if (type === 'query' || type === 'cookie') {
+      const owners = reserved[type].get(key);
+      if (owners === undefined) reserved[type].set(key, [typed]);
+      else owners.push(typed);
+    }
+    if (typed.wholeQuery) {
+      if (type !== 'query' || typed.security) {
+        throw new RequestBuildError(
+          `Mapper entry '${key}' (input key '${inputKey}') is marked wholeQuery, which only a non-security query parameter can be`,
+          { param: key, inputKey, location: type },
+        );
+      }
+      if (wholeQuery) {
+        throw new RequestBuildError(
+          `A tool has at most one whole-query parameter; found '${wholeQuery.key}' and '${key}'`,
+          { param: key, inputKey, location: 'query' },
+        );
+      }
+      if (parameterMediaType(typed) === undefined) {
+        throw new RequestBuildError(
+          `Whole-query parameter '${key}' (input key '${inputKey}') needs serialization.contentType: the media type its value is serialized in`,
+          { param: key, inputKey, location: 'query' },
+        );
+      }
+      wholeQuery = typed;
+    } else if (type === 'query' && !typed.security) {
+      otherQuery ??= typed;
+    }
+  }
+  if (wholeQuery && otherQuery) {
+    throw new RequestBuildError(
+      `Whole-query parameter '${wholeQuery.key}' (input key '${wholeQuery.inputKey}') is the entire query string, so it cannot be combined with the query parameter '${otherQuery.key}' (input key '${otherQuery.inputKey}')`,
+      { param: wholeQuery.key, inputKey: wholeQuery.inputKey, location: 'query', conflictsWith: otherQuery.key },
+    );
+  }
+  return { wholeQuery, reserved };
+}
+
+/**
+ * The check for each pair name an entry's INPUT chooses: a form whole
+ * query's property names, an exploded object's property names in the query
+ * (`style: form`, `explode: true`) or with `style: cookie`. A name that
+ * another mapper entry puts in the same location is refused — a credential,
+ * whether or not this call supplies it (a framework may add it later), or
+ * another parameter, whether or not it has a value — so the input can neither
+ * stand in for a credential nor override a sibling parameter.
+ *
+ * Names compare exactly and case-sensitively, as query and cookie names do on
+ * the wire. They are compared unencoded; percent-encoding and form-encoding
+ * are both one-to-one, so names that differ here differ on the wire too.
+ *
+ * Cookies also hold one value per name, so with `claimed` (shared by the
+ * whole request) two inputs naming the same cookie are refused too, instead
+ * of one silently replacing the other.
+ */
+function nameClaimer(
+  owner: ParameterMapper,
+  reserved: Map<string, ParameterMapper[]>,
+  claimed?: Map<string, ParameterMapper>,
+): (name: string) => void {
+  const kind = owner.type === 'cookie' ? 'cookie' : 'query parameter';
+  const source = `The input of ${owner.type} parameter '${owner.key}' (input key '${owner.inputKey}')`;
+  return (name) => {
+    const holder = reserved.get(name)?.find((other) => other !== owner);
+    if (holder !== undefined) {
+      throw new RequestBuildError(
+        `${source} names the ${kind} '${name}', which this tool reserves for ${
+          holder.security
+            ? `the credential of security scheme '${holder.security.scheme}'`
+            : `the ${holder.type} parameter '${holder.key}' (input key '${holder.inputKey}')`
+        }`,
+        { param: owner.key, inputKey: owner.inputKey, location: owner.type, name, reservedBy: holder.inputKey },
+      );
+    }
+    if (claimed === undefined) return;
+    const previous = claimed.get(name);
+    if (previous !== undefined && previous !== owner) {
+      throw new RequestBuildError(
+        `${source} names the ${kind} '${name}', which the input of ${previous.type} parameter '${previous.key}' (input key '${previous.inputKey}') names too`,
+        { param: owner.key, inputKey: owner.inputKey, location: owner.type, name, reservedBy: previous.inputKey },
+      );
+    }
+    claimed.set(name, owner);
+  };
+}
+
+/**
  * Build an HTTP request from a generated tool and its input values — the
  * mapper applied in full: style/explode serialization (form, spaceDelimited,
- * pipeDelimited, deepObject, simple, label, matrix), `allowReserved`,
- * whole-body and binary bodies, JSON / form-urlencoded / multipart / text
- * serialization, cookies, and header-injection guards.
+ * pipeDelimited, deepObject, simple, label, matrix, and the OpenAPI 3.2
+ * `cookie` style), `allowReserved`, parameters defined with `content`
+ * (serialized in their media type), OpenAPI 3.2 whole-query parameters
+ * (`in: querystring`), whole-body and binary bodies, JSON / form-urlencoded /
+ * multipart / text serialization, cookies, and header-injection guards.
  *
  * Pure function: nothing is sent, no runtime context is consulted. Security
  * mapper entries are applied only when their value is present in `input`
  * (with scheme-aware formatting); missing security values never throw —
  * frameworks resolve credentials separately (see SecurityResolver).
+ *
+ * Input values are read as own properties only, so an inherited member such
+ * as `toString` is never a value. `input` may be `undefined` or `null` (no
+ * values); any other non-object is a {@link RequestBuildError}.
  */
 export function buildHttpRequest(
   tool: McpOpenAPITool,
   input: Record<string, unknown>,
   options: BuildHttpRequestOptions = {},
 ): BuiltHttpRequest {
+  if (tool === null || typeof tool !== 'object' || tool.metadata === null || typeof tool.metadata !== 'object') {
+    throw new RequestBuildError('Tool must be an object with a metadata object', {});
+  }
   const method = resolveWireMethod(tool.metadata.method);
   const rawBase = options.baseUrl ?? resolveServerUrl(tool);
+  if (typeof rawBase !== 'string') {
+    throw new RequestBuildError(`Base URL must be a string; received ${describeValue(rawBase)}`, { baseUrl: rawBase });
+  }
   if (rawBase.includes('{')) {
     throw new RequestBuildError(
       `Base URL '${rawBase}' contains unresolved server template variables (no default value in the spec); pass an explicit baseUrl`,
@@ -337,11 +858,27 @@ export function buildHttpRequest(
   let base = rawBase;
   while (base.endsWith('/')) base = base.slice(0, -1);
 
+  if (typeof tool.metadata.path !== 'string') {
+    throw new RequestBuildError(`Tool path must be a string; received ${describeValue(tool.metadata.path)}`, {});
+  }
+  const { wholeQuery: wholeQueryEntry, reserved } = checkMapper(tool.mapper);
+  if (input !== undefined && input !== null && typeof input !== 'object') {
+    throw new RequestBuildError(`Tool input must be an object; received ${describeValue(input)}`, {});
+  }
+  const values: object | undefined = input ?? undefined;
+
   let path = tool.metadata.path;
   const queryPairs: Array<[key: string, value: string, allowReserved?: boolean]> = [];
-  const query: Record<string, string[]> = {};
-  const headers: Record<string, string> = {};
-  const cookies: Record<string, string> = {};
+  // Set when the whole-query parameter's media type is form-urlencoded (its
+  // pairs are in queryPairs) or any other (its percent-encoded text)
+  let formWholeQuery = false;
+  let wholeQueryText: string | undefined;
+  const headers = createRecord<string>();
+  // Every value of each cookie name, in the order sent (style: cookie arrays
+  // repeat a name); a later entry for the same name replaces earlier values
+  const cookieValues = createRecord<string[]>();
+  // Cookie names chosen by an input so far, and by which entry
+  const inputCookieNames = new Map<string, ParameterMapper>();
   let rawBody: unknown;
   let bodyObject: Record<string, unknown> | undefined;
   let contentType: string | undefined;
@@ -364,7 +901,7 @@ export function buildHttpRequest(
       );
     }
 
-    const value = input[mapper.inputKey];
+    const value = readInput(values, mapper.inputKey);
 
     if (mapper.security) {
       // Security entries apply only when a value was provided; they are never
@@ -378,7 +915,7 @@ export function buildHttpRequest(
         queryPairs.push([mapper.key, formatted]);
       } else {
         assertCookieName(mapper.key);
-        cookies[mapper.key] = formatted;
+        cookieValues[mapper.key] = [formatted];
       }
       continue;
     }
@@ -395,34 +932,107 @@ export function buildHttpRequest(
 
     // every location in MAPPER_LOCATIONS has a case: none is dropped here
     switch (mapper.type) {
-      case 'path':
-        path = path.replaceAll(`{${mapper.key}}`, serializePathValue(mapper, value));
+      case 'path': {
+        const mediaType = parameterMediaType(mapper);
+        const replacement =
+          mediaType === undefined
+            ? serializePathValue(mapper, value)
+            : percentEncode(serializeContent(mapper, value, mediaType, 'path'), mapper.key, 'path');
+        // a function replacement: `$&`, `$1`, ... in a value are literal text
+        path = path.replaceAll(`{${mapper.key}}`, () => replacement);
         break;
+      }
 
-      case 'query':
-        for (const [k, v] of serializeQueryPairs(mapper, value)) {
-          queryPairs.push([k, v, mapper.allowReserved]);
+      case 'query': {
+        const mediaType = parameterMediaType(mapper);
+        if (mapper.wholeQuery) {
+          // checkMapper made sure a whole-query entry has a media type
+          const wholeType = mediaType as string;
+          if (classifyMediaType(wholeType) === 'form') {
+            // The object's properties are the query pairs, exactly as in a
+            // form body; the composed string is form-urlencoded below. The
+            // input chooses these names, so none may be a reserved one.
+            if (!isPlainObject(value)) {
+              throw new RequestBuildError(
+                `Whole-query parameter '${mapper.key}' is sent as ${FORM_URLENCODED}, which needs an object; received ${describeValue(value)}`,
+                { param: mapper.key, inputKey: mapper.inputKey, location: 'query', contentType: wholeType },
+              );
+            }
+            const claim = nameClaimer(mapper, reserved.query);
+            for (const pair of formPairs(value, 'query', (v, name) => jsonText(v, name, 'query'))) {
+              claim(pair[0]);
+              queryPairs.push(pair);
+            }
+            formWholeQuery = true;
+          } else {
+            // The serialized value IS the query string, percent-encoded
+            wholeQueryText = percentEncode(serializeContent(mapper, value, wholeType, 'query'), mapper.key, 'query');
+          }
+        } else if (mediaType !== undefined) {
+          queryPairs.push([mapper.key, serializeContent(mapper, value, mediaType, 'query')]);
+        } else {
+          for (const [k, v] of serializeQueryPairs(mapper, value, nameClaimer(mapper, reserved.query))) {
+            queryPairs.push([k, v, mapper.allowReserved]);
+          }
         }
         break;
+      }
 
       case 'header': {
-        const headerValue = serializeHeaderValue(mapper, value);
+        // A `content` header is its media type's text, sent unchanged (no
+        // percent-encoding); JSON text there is ASCII and never holds a raw
+        // CR, LF or NUL
+        const mediaType = parameterMediaType(mapper);
+        const headerValue =
+          mediaType === undefined
+            ? serializeHeaderValue(mapper, value)
+            : serializeContent(mapper, value, mediaType, 'header');
         assertHeaderSafe(mapper.key, headerValue);
         headers[mapper.key] = headerValue;
         break;
       }
 
       case 'cookie': {
-        assertCookieName(mapper.key);
-        cookies[mapper.key] = Array.isArray(value)
-          ? value.map((v) => primitiveString(v, mapper.key, 'cookie')).join(',')
-          : primitiveString(value, mapper.key, 'cookie');
+        const mediaType = parameterMediaType(mapper);
+        if (mediaType !== undefined) {
+          // A `content` cookie is its media type's text, sent unchanged: it
+          // must already be a valid cookie value (RFC 6265, comma included)
+          assertCookieName(mapper.key);
+          const cookieValue = serializeContent(mapper, value, mediaType, 'cookie');
+          assertCookieValue(mapper.key, cookieValue, true);
+          cookieValues[mapper.key] = [cookieValue];
+        } else if (mapper.style === 'cookie') {
+          // Every name sent is checked: the parameter's own name, or each
+          // property name of an exploded object (the parameter's is unused),
+          // which the input chooses, so none may be a reserved one
+          const claim = nameClaimer(mapper, reserved.cookie, inputCookieNames);
+          for (const [name, cookieValueList] of serializeCookieStyle(mapper, value, claim)) {
+            assertCookieName(name);
+            for (const cookieValue of cookieValueList) assertCookieValue(name, cookieValue, true);
+            cookieValues[name] = cookieValueList;
+          }
+        } else {
+          // Default style (form): today's output, an array comma-joined
+          assertCookieName(mapper.key);
+          cookieValues[mapper.key] = [
+            Array.isArray(value)
+              ? value.map((v) => primitiveString(v, mapper.key, 'cookie')).join(',')
+              : primitiveString(value, mapper.key, 'cookie'),
+          ];
+        }
         break;
       }
 
-      case 'body':
+      case 'body': {
+        const declared: unknown = mapper.serialization?.contentType;
+        if (declared !== undefined && declared !== null && typeof declared !== 'string') {
+          throw new RequestBuildError(
+            `body parameter '${mapper.key}' (input key '${mapper.inputKey}') has an invalid media type ${describeValue(declared)} in serialization.contentType`,
+            { param: mapper.key, inputKey: mapper.inputKey, location: 'body' },
+          );
+        }
         hasBody = true;
-        contentType = contentType ?? mapper.serialization?.contentType ?? 'application/json';
+        contentType = contentType ?? (declared as string | null | undefined) ?? 'application/json';
         // `binary` on a flattened param marks a FILE PART inside a multipart
         // form; only a whole-body binary mapper makes the entire payload raw
         if (mapper.serialization?.binary && mapper.wholeBody) binaryBody = true;
@@ -430,9 +1040,11 @@ export function buildHttpRequest(
           rawBody = value;
         } else {
           if (bodyObject === undefined) bodyObject = {};
-          bodyObject[mapper.key] = value;
+          // defined, not assigned: a property named `__proto__` is a key
+          Object.defineProperty(bodyObject, mapper.key, { value, writable: true, enumerable: true, configurable: true });
         }
         break;
+      }
     }
   }
 
@@ -442,23 +1054,50 @@ export function buildHttpRequest(
 
   if (bodyObject !== undefined) rawBody = bodyObject;
 
-  // Compose the query string (values encoded here; keys may carry deepObject
-  // brackets which stay readable, with only unsafe characters escaped)
-  const queryString = queryPairs
-    .map(([k, v, allowReserved]) => {
-      query[k] = query[k] ?? [];
-      query[k].push(v);
-      const encodedKey = encodeURIComponent(k).replace(/%5B/gi, '[').replace(/%5D/gi, ']');
-      return `${encodedKey}=${encodeValue(v, allowReserved)}`;
-    })
-    .join('&');
+  const query = createRecord<string[]>();
+  let queryString: string;
+  if (wholeQueryText !== undefined) {
+    // Only a security credential can be in queryPairs here (checkMapper
+    // rejects any other query entry next to a whole-query one)
+    if (queryPairs.length > 0) {
+      throw new RequestBuildError(
+        `Security parameter '${queryPairs[0][0]}' cannot be added to the query string: whole-query parameter '${wholeQueryEntry!.key}' is serialized as ${wholeQueryEntry!.serialization!.contentType}, which has no name=value pairs to add a credential to; send the credential in a header or a cookie instead`,
+        { param: queryPairs[0][0], location: 'query', wholeQuery: wholeQueryEntry!.key },
+      );
+    }
+    queryString = wholeQueryText;
+  } else {
+    for (const [k, v] of queryPairs) {
+      (query[k] ??= []).push(v);
+    }
+    queryString = formWholeQuery
+      ? // A form-urlencoded whole query: every pair (credentials included)
+        // encoded per the media type, as in a form body (space as `+`)
+        formEncode(queryPairs, 'query')
+      : // Values encoded here; keys may carry deepObject brackets which stay
+        // readable, with only unsafe characters escaped
+        queryPairs
+          .map(([k, v, allowReserved]) => {
+            const encodedKey = percentEncode(k, k, 'query').replace(/%5B/gi, '[').replace(/%5D/gi, ']');
+            return `${encodedKey}=${percentEncode(v, k, 'query', allowReserved)}`;
+          })
+          .join('&');
+  }
 
   // Fold cookies into a single Cookie header — values verbatim, so the
   // header always matches the `cookies` record
-  const cookieEntries = Object.entries(cookies);
-  if (cookieEntries.length > 0) {
-    for (const [k, v] of cookieEntries) assertCookieValue(k, v);
-    headers['Cookie'] = cookieEntries.map(([k, v]) => `${k}=${v}`).join('; ');
+  const cookieNames = Object.keys(cookieValues);
+  const cookies = createRecord<string>();
+  if (cookieNames.length > 0) {
+    const cookiePairs: string[] = [];
+    for (const name of cookieNames) {
+      for (const cookieValue of cookieValues[name]) {
+        assertCookieValue(name, cookieValue);
+        cookiePairs.push(`${name}=${cookieValue}`);
+      }
+      cookies[name] = cookieValues[name][0];
+    }
+    headers['Cookie'] = cookiePairs.join('; ');
   }
 
   // Serialize the body per content type. Resolve any existing content-type
@@ -473,22 +1112,13 @@ export function buildHttpRequest(
       // Raw binary: pass through untouched (string, Uint8Array, Blob, ...)
       body = rawBody;
       if (!hasExplicitContentType) headers[contentTypeKey] = ct;
-    } else if (ct.toLowerCase() === 'application/x-www-form-urlencoded') {
-      const params = new URLSearchParams();
+    } else if (ct.toLowerCase() === FORM_URLENCODED) {
       if (!isPlainObject(rawBody)) {
         throw new RequestBuildError(`form-urlencoded bodies must be objects; received ${typeof rawBody}`, {
           contentType: ct,
         });
       }
-      for (const [k, v] of Object.entries(rawBody)) {
-        if (v === undefined) continue;
-        if (Array.isArray(v)) {
-          for (const item of v) params.append(k, primitiveString(item, k, 'body'));
-        } else {
-          params.append(k, isPlainObject(v) ? JSON.stringify(v) : String(v));
-        }
-      }
-      body = params.toString();
+      body = formEncode(formPairs(rawBody, 'body', (v) => JSON.stringify(v)), 'body');
       headers[contentTypeKey] = ct;
     } else if (ct.toLowerCase() === 'multipart/form-data') {
       /* c8 ignore next 3 -- FormData exists on Node >= 18; guard for exotic runtimes */
@@ -518,7 +1148,11 @@ export function buildHttpRequest(
       // spec-mapped Content-Type header would ship WITHOUT a boundary and
       // break the multipart body, so it is removed too.
       if (hasExplicitContentType) delete headers[contentTypeKey];
-    } else if (JSON_CONTENT.test(ct)) {
+    } else if (JSON_MEDIA_TYPE.test(ct)) {
+      // A body's Content-Type is matched as written, parameters and all
+      // (unlike a `content` parameter's media type, which is classified by
+      // its essence): `application/json; charset=utf-8` falls to the branch
+      // below, which also writes an object as JSON text
       body = JSON.stringify(rawBody);
       headers[contentTypeKey] = ct;
     } else {
@@ -531,9 +1165,10 @@ export function buildHttpRequest(
   return {
     url: `${base}${path}${queryString ? `?${queryString}` : ''}`,
     method,
-    headers,
-    query,
-    cookies,
+    headers: toPlainRecord(headers),
+    query: toPlainRecord(query),
+    ...(wholeQueryText !== undefined && { queryString: wholeQueryText }),
+    cookies: toPlainRecord(cookies),
     contentType,
     body,
     rawBody,

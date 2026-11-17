@@ -876,23 +876,31 @@ export interface ParameterMapper {
   required?: boolean;
 
   /**
-   * Parameter style (for path/query parameters)
+   * Parameter style (for path/query parameters). Absent for a parameter
+   * defined with `content`: OpenAPI says `style`, `explode` and
+   * `allowReserved` do not apply to it (see `serialization.contentType`).
    */
   style?: string;
 
   /**
-   * Whether to explode arrays/objects
+   * Whether to explode arrays/objects. Absent for a parameter defined with
+   * `content`.
    */
   explode?: boolean;
 
   /**
    * Whether RFC 3986 reserved characters may appear unencoded in the value
-   * (query parameters only, OpenAPI `allowReserved`)
+   * (query parameters only, OpenAPI `allowReserved`). Absent for a parameter
+   * defined with `content`.
    */
   allowReserved?: boolean;
 
   /**
-   * Custom serialization info
+   * Custom serialization info. For a `path`/`query`/`header`/`cookie`
+   * parameter it is present only when the parameter is defined with
+   * `content` (a media type) instead of `schema`, or is a whole-query
+   * parameter (`wholeQuery`): `serialization.contentType` is then the media
+   * type the value is serialized in.
    */
   serialization?: SerializationInfo;
 
@@ -906,6 +914,20 @@ export interface ParameterMapper {
   wholeBody?: boolean;
 
   /**
+   * When true, this input value IS the entire query string — set only on a
+   * `type: 'query'` entry, for an OpenAPI 3.2 parameter `in: querystring`.
+   * Such a parameter is defined with `content` holding one media type:
+   * `serialization.contentType` is that media type, and the value is
+   * serialized in it to form the whole query string (for
+   * `application/x-www-form-urlencoded`, `serialization.encoding` carries the
+   * media type's Encoding Objects, as for a body). `key` is the parameter's
+   * name, which is not sent. Mirrors `wholeBody`. An operation has at most
+   * one such entry and then no other `query` parameter (security `apiKey`
+   * entries in the query aside).
+   */
+  wholeQuery?: true;
+
+  /**
    * Security scheme information (if this is an auth parameter)
    * This allows frameworks to resolve auth from context, env vars, etc.
    */
@@ -917,14 +939,26 @@ export interface ParameterMapper {
  */
 export interface SerializationInfo {
   /**
-   * Content type for body parameters
+   * The media type the value is serialized in:
+   *
+   * - a body parameter: the request body's media type;
+   * - a `path`/`query`/`header`/`cookie` parameter defined with `content`
+   *   instead of `schema` (any OpenAPI 3 version): the media type of its
+   *   `content` entry. The value is serialized in that media type (for
+   *   example `application/json` gives the JSON text), and `style`,
+   *   `explode` and `allowReserved` do not apply;
+   * - a whole-query parameter (`ParameterMapper.wholeQuery`, OpenAPI 3.2
+   *   `in: querystring`): the media type of the whole query string.
    */
   contentType?: string;
 
   /**
-   * Encoding rules from the request body's media type (OpenAPI `encoding`).
-   * For a flattened body-property parameter this contains only that
-   * property's entry; for a whole-body parameter it is the full map.
+   * Encoding rules from the media type (OpenAPI `encoding`). For a
+   * flattened body-property parameter this contains only that property's
+   * entry; for a whole-body parameter it is the full map. A parameter
+   * defined with `content` (whole-query parameters included) carries its
+   * media type's full map too, as a whole body does — it applies to
+   * `application/x-www-form-urlencoded` content.
    */
   encoding?: Record<string, EncodingObject>;
 
@@ -1055,6 +1089,27 @@ export interface ToolMetadata {
   responseHints?: ResponseHints;
 
   /**
+   * The streamed response of the operation (OpenAPI 3.2): a response with a
+   * media type that declares `itemSchema`, the schema of each item of a
+   * sequential media type such as `text/event-stream` (Server-Sent Events),
+   * `application/jsonl`, `application/x-ndjson`, `application/json-seq` or
+   * `multipart/mixed`. Present only then, with `responseHints.streaming`.
+   *
+   * The stream is not part of `outputSchema`: an MCP tool that declares an
+   * output schema must return its complete result as structured content,
+   * which an unbounded stream is not. A media type with only `itemSchema`
+   * therefore contributes nothing to `outputSchema` (which is absent when no
+   * other media type or response has a schema); one with both `schema` and
+   * `itemSchema` gives `outputSchema` from `schema` and this from
+   * `itemSchema`. The stream's media type is chosen apart from the output
+   * schema's, so a response offering `application/json` (with `schema`) and
+   * `text/event-stream` (with `itemSchema`) gives both. Of several streamed
+   * responses, the preferred one; of several media types, the first with
+   * `itemSchema` in document order (see `ResponseStreamInfo`).
+   */
+  responseStream?: ResponseStreamInfo;
+
+  /**
    * TypeScript rendering of the tool's call contract — present when
    * `GenerateOptions.emitTypeSignatures` is set. Computed on the FINAL
    * schemas (after formats, depth truncation, trimming, and client-target
@@ -1086,6 +1141,41 @@ export interface ResponseHints {
 
   /** Unbounded array AND no pagination controls: truncate or shape server-side */
   largeResponseRisk?: boolean;
+
+  /**
+   * The operation streams its response (OpenAPI 3.2 `itemSchema`): read it
+   * item by item; `ToolMetadata.responseStream` describes the items
+   */
+  streaming?: boolean;
+}
+
+/**
+ * A streamed response (`ToolMetadata.responseStream`): an OpenAPI 3.2 Media
+ * Type Object with `itemSchema`.
+ *
+ * - The response is chosen among an operation's streamed responses as
+ *   `GenerateOptions.includeAllResponses: false` chooses one output schema
+ *   (`preferredStatusCodes` order, then any 2xx, any 3xx, the first;
+ *   `default` only when no status code streams).
+ * - Within it, the media type is the first one in the response's `content`, in
+ *   the document's key order, that declares `itemSchema`; it is chosen
+ *   independently of the media type the output schema comes from.
+ */
+export interface ResponseStreamInfo {
+  /** The response's status code, as `responseStatusCodes` reads it (0 for `default`) */
+  statusCode: number;
+
+  /** The sequential media type, as the document writes it (`text/event-stream`, `application/jsonl`, ...) */
+  contentType: string;
+
+  /**
+   * The schema of each item, converted like an output schema: JSON Schema
+   * 2020-12, with the same format resolution, `maxSchemaDepth` /
+   * `maxSchemaNodes` limits, trimming options and client `target`. For
+   * `text/event-stream`, an item is one parsed event (`data`, `event`, `id`,
+   * `retry`)
+   */
+  itemSchema: JsonSchema;
 }
 
 /**
@@ -1199,6 +1289,13 @@ export interface ServerInfo {
    * Server URL
    */
   url: string;
+
+  /**
+   * The server's unique name (OpenAPI 3.2 Server Object `name`), when the
+   * document gives one. Kept when `LoadOptions.baseUrl` replaces the URL,
+   * like `description`
+   */
+  name?: string;
 
   /**
    * Server description
@@ -1749,9 +1846,74 @@ export const DIAGNOSTIC_CODES = Object.freeze({
   UNSATISFIABLE_SECURITY: 'UNSATISFIABLE_SECURITY',
   /**
    * An operation has a parameter in a location the generator does not map to
-   * a request (such as `querystring`): the operation makes no tool.
+   * a request (a Swagger-style `body`, a missing `in`): the operation makes
+   * no tool.
    */
   UNSUPPORTED_PARAMETER_LOCATION: 'UNSUPPORTED_PARAMETER_LOCATION',
+  /**
+   * An operation has more than one `in: querystring` parameter (path-level
+   * ones included), which OpenAPI forbids: the operation makes no tool. A
+   * validation error.
+   */
+  MULTIPLE_QUERYSTRING_PARAMETERS: 'MULTIPLE_QUERYSTRING_PARAMETERS',
+  /**
+   * An operation has an `in: querystring` parameter, which holds the whole
+   * query string, and `in: query` parameters (path-level ones included),
+   * which OpenAPI forbids: the operation makes no tool. A validation error.
+   */
+  QUERYSTRING_WITH_QUERY_PARAMETERS: 'QUERYSTRING_WITH_QUERY_PARAMETERS',
+  /**
+   * An `in: querystring` parameter has no `content` with a media type (it
+   * must not use `schema`), so its value cannot be serialized: the operation
+   * makes no tool. A validation error.
+   */
+  QUERYSTRING_PARAMETER_WITHOUT_CONTENT: 'QUERYSTRING_PARAMETER_WITHOUT_CONTENT',
+  /**
+   * A parameter's `content` cannot be read as OpenAPI defines it; the
+   * message says which problem and what is done instead. A validation
+   * warning (except the unresolved reference, which only generation sees):
+   *
+   * - the parameter defines both `schema` and `content`, which OpenAPI
+   *   forbids: `content` is ignored (for `in: querystring`, `schema` is);
+   * - `content` does not hold exactly one media type: of several, one is
+   *   used (`application/json`, then `application/x-www-form-urlencoded`,
+   *   `multipart/form-data`, `application/xml`, `text/plain`, else the
+   *   first); one that is empty or not a map is ignored;
+   * - the media type used is not a Media Type Object (`null`, ...), or is a
+   *   Reference Object left unresolved, so no schema is read: the value is
+   *   unconstrained for a JSON media type, a string otherwise;
+   * - the media type used declares `itemSchema`, which describes the items
+   *   of a stream and is not read for a parameter.
+   */
+  INVALID_PARAMETER_CONTENT: 'INVALID_PARAMETER_CONTENT',
+  /**
+   * A cookie parameter is sent as JSON (`content` with a JSON media type)
+   * and its schema allows a string, an object or an array, whose JSON text
+   * holds characters a cookie value cannot carry (`"`, `,`):
+   * `buildHttpRequest` refuses such a value, so only numbers, booleans and
+   * `null` can be sent. The tool is still made.
+   */
+  COOKIE_CONTENT_NOT_SENDABLE: 'COOKIE_CONTENT_NOT_SENDABLE',
+  /**
+   * An operation's whole-query parameter (`in: querystring`) is serialized in
+   * a media type other than `application/x-www-form-urlencoded`, and one of
+   * its security schemes sends an API key in the query string (named in the
+   * message): the query string has no name=value pairs to add the key to,
+   * so `buildHttpRequest` refuses a call that uses that scheme. The tool is
+   * still made.
+   */
+  QUERYSTRING_WITH_QUERY_CREDENTIAL: 'QUERYSTRING_WITH_QUERY_CREDENTIAL',
+  /**
+   * A parameter list (a path item's or an operation's) has two parameters
+   * with the same `name` and `in`, which OpenAPI forbids: the last one is
+   * used. A validation warning.
+   */
+  DUPLICATE_PARAMETER: 'DUPLICATE_PARAMETER',
+  /**
+   * A request body's media type declares only `itemSchema` (OpenAPI 3.2, a
+   * streamed upload), which is not supported: the tool takes no body input.
+   */
+  UNSUPPORTED_STREAMING_REQUEST_BODY: 'UNSUPPORTED_STREAMING_REQUEST_BODY',
   /** The list reached `MAX_DIAGNOSTICS`; later findings are not recorded. */
   DIAGNOSTICS_TRUNCATED: 'DIAGNOSTICS_TRUNCATED',
 } as const);

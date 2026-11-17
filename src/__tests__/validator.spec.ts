@@ -1212,6 +1212,199 @@ describe('version-aware validation (issue #55)', () => {
       );
       expect(result.errors?.map((e) => e.code)).toEqual(['MISSING_PATH_PARAMETER']);
     });
+
+    it('requires a querystring parameter content to hold a media type', async () => {
+      const result = await validate(
+        opParameters('3.2.0', [
+          { name: 'q', in: 'querystring', content: {} },
+          { name: 'r', in: 'querystring', content: 'application/json' },
+        ]),
+      );
+      expect(result.errors).toEqual([
+        {
+          code: 'QUERYSTRING_PARAMETER_WITHOUT_CONTENT',
+          path: '/paths/~1a/get/parameters/0/content',
+          message: "Parameter 'q' in: querystring must define content with one media type, found none",
+        },
+        {
+          code: 'QUERYSTRING_PARAMETER_WITHOUT_CONTENT',
+          path: '/paths/~1a/get/parameters/1/content',
+          message: 'Parameter \'r\' in: querystring must define content with one media type, found "application/json"',
+        },
+        expect.objectContaining({ code: 'MULTIPLE_QUERYSTRING_PARAMETERS' }),
+      ]);
+      // covered by the error, so no content warning on top
+      expect(result.warnings).toBeUndefined();
+      // `content: null` is no content
+      expect(
+        (await validate(opParameters('3.2.0', [{ name: 'q', in: 'querystring', content: null }]))).errors?.[0].message,
+      ).toBe("Parameter 'q' in: querystring must define content (a media type and its schema), not schema");
+    });
+  });
+
+  describe('parameter content and duplicates (warnings)', () => {
+    const opParameters = (version: string, parameters: unknown[]) =>
+      doc(version, { '/a': { get: { operationId: 'a', responses: ok, parameters } } });
+    const json = { schema: { type: 'object' } };
+
+    it('warns about a content that does not hold exactly one media type, saying what generation does', async () => {
+      const result = await validate(
+        opParameters('3.0.3', [
+          { name: 'several', in: 'query', content: { 'text/plain': json, 'application/json': json } },
+          { name: 'empty', in: 'query', content: {} },
+          { name: 'notAMap', in: 'header', content: ['application/json'] },
+          { name: 'withSchema', in: 'query', schema: { type: 'string' }, content: { 'a/b': json, 'c/d': json } },
+          { name: 'one', in: 'cookie', content: { 'application/json': json } },
+          { name: 'none', in: 'query', schema: { type: 'string' }, content: null },
+        ]),
+      );
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toEqual([
+        {
+          code: 'INVALID_PARAMETER_CONTENT',
+          path: '/paths/~1a/get/parameters/0',
+          message:
+            'Parameter "several" (in: "query"): content must hold exactly one media type, found 2 media types; ' +
+            '"application/json" is used',
+        },
+        {
+          code: 'INVALID_PARAMETER_CONTENT',
+          path: '/paths/~1a/get/parameters/1',
+          message:
+            'Parameter "empty" (in: "query"): content must hold exactly one media type, found no media type; ' +
+            'content is ignored and the value is read as a string',
+        },
+        {
+          code: 'INVALID_PARAMETER_CONTENT',
+          path: '/paths/~1a/get/parameters/2',
+          message:
+            'Parameter "notAMap" (in: "header"): content must hold exactly one media type, found an array; ' +
+            'content is ignored and the value is read as a string',
+        },
+        {
+          code: 'INVALID_PARAMETER_CONTENT',
+          path: '/paths/~1a/get/parameters/3',
+          message:
+            'Parameter "withSchema" (in: "query"): defines both schema and content, but must define only one; ' +
+            'content is ignored and schema is used',
+        },
+      ]);
+    });
+
+    it('warns, without rejecting, about a parameter defining both schema and content', async () => {
+      const result = await validate(
+        opParameters('3.1.0', [
+          { name: 'a', in: 'header', schema: { type: 'string' }, content: { 'application/json': json } },
+          { name: 'b', in: 'query', schema: { type: 'string' }, content: {} },
+        ]),
+      );
+      expect(result.valid).toBe(true);
+      expect(result.warnings?.map((w) => [w.path, w.message.slice(w.message.indexOf('): ') + 3)])).toEqual([
+        ['/paths/~1a/get/parameters/0', 'defines both schema and content, but must define only one; content is ignored and schema is used'],
+        ['/paths/~1a/get/parameters/1', 'defines both schema and content, but must define only one; content is ignored and schema is used'],
+      ]);
+    });
+
+    it('warns about a media type that is not a Media Type Object, or declares itemSchema', async () => {
+      const result = await validate(
+        opParameters('3.2.0', [
+          { name: 'a', in: 'query', content: { 'application/json': null } },
+          { name: 'b', in: 'query', content: { 'text/plain': 'x' } },
+          { name: 'c', in: 'query', content: { 'application/jsonl': { itemSchema: { type: 'string' } } } },
+          { name: 'd', in: 'query', content: { 'application/json': { schema: { type: 'object' }, itemSchema: {} } } },
+          // before dereferencing a reference is normal: no warning
+          { name: 'e', in: 'query', content: { 'application/json': { $ref: '#/components/mediaTypes/M' } } },
+        ]),
+      );
+      expect(result.valid).toBe(true);
+      expect(result.warnings?.map((w) => w.message.slice(w.message.indexOf('): ') + 3))).toEqual([
+        'the media type "application/json" is not a Media Type Object (found null); the value is unconstrained',
+        'the media type "text/plain" is not a Media Type Object (found "x"); the value is read as a string',
+        'the media type "application/jsonl" declares itemSchema, which describes the items of a stream and is not ' +
+          'read for a parameter; the value is read as a string',
+        'the media type "application/json" declares itemSchema, which describes the items of a stream and is not ' +
+          'read for a parameter; its schema is used',
+      ]);
+    });
+
+    it('reads header names in any case for duplicates, and a list duplicate no longer counts twice for querystring', async () => {
+      const header = (name: string) => ({ name, in: 'header', schema: { type: 'string' } });
+      const qs = { name: 'q', in: 'querystring', content: { 'application/json': json } };
+      const result = await validate(opParameters('3.2.0', [header('X-Id'), header('x-id'), qs, qs]));
+      expect(result.valid).toBe(true);
+      expect(result.warnings?.map((w) => [w.code, w.path])).toEqual([
+        ['DUPLICATE_PARAMETER', '/paths/~1a/get/parameters/0'],
+        ['DUPLICATE_PARAMETER', '/paths/~1a/get/parameters/2'],
+      ]);
+      // query names stay case-sensitive
+      expect(
+        await validate(opParameters('3.0.3', [{ name: 'id', in: 'query', schema: {} }, { name: 'ID', in: 'query', schema: {} }])),
+      ).toEqual({ valid: true, errors: undefined, warnings: undefined });
+    });
+
+    it('warns about several media types on a querystring parameter, which reads content whatever its schema', async () => {
+      const result = await validate(
+        opParameters('3.2.0', [
+          {
+            name: 'q',
+            in: 'querystring',
+            schema: { type: 'string' },
+            content: { 'text/plain': json, 'application/x-www-form-urlencoded': json },
+          },
+        ]),
+      );
+      expect(result.valid).toBe(true);
+      expect(result.warnings?.map((w) => w.message)).toEqual([
+        'Parameter "q" (in: "querystring"): defines both schema and content, but must define only one; schema is ' +
+          'ignored and content is used',
+        'Parameter "q" (in: "querystring"): content must hold exactly one media type, found 2 media types; ' +
+          '"application/x-www-form-urlencoded" is used',
+      ]);
+    });
+
+    it('warns about a parameter listed twice in one list, at each one ignored, but not across levels', async () => {
+      const limit = { name: 'limit', in: 'query', schema: { type: 'integer' } };
+      const result = await validate(
+        doc('3.1.0', {
+          '/a': {
+            parameters: [limit, { ...limit, in: 'header' }, limit],
+            get: {
+              operationId: 'a',
+              responses: ok,
+              parameters: [limit, { name: 'x', in: 'query', schema: {} }, limit, limit, { $ref: '#/x' }, { $ref: '#/x' }],
+            },
+          },
+        }),
+      );
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toEqual([
+        {
+          code: 'DUPLICATE_PARAMETER',
+          path: '/paths/~1a/parameters/0',
+          message:
+            'Parameter "limit" (in: "query") appears again at index 2 of the same list, but a parameter list must not ' +
+            'repeat a name and location; this one is ignored',
+        },
+        expect.objectContaining({ code: 'DUPLICATE_PARAMETER', path: '/paths/~1a/get/parameters/0' }),
+        expect.objectContaining({ code: 'DUPLICATE_PARAMETER', path: '/paths/~1a/get/parameters/2' }),
+      ]);
+      expect(result.warnings![1].message).toContain('appears again at index 3');
+    });
+
+    it('bounds and escapes the parameter text in these warnings', async () => {
+      const name = `${'n'.repeat(10_000)}\u001b[31m`;
+      const result = await validate(
+        opParameters('3.0.3', [
+          { name, in: 'query', schema: {} },
+          { name, in: 'query', content: { [`${'m'.repeat(10_000)}\n`]: {}, 'x/y': {} } },
+        ]),
+      );
+      for (const warning of result.warnings!) {
+        expect(warning.message.length).toBeLessThan(400);
+        expect(warning.message).not.toMatch(/[\u0000-\u001f]/);
+      }
+      expect(result.warnings!.map((w) => w.code)).toEqual(['INVALID_PARAMETER_CONTENT', 'DUPLICATE_PARAMETER']);
+    });
   });
 
   describe('bounded findings on hostile documents', () => {

@@ -190,6 +190,239 @@ describe('story: serialization on the wire', () => {
   });
 });
 
+describe('story: OpenAPI 3.2 parameter serialization on the wire', () => {
+  // Expected bytes are the OpenAPI 3.2.1 specification's own examples where
+  // it gives one ("Parameter Object Examples", "Style Examples"). The server
+  // records the raw request target and headers, before any decoding.
+  const tool = (path: string, mapper: ParameterMapper[], method = 'get'): McpOpenAPITool => ({
+    name: 'hand_made',
+    description: 'hand made',
+    inputSchema: { type: 'object', properties: {} },
+    mapper,
+    metadata: { path, method },
+  });
+  const wholeQuery = (contentType: string): ParameterMapper => ({
+    inputKey: 'q',
+    type: 'query',
+    key: 'q',
+    wholeQuery: true,
+    serialization: { contentType },
+  });
+
+  const loopback = createLoopbackServer(() => (_req, res) => {
+    res.writeHead(204);
+    res.end();
+  });
+  let baseUrl: string;
+  beforeAll(async () => {
+    baseUrl = await loopback.listen();
+  });
+  afterAll(() => loopback.close());
+  beforeEach(() => loopback.reset());
+
+  const send = async (built: ReturnType<typeof buildHttpRequest>) => {
+    await sendBuiltRequest(built);
+    return loopback.requests.at(-1)!;
+  };
+
+  it('sends a form-urlencoded whole query as the query string, credentials appended as pairs', async () => {
+    // in: querystring, content: application/x-www-form-urlencoded
+    //   dataValue: { foo: 'a + b', bar: true }   serializedValue: foo=a+%2B+b&bar=true
+    const plain = await send(buildHttpRequest(tool('/foo', [wholeQuery('application/x-www-form-urlencoded')]), { q: { foo: 'a + b', bar: true } }, { baseUrl }));
+    expect(plain.url).toBe('/foo?foo=a+%2B+b&bar=true');
+
+    const withKey = await send(
+      buildHttpRequest(
+        tool('/foo', [
+          wholeQuery('application/x-www-form-urlencoded'),
+          { inputKey: 'key', type: 'query', key: 'api_key', security: { scheme: 'k', type: 'apiKey', apiKeyIn: 'query' } },
+        ]),
+        { q: { tags: ['x', 'y z'] }, key: 'k 1' },
+        { baseUrl },
+      ),
+    );
+    expect(withKey.url).toBe('/foo?tags=x&tags=y+z&api_key=k+1');
+    expect([...new URL(`http://x${withKey.url}`).searchParams]).toEqual([
+      ['tags', 'x'],
+      ['tags', 'y z'],
+      ['api_key', 'k 1'],
+    ]);
+  });
+
+  it('sends a JSON whole query as the percent-encoded JSON text', async () => {
+    // in: querystring, content: application/json, dataValue: { numbers: [1, 2], flag: null }
+    //   https://example.com/foo?%7B%22numbers%22%3A%5B1%2C2%5D%2C%22flag%22%3Anull%7D
+    const captured = await send(
+      buildHttpRequest(tool('/foo', [wholeQuery('application/json')]), { q: { numbers: [1, 2], flag: null } }, { baseUrl }),
+    );
+
+    expect(captured.url).toBe('/foo?%7B%22numbers%22%3A%5B1%2C2%5D%2C%22flag%22%3Anull%7D');
+    expect(JSON.parse(decodeURIComponent(captured.url.slice('/foo?'.length)))).toEqual({ numbers: [1, 2], flag: null });
+  });
+
+  it('sends any other whole query media type percent-encoded (the JSONPath example)', async () => {
+    // in: querystring, content: application/jsonpath, example: $.a.b[1:1]
+    //   https://example.com/foo?%24.a.b%5B1%3A1%5D
+    const captured = await send(buildHttpRequest(tool('/foo', [wholeQuery('application/jsonpath')]), { q: '$.a.b[1:1]' }, { baseUrl }));
+
+    expect(captured.url).toBe('/foo?%24.a.b%5B1%3A1%5D');
+  });
+
+  it('sends nothing when a query credential cannot join a whole query that has no pairs', () => {
+    const json = tool('/foo', [
+      wholeQuery('application/json'),
+      { inputKey: 'key', type: 'query', key: 'api_key', security: { scheme: 'k', type: 'apiKey', apiKeyIn: 'query' } },
+    ]);
+
+    expect(() => buildHttpRequest(json, { q: { a: 1 }, key: 'k' }, { baseUrl })).toThrow(RequestBuildError);
+    expect(loopback.requests).toHaveLength(0);
+  });
+
+  it('sends nothing when the input names a credential or a sibling cookie', () => {
+    const queryKey: ParameterMapper = {
+      inputKey: 'key',
+      type: 'query',
+      key: 'api_key',
+      security: { scheme: 'k', type: 'apiKey', apiKeyIn: 'query' },
+    };
+    const sessionCookie: ParameterMapper = {
+      inputKey: 'session',
+      type: 'cookie',
+      key: 'session',
+      security: { scheme: 's', type: 'apiKey', apiKeyIn: 'cookie' },
+    };
+    const attempts: Array<[McpOpenAPITool, Record<string, unknown>]> = [
+      [tool('/foo', [wholeQuery('application/x-www-form-urlencoded'), queryKey]), { q: { api_key: 'attacker' }, key: 'real' }],
+      [tool('/foo', [wholeQuery('application/x-www-form-urlencoded'), queryKey]), { q: { api_key: 'attacker' } }],
+      [tool('/k', [{ inputKey: 'c', type: 'cookie', key: 'c', style: 'cookie' }, sessionCookie]), { c: { session: 'attacker' } }],
+      [tool('/k', [{ inputKey: 'theme', type: 'cookie', key: 'theme' }, { inputKey: 'c', type: 'cookie', key: 'c', style: 'cookie' }]), { theme: 'dark', c: { theme: 'evil' } }],
+      [tool('/q', [{ inputKey: 'o', type: 'query', key: 'o' }, queryKey]), { o: { api_key: 'attacker' } }],
+    ];
+
+    for (const [unsafe, input] of attempts) {
+      expect(() => buildHttpRequest(unsafe, input, { baseUrl })).toThrow(/which this tool reserves for/);
+    }
+    expect(loopback.requests).toHaveLength(0);
+  });
+
+  it('sends a JSON header with non-ASCII text as ASCII escapes, which fetch would otherwise refuse', async () => {
+    const header = tool('/h', [{ inputKey: 'f', type: 'header', key: 'X-Filter', serialization: { contentType: 'application/json' } }]);
+    const captured = await send(buildHttpRequest(header, { f: { name: 'Zoë 中 😀' } }, { baseUrl }));
+
+    expect(captured.headers['x-filter']).toBe('{"name":"Zo\\u00eb \\u4e2d \\ud83d\\ude00"}');
+    expect(JSON.parse(captured.headers['x-filter'] as string)).toEqual({ name: 'Zoë 中 😀' });
+  });
+
+  it('sends a content: application/json query parameter as its percent-encoded JSON text', async () => {
+    // in: query, name: coordinates, content: application/json, dataValue: { lat: 40.6, long: -73.9 }
+    //   serializedValue: coordinates=%7B%22lat%22%3A40.6%2C%22long%22%3A-73.9%7D
+    const captured = await send(
+      buildHttpRequest(
+        tool('/c', [{ inputKey: 'coordinates', type: 'query', key: 'coordinates', serialization: { contentType: 'application/json' } }]),
+        { coordinates: { lat: 40.6, long: -73.9 } },
+        { baseUrl },
+      ),
+    );
+
+    expect(captured.url).toBe('/c?coordinates=%7B%22lat%22%3A40.6%2C%22long%22%3A-73.9%7D');
+    expect(JSON.parse(new URL(`http://x${captured.url}`).searchParams.get('coordinates')!)).toEqual({ lat: 40.6, long: -73.9 });
+  });
+
+  it('sends a JSON header parameter as the JSON text, unencoded, with CR and LF escaped by JSON', async () => {
+    const header = tool('/h', [{ inputKey: 'f', type: 'header', key: 'X-Filter', serialization: { contentType: 'application/json' } }]);
+
+    const plain = await send(buildHttpRequest(header, { f: { name: 'Ada Lovelace', tags: ['a', 'b'] } }, { baseUrl }));
+    expect(plain.headers['x-filter']).toBe('{"name":"Ada Lovelace","tags":["a","b"]}');
+
+    const hostile = await send(buildHttpRequest(header, { f: { s: 'x\r\nX-Injected: 1' } }, { baseUrl }));
+    expect(hostile.headers['x-filter']).toBe('{"s":"x\\r\\nX-Injected: 1"}');
+    expect(hostile.headers['x-injected']).toBeUndefined();
+    expect(JSON.parse(hostile.headers['x-filter'] as string)).toEqual({ s: 'x\r\nX-Injected: 1' });
+  });
+
+  // Style Examples, `color` = "blue" / ["blue", "black", "brown"] / { "R": 100, "G": 200, "B": 150 }:
+  //   | cookie | true | color= | color=blue | color=blue; color=black; color=brown | R=100; G=200; B=150 |
+  it.each([
+    ['a primitive', 'blue', 'color=blue'],
+    ['an array', ['blue', 'black', 'brown'], 'color=blue; color=black; color=brown'],
+    ['an object', { R: 100, G: 200, B: 150 }, 'R=100; G=200; B=150'],
+  ])('sends style: cookie for %s as the specification table gives it', async (_label, color, expected) => {
+    const captured = await send(
+      buildHttpRequest(tool('/k', [{ inputKey: 'color', type: 'cookie', key: 'color', style: 'cookie' }]), { color }, { baseUrl }),
+    );
+
+    expect(captured.headers.cookie).toBe(expected);
+  });
+
+  it('sends the parameters of a tool generated from an OpenAPI 3.2 document', async () => {
+    // Generated, not hand-made: the mapper comes from the generation side
+    // (in: querystring -> wholeQuery, content -> serialization.contentType,
+    // style: cookie carried on the cookie entry)
+    const generator = await OpenAPIToolGenerator.fromJSON({
+      openapi: '3.2.0',
+      info: { title: 'Search', version: '1.0.0' },
+      servers: [{ url: 'https://api.example.com' }],
+      paths: {
+        '/search': {
+          get: {
+            operationId: 'search',
+            parameters: [
+              {
+                name: 'filter',
+                in: 'querystring',
+                content: {
+                  'application/x-www-form-urlencoded': {
+                    schema: { type: 'object', properties: { foo: { type: 'string' }, bar: { type: 'boolean' } } },
+                  },
+                },
+              },
+              {
+                name: 'X-Context',
+                in: 'header',
+                content: { 'application/json': { schema: { type: 'object', properties: { tenant: { type: 'string' } } } } },
+              },
+              { name: 'prefs', in: 'cookie', style: 'cookie', schema: { type: 'object', properties: { theme: { type: 'string' }, size: { type: 'integer' } } } },
+            ],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+        '/near': {
+          get: {
+            operationId: 'near',
+            parameters: [
+              {
+                name: 'coordinates',
+                in: 'query',
+                content: { 'application/json': { schema: { type: 'object', properties: { lat: { type: 'number' }, long: { type: 'number' } } } } },
+              },
+              { name: 'json', in: 'cookie', style: 'cookie', schema: { type: 'array', items: { type: 'string' } } },
+            ],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    });
+    const tools = new Map((await generator.generateTools()).map((generated) => [generated.name, generated]));
+
+    const search = await send(
+      buildHttpRequest(
+        tools.get('search')!,
+        { filter: { foo: 'a + b', bar: true }, 'X-Context': { tenant: 'acme' }, prefs: { theme: 'dark', size: 2 } },
+        { baseUrl },
+      ),
+    );
+    expect(search.url).toBe('/search?foo=a+%2B+b&bar=true');
+    expect(search.headers['x-context']).toBe('{"tenant":"acme"}');
+    expect(search.headers.cookie).toBe('theme=dark; size=2');
+
+    const near = await send(
+      buildHttpRequest(tools.get('near')!, { coordinates: { lat: 40.6, long: -73.9 }, json: ['a', 'b'] }, { baseUrl }),
+    );
+    expect(near.url).toBe('/near?coordinates=%7B%22lat%22%3A40.6%2C%22long%22%3A-73.9%7D');
+    expect(near.headers.cookie).toBe('json=a; json=b');
+  });
+});
+
 describe('story: methods beyond the original eight on the wire', () => {
   // Hand-made tools, not generated: this story is about what buildHttpRequest
   // puts on the request line, whatever produced `metadata.method`. Node's

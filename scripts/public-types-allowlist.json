@@ -212,6 +212,12 @@
         { "kind": "property-added-required", "leaf": "OpenAPIToolGenerator.getDiagnostics", "exports": ["FromArazzoOptions", "OpenAPIToolGenerator", "typeof OpenAPIToolGenerator", "typeof fromArazzo"] },
         { "kind": "property-added-required", "leaf": "OpenAPIToolGenerator.getSpecVersion", "exports": ["FromArazzoOptions", "OpenAPIToolGenerator", "typeof OpenAPIToolGenerator", "typeof fromArazzo"] }
       ]
+    },
+    {
+      "reason": "`ResponseBuilder` gains the public method `buildStream(responses?)`, which returns the streamed response of an operation (a `ResponseStreamInfo` built from an OpenAPI 3.2 `itemSchema`) or `undefined`; code that calls or extends the class is unaffected, and only a hand-written stand-in typed as the class's public members needs to add it.",
+      "differences": [
+        { "kind": "property-added-required", "leaf": "ResponseBuilder.buildStream", "exports": ["ResponseBuilder", "typeof ResponseBuilder"] }
+      ]
     }
   ]
 }
