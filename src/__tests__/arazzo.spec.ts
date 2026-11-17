@@ -406,11 +406,82 @@ describe('fromArazzo schema node budget', () => {
     // The step's own schemas fit the budget — only the wide workflow input exceeds it
     const small = arazzoWith([simpleWorkflow()]);
     await expect(fromArazzo(small, { sources: sources(), generateOptions: { maxSchemaNodes: 40 } })).resolves.toHaveLength(1);
+    // Not even depth 1 fits: the workflow fails, and nothing is reported
+    const onDiagnostic = jest.fn();
     await expectArazzoError(
-      fromArazzo(doc, { sources: sources(), generateOptions: { maxSchemaNodes: 40 } }),
-      /^Failed to build workflow "getPetFlow": .*node budget of 40 \(maxSchemaNodes\)/,
+      fromArazzo(doc, { sources: sources(), generateOptions: { maxSchemaNodes: 40 }, onDiagnostic }),
+      /^Failed to build workflow "getPetFlow": its input schema exceeds the node budget of 40 \(maxSchemaNodes\) even cut at depth 1 \(maxSchemaDepth 10 was tried first\)/,
       '/workflows/0',
     );
+    expect(onDiagnostic).not.toHaveBeenCalled();
+  });
+
+  /** An inline object schema `levels` deep with three properties per level */
+  const tree = (levels: number): any =>
+    levels === 0
+      ? { type: 'string' }
+      : { type: 'object', properties: { a: tree(levels - 1), b: tree(levels - 1), c: tree(levels - 1) } };
+
+  /** The workflow with a deep `filter` input, which its outputs return as well */
+  const deepWorkflow = () =>
+    simpleWorkflow({
+      inputs: { type: 'object', properties: { petId: { type: 'string' }, filter: tree(9) }, required: ['petId'] },
+      outputs: { pet: '$steps.fetch.outputs.pet', filter: '$inputs.filter' },
+    });
+
+  it('cuts a workflow schema over maxSchemaNodes at the deepest depth that fits, and reports it', async () => {
+    const findings: Array<[unknown, string | undefined]> = [];
+    const [tool] = await fromArazzo(arazzoWith([deepWorkflow()]), {
+      sources: sources(),
+      generateOptions: { maxSchemaNodes: 3000 },
+      onDiagnostic: (diagnostic, source) => findings.push([diagnostic, source]),
+    });
+
+    const message = (what: string, depth: number) =>
+      `Workflow "getPetFlow": its ${what} exceeds the node budget of 3000 (maxSchemaNodes) at maxSchemaDepth 10, ` +
+      `so it is cut at depth ${depth}; raise maxSchemaNodes to keep more of it`;
+    expect(findings).toEqual([
+      [{ severity: 'warning', code: 'SCHEMA_DEPTH_REDUCED', message: message('input schema', 6), path: '/workflows/0/inputs' }, undefined],
+      [{ severity: 'warning', code: 'SCHEMA_DEPTH_REDUCED', message: message('output schema', 6), path: '/workflows/0/outputs' }, undefined],
+    ]);
+    // Exactly the tool asked for at depth 6, which fits without a finding
+    const atSix = jest.fn();
+    const [direct] = await fromArazzo(arazzoWith([deepWorkflow()]), {
+      sources: sources(),
+      generateOptions: { maxSchemaNodes: 3000, maxSchemaDepth: 6 },
+      onDiagnostic: atSix,
+    });
+    expect(tool.inputSchema).toEqual(direct.inputSchema);
+    expect(tool.outputSchema).toEqual(direct.outputSchema);
+    expect(atSix).not.toHaveBeenCalled();
+  });
+
+  it('passes on the diagnostics of the generators it creates for raw sources, a step cut shallower among them', async () => {
+    const pets = petstoreDoc();
+    pets.paths['/pets/{petId}'].get.responses['200'].content['application/json'].schema = tree(9);
+    const findings: Array<[any, string | undefined]> = [];
+    await fromArazzo(arazzoWith([simpleWorkflow()]), {
+      sources: { pets, orders: ordersDoc() },
+      generateOptions: { maxSchemaNodes: 3000 },
+      onDiagnostic: (diagnostic, source) => findings.push([diagnostic, source]),
+    });
+
+    expect(findings.map(([d, source]) => [d.code, d.path, source])).toEqual([
+      // The workflow's output returns the step's response, already cut, so it fits
+      ['SCHEMA_DEPTH_REDUCED', '/paths/~1pets~1{petId}/get/responses', 'pets'],
+    ]);
+    expect(findings[0][0].message).toContain('GET /pets/{petId}: its output schema exceeds');
+
+    // A generator passed in keeps its findings
+    const generator = await OpenAPIToolGenerator.fromJSON(pets);
+    const onDiagnostic = jest.fn();
+    await fromArazzo(arazzoWith([simpleWorkflow()]), {
+      sources: { pets: generator, orders: ordersDoc() },
+      generateOptions: { maxSchemaNodes: 3000 },
+      onDiagnostic,
+    });
+    expect(onDiagnostic).not.toHaveBeenCalled();
+    expect(generator.getDiagnostics().map((d) => d.code)).toEqual(['SCHEMA_DEPTH_REDUCED']);
   });
 });
 

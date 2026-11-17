@@ -1,4 +1,5 @@
 import { SchemaError } from './errors';
+import { referenceAt } from './reference-sites';
 
 /**
  * A node budget that every value copied for one schema, or one tool, counts
@@ -50,6 +51,14 @@ export interface CopyOptions {
    * `_meta`. Otherwise every key is kept, `__proto__` as an own property.
    */
   omitPrototypeKeys?: boolean;
+  /**
+   * Give back as `{ $ref }` each value dereferencing put in place of a `$ref`
+   * (src/reference-sites.ts), as the document wrote it, instead of copying the
+   * resolved value — for a specification extension, where a `$ref` is no
+   * Reference Object. Each costs two nodes, the object and its text. The root
+   * itself is the caller's to check: only its container knows it.
+   */
+  asWritten?: boolean;
 }
 
 /**
@@ -80,13 +89,16 @@ interface CopyFrame {
  * serializes as `null`. A reference back to an enclosing value (a cycle)
  * is dropped, and a value nested more than `MAX_VALUE_DEPTH` levels throws a
  * `SchemaError`. The walk keeps its own stack, so depth costs no call stack.
+ * With `asWritten` (a schema's extension), each resolved `$ref` is given back
+ * as the `$ref` instead, so it is neither shared nor expanded.
  */
 export function copyJsonValue(root: unknown, budget: CopyBudget, options: CopyOptions): unknown {
   if (root === null || typeof root !== 'object') {
     chargeBudget(budget);
     return root;
   }
-  return copyFlat(root, budget, options) ?? copyTree(root, budget, options);
+  // A flat container may hold a `$ref` given back as written (one to a boolean schema)
+  return (options.asWritten ? undefined : copyFlat(root, budget, options)) ?? copyTree(root, budget, options);
 }
 
 /**
@@ -164,7 +176,7 @@ function copyTree(root: object, budget: CopyBudget, options: CopyOptions): unkno
         maxDepth: MAX_VALUE_DEPTH,
       });
     }
-    const flat = copyFlat(node, budget, options);
+    const flat = options.asWritten ? undefined : copyFlat(node, budget, options);
     if (flat) return flat;
     push(node);
     return pending;
@@ -196,6 +208,14 @@ function copyTree(root: object, budget: CopyBudget, options: CopyOptions): unkno
     }
     if (frame.next < frame.values.length) {
       const index = frame.next++;
+      const ref = options.asWritten
+        ? referenceAt(frame.node, frame.keys ? frame.keys[index] : index, frame.values[index])
+        : undefined;
+      if (ref !== undefined) {
+        chargeBudget(budget, 2);
+        store(frame, index, { $ref: ref });
+        continue;
+      }
       const child = enter(frame.values[index]);
       if (child !== pending) store(frame, index, child);
       continue;

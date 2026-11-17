@@ -700,6 +700,7 @@ With `validate: false` the second stage never happens. `generator.validate()` re
 | `INVALID_PARAMETER_NAME` | A parameter's `name` is absent, `null`, `''`, an array or an object, so it cannot be sent: the operation makes no tool. A validation error too (`MISSING_PARAMETER_NAME` for an absent, `null` or empty name) | Generation (validation: error) |
 | `REQUIRED_INPUT_ACCEPTS_NOTHING` | A required input of a tool (a parameter, a body property, a whole body) has a schema that accepts no value (`false`, or `{ not: {} }`), so no call can succeed. The tool is still made | Generation |
 | `UNSUPPORTED_STREAMING_REQUEST_BODY` | A request body's media type declares only `itemSchema` (a streamed upload); the tool takes no body input | Generation |
+| `SCHEMA_DEPTH_REDUCED` | A tool's input, output or stream item schema exceeds `maxSchemaNodes` at `maxSchemaDepth`, so it is cut at the deepest depth where it fits; the message names the schema and the depth. The tool is still made (see [maxSchemaNodes](./configuration.md#maxschemanodes)) | Generation |
 | `UNREADABLE_REFERENCE` | **A validation error only, never a `getDiagnostics()` entry.** `generator.validate()` returns it, instead of throwing, for a `$ref` it cannot read (refused by a `refResolution` rule, missing, not JSON or YAML, a pointer that leads nowhere, ...). `message` is the `ParseError` message of generation without its prefix; `path` is the JSON Pointer of the `$ref` when it is in the document itself | `validate()` result |
 | `DEREFERENCE_REQUIRED` | **A validation error only, never a `getDiagnostics()` entry.** A Swagger 2.0 document loaded with `dereference: false`, which the conversion cannot read. `generator.validate()` returns it; generation and `lint()` throw a `ParseError` that carries it in `context.errors`. `path` is `/swagger` | `validate()` result, `ParseError` |
 | `DIAGNOSTICS_TRUNCATED` | The list reached `MAX_DIAGNOSTICS`; findings after it were not recorded, and the message counts the warnings and the infos left out (see [Limits and escaping](#limits-and-escaping)) | Last entry |
@@ -1403,9 +1404,51 @@ tool.outputSchema.properties.pet;
 
 The one exception is a document that declares 3.1 (or names a JSON Schema dialect or an `$id` of its own) and also references another document: the reference resolver then reads `#` references against the nearest `$id`, so the absolute reference is left as written for it to read.
 
+### A schema over `maxSchemaNodes` is cut shallower instead of failing the tool
+
+A schema that exceeded the node budget at `maxSchemaDepth` failed its tool with a `SchemaError` (`Lower maxSchemaDepth or raise maxSchemaNodes`), and `generateTools()` left the tool out. That schema is now built again at the deepest depth that fits, and the operation gets a `SCHEMA_DEPTH_REDUCED` warning; only the schema over the budget is cut shallower, the tool's other schemas keep `maxSchemaDepth`. A tool fails only when not even depth 1 fits, with a new message (`The output schema of GET /item exceeds the node budget of 20 (maxSchemaNodes) even cut at depth 1 (maxSchemaDepth 10 was tried first): ... Raise maxSchemaNodes.`).
+
+```typescript
+// GET /item returns S0, whose five properties all reference S1, and so on: 5^10 nodes at depth 10
+const tools = await generator.generateTools();
+```
+
+Before: no `getItem` tool, and `console.warn('Failed to generate tool for GET /item:', 'Schema exceeds the node budget of 100000 (maxSchemaNodes) after depth truncation: ...')` (the default budget was 100000).
+
+After:
+
+```typescript
+tools.map((t) => t.name); // ['getItem', ...]
+generator.getDiagnostics()[0].message;
+// 'GET /item: its output schema exceeds the node budget of 25000 (maxSchemaNodes) at maxSchemaDepth 10, so it is cut at depth 5; raise maxSchemaNodes to keep more of it'
+```
+
+### The default `maxSchemaNodes` is 25,000 (it was 100,000)
+
+A schema over the budget used to cost its tool, so the default was set high enough to only stop schemas no client could use. It now costs depth, so the default is set to cut only the outliers: the largest tools of the pinned GitHub and Discord descriptions need 22,232 and 19,225 nodes and stay whole, as does every tool of the 35 public descriptions in the maintainers' survey corpus (`scripts/spec-corpus/`) that load, except Microsoft Graph (811 tools), Stripe (171) and Datadog (2), whose largest tools go from 20 MB, 3 MB and 1.5 MB to 5 MB, 0.9 MB and 1.1 MB. The extension meta, the values a tool copies from the spec and a client target's inlining share the budget and still fail the tool past it: none of those descriptions comes near. `maxSchemaNodes: 100000` gives the earlier tools back (with the shallower cut).
+
+### A `$ref` inside a schema's `x-` extension is kept as written
+
+Dereferencing resolves every `$ref`, including one inside a specification extension, where OpenAPI defines no Reference Object. A tool's schema then carried the resolved value: for Stripe's `x-expansionResources`, the whole graph of the schemas an expandable field expands to: 110 of its 606 operations failed whatever `maxSchemaDepth`, and 212 more failed at the default depth. In a tool's input, output and stream item schemas, an extension now holds each `$ref` as the dereferencer read it (relative to the file it was written in, a reference to the document's own URI in its local form, without keywords next to it; see [maxSchemaNodes](./configuration.md#maxschemanodes)). Nothing else changes: the schemas are dereferenced, a `$ref` in a `default` or an example is still resolved, `getDocument()` returns the dereferenced document, and the `x-mcp` / `x-frontmcp` meta of an operation is still resolved.
+
+```typescript
+// components.schemas.charge.properties.customer:
+//   { anyOf: [...], 'x-expansionResources': { oneOf: [{ $ref: '#/components/schemas/customer' }] } }
+const tool = await generator.generateTool('/v1/charges/{charge}', 'get');
+```
+
+Before: a `SchemaError` (`Schema exceeds the node budget of 100000 (maxSchemaNodes) after depth truncation`), whatever `maxSchemaDepth`.
+
+After:
+
+```typescript
+tool.outputSchema.properties.customer.anyOf[0]['x-expansionResources'];
+// { oneOf: [{ $ref: '#/components/schemas/customer' }, { $ref: '#/components/schemas/deleted_customer' }] }
+```
+
 ### Fields that only add
 
-`x-parameter-content-type` and `x-parameter-whole-query` on input properties, `wholeQuery` on a mapper entry, `queryString` on a built request, `metadata.servers[].name`, `metadata.responseStream` and `responseHints.streaming`, `LoadOptions.documentUri`, `rule`, `reference`, `base`, `resolved` and `path` on the `context` of a `ParseError`, `context.reason` on an `SsrfError`, `metadata.responseStatusRanges` and the type `ResponseStatusRange`, `upgradeSwagger2` with its options (`documentUri`, `maxEntries`) and result types (`document`, `diagnostics`, `parameterIndexes`, `tooLarge`), `MAX_MEDIA_TYPES_PER_LIST` and `MAX_CONVERSION_ENTRIES`, and the `OAS20` types, the `SWAGGER_*` conversion codes (and `DEREFERENCE_REQUIRED` and `INVALID_BASE_PATH`, validation errors for a Swagger 2.0 document), the `info` severity of a diagnostic and `SpecDiagnostic.document`, and the new warnings (`INVALID_PARAMETER_CONTENT`, `DUPLICATE_PARAMETER`, `PARAMETER_NAME_NOT_STRING`, `REQUIRED_INPUT_ACCEPTS_NOTHING`, `UNSUPPORTED_STREAMING_REQUEST_BODY`, `COOKIE_CONTENT_NOT_SENDABLE`, `QUERYSTRING_WITH_QUERY_CREDENTIAL`, `INVALID_SELF`, `REFUSED_SELF`, `UNRESOLVABLE_SELF`, `BASE_URI_TOO_LONG`; a valid document stays valid, apart from a 3.2 document whose `$self` is not a URI reference, which `validate()` now rejects with `INVALID_SELF`). `fromArazzo` rejects a `loadOptions.documentUri` with an `ArazzoError` (see [Arazzo Workflows](./arazzo.md#sources)).
+`x-parameter-content-type` and `x-parameter-whole-query` on input properties, `wholeQuery` on a mapper entry, `queryString` on a built request, `metadata.servers[].name`, `metadata.responseStream` and `responseHints.streaming`, `LoadOptions.documentUri`, `rule`, `reference`, `base`, `resolved` and `path` on the `context` of a `ParseError`, `context.reason` on an `SsrfError`, `metadata.responseStatusRanges` and the type `ResponseStatusRange`, `upgradeSwagger2` with its options (`documentUri`, `maxEntries`) and result types (`document`, `diagnostics`, `parameterIndexes`, `tooLarge`), `MAX_MEDIA_TYPES_PER_LIST` and `MAX_CONVERSION_ENTRIES`, and the `OAS20` types, the `SWAGGER_*` conversion codes (and `DEREFERENCE_REQUIRED` and `INVALID_BASE_PATH`, validation errors for a Swagger 2.0 document), the `info` severity of a diagnostic and `SpecDiagnostic.document`, and the new warnings (`INVALID_PARAMETER_CONTENT`, `DUPLICATE_PARAMETER`, `PARAMETER_NAME_NOT_STRING`, `REQUIRED_INPUT_ACCEPTS_NOTHING`, `SCHEMA_DEPTH_REDUCED`, `UNSUPPORTED_STREAMING_REQUEST_BODY`, `COOKIE_CONTENT_NOT_SENDABLE`, `QUERYSTRING_WITH_QUERY_CREDENTIAL`, `INVALID_SELF`, `REFUSED_SELF`, `UNRESOLVABLE_SELF`, `BASE_URI_TOO_LONG`; a valid document stays valid, apart from a 3.2 document whose `$self` is not a URI reference, which `validate()` now rejects with `INVALID_SELF`). `fromArazzo` rejects a `loadOptions.documentUri` with an `ArazzoError` (see [Arazzo Workflows](./arazzo.md#sources)).
 
 ### If you wrote your own request builder
 

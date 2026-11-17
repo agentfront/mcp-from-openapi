@@ -1,5 +1,6 @@
 import { copyJsonValue, MAX_VALUE_DEPTH, type CopyBudget } from '../json-copy';
 import { SchemaError } from '../errors';
+import { recordReferenceSite } from '../reference-sites';
 
 const budgetOf = (maxNodes = Infinity): CopyBudget => ({
   maxNodes,
@@ -111,5 +112,79 @@ describe('copyJsonValue', () => {
     expect(nested).toHaveLength(3);
     expect(1 in nested).toBe(false);
     expect(nested[2]).toEqual({ b: 2 });
+  });
+
+  describe('asWritten', () => {
+    const target = () => ({ type: 'object', properties: { id: { type: 'string' } } });
+    /** A value as a dereferencer leaves it: `target` sits where `{ $ref }` stood, and is recorded there */
+    const resolved = () => {
+      const customer = target();
+      const list: unknown[] = [customer, 'literal'];
+      const nested = { oneOf: list, also: customer, flag: false };
+      recordReferenceSite(list, 0, '#/components/schemas/Customer', customer);
+      recordReferenceSite(nested, 'also', '#/components/schemas/Customer', customer);
+      recordReferenceSite(nested, 'flag', '#/components/schemas/Never', false);
+      return nested;
+    };
+
+    it('gives back each value put in place of a $ref as that $ref, two nodes each', () => {
+      const budget = budgetOf();
+      const copy = copyJsonValue(resolved(), budget, { label: 'Value', asWritten: true });
+
+      expect(copy).toEqual({
+        oneOf: [{ $ref: '#/components/schemas/Customer' }, 'literal'],
+        also: { $ref: '#/components/schemas/Customer' },
+        // A $ref to a boolean schema became the boolean: given back too
+        flag: { $ref: '#/components/schemas/Never' },
+      });
+      // The value, the array, its two members (2 + 1), and the two other $refs (2 each)
+      expect(budget.nodes).toBe(1 + 1 + 3 + 2 + 2);
+    });
+
+    it('copies the resolved values without it, as before', () => {
+      expect(copyJsonValue(resolved(), budgetOf(), { label: 'Value' })).toEqual({
+        oneOf: [target(), 'literal'],
+        also: target(),
+        flag: false,
+      });
+    });
+
+    it('finds a resolved object again in a copy of its container, and drops a site whose value was replaced', () => {
+      const value = resolved();
+      // A copy of the container (a $ref with siblings, a rewritten schema): the object is found by itself
+      const copied = { ...value, flag: true };
+      // The value at a site replaced afterwards is not the reference
+      value.also = { replaced: true } as any;
+
+      expect(copyJsonValue({ copied }, budgetOf(), { label: 'Value', asWritten: true })).toEqual({
+        copied: {
+          oneOf: [{ $ref: '#/components/schemas/Customer' }, 'literal'],
+          also: { $ref: '#/components/schemas/Customer' },
+          // A boolean is found only at its site: here it is a new value
+          flag: true,
+        },
+      });
+      expect((copyJsonValue(value, budgetOf(), { label: 'Value', asWritten: true }) as any).also).toEqual({
+        replaced: true,
+      });
+    });
+
+    it('checks a container that holds only primitives, and leaves the root to the caller', () => {
+      const flat = { flag: false, name: 'n' };
+      recordReferenceSite(flat, 'flag', '#/Never', false);
+
+      expect(copyJsonValue(flat, budgetOf(), { label: 'Value', asWritten: true })).toEqual({
+        flag: { $ref: '#/Never' },
+        name: 'n',
+      });
+      expect(copyJsonValue({ inner: flat }, budgetOf(), { label: 'Value', asWritten: true })).toEqual({
+        inner: { flag: { $ref: '#/Never' }, name: 'n' },
+      });
+      expect(copyJsonValue('text', budgetOf(), { label: 'Value', asWritten: true })).toBe('text');
+    });
+
+    it('counts a $ref given back against the budget', () => {
+      expect(() => copyJsonValue(resolved(), budgetOf(4), { label: 'Value', asWritten: true })).toThrow('over 4');
+    });
   });
 });

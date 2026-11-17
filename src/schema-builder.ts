@@ -1,6 +1,7 @@
 import type { JSONSchema } from 'zod/v4/core';
 import { SchemaError } from './errors';
 import { chargeBudget, copyJsonValue, mapSlots, type CopyBudget } from './json-copy';
+import { isExtensionKey, referenceAt } from './reference-sites';
 
 /** JSON Schema type from Zod v4 */
 type JsonSchema = JSONSchema.JSONSchema;
@@ -18,11 +19,14 @@ export interface TruncateDepthOptions {
 }
 
 /**
- * Default `GenerateOptions.maxSchemaNodes`. The largest schemas the vendored
- * real-world specs (GitHub, Discord) produce at the default depth have ~5k
- * nodes (~440 KB of JSON), so this only stops schemas no client could use.
+ * Default `GenerateOptions.maxSchemaNodes`. Every tool of the full GitHub REST
+ * description fits 22,232 nodes at the default depth, and every tool of
+ * Discord's 19,225, so they keep their full depth. A schema over it is cut
+ * shallower (`SCHEMA_DEPTH_REDUCED`): Stripe's expandable fields and
+ * Microsoft Graph's navigation properties made tools of up to 3 MB and 20 MB
+ * at 100,000 nodes, 0.9 MB and 5 MB at this budget.
  */
-export const DEFAULT_MAX_SCHEMA_NODES = 100_000;
+export const DEFAULT_MAX_SCHEMA_NODES = 25_000;
 
 /**
  * Guard a depth bound: NaN/Infinity would disable truncation (`depth >= NaN`
@@ -53,6 +57,44 @@ export function resolveSchemaLimits(options: { maxSchemaDepth?: number; maxSchem
           ? Infinity
           : Math.max(1, Math.floor(nodes)),
   };
+}
+
+/** Whether `error` is a node-budget failure (`maxSchemaNodes`), which a smaller depth may avoid */
+export function isNodeBudgetError(error: unknown): error is SchemaError {
+  return error instanceof SchemaError && typeof error.context?.['maxNodes'] === 'number';
+}
+
+/**
+ * `build(maxDepth)`; when that exceeds the node budget, `build` at the deepest
+ * smaller depth that fits, found by bisection: a schema cut shallower never
+ * needs more nodes (conversion visits fewer, truncation keeps a subset). When
+ * no depth from 1 fits, `exhausted` throws with the first budget error; any
+ * other error is thrown as it is.
+ */
+export function fitSchemaDepth<T>(
+  maxDepth: number,
+  build: (depth: number) => T,
+  exhausted: (error: SchemaError) => never,
+): { value: T; depth: number } {
+  try {
+    return { value: build(maxDepth), depth: maxDepth };
+  } catch (error: unknown) {
+    if (!isNodeBudgetError(error)) throw error;
+    let fitted: { value: T; depth: number } | undefined;
+    let low = 1;
+    let high = maxDepth - 1;
+    while (low <= high) {
+      const depth = Math.floor((low + high) / 2);
+      try {
+        fitted = { value: build(depth), depth };
+        low = depth + 1;
+      } catch (retryError: unknown) {
+        if (!isNodeBudgetError(retryError)) throw retryError;
+        high = depth - 1;
+      }
+    }
+    return fitted ?? exhausted(error);
+  }
 }
 
 /** An object or array (a JSON container) */
@@ -504,6 +546,16 @@ export class SchemaBuilder {
     const childDepth = depth + 1;
     for (const key of Object.keys(copyRecord)) {
       const value = copyRecord[key];
+      const extension = isExtensionKey(key);
+      // A specification extension the document wrote as a `$ref` is given back
+      // as written (src/reference-sites.ts); `toJsonSchema` already did so for
+      // the schemas it converts, so this is for a dereferenced schema passed as is
+      const ref = extension ? referenceAt(node, key, value) : undefined;
+      if (ref !== undefined) {
+        chargeBudget(budget, 2);
+        copyRecord[key] = { $ref: ref };
+        continue;
+      }
       if (!isObject(value)) {
         chargeBudget(budget);
         continue;
@@ -526,8 +578,12 @@ export class SchemaBuilder {
       } else {
         // Any other object value (`default`, `examples`, `enum`, `x-*`, ...)
         // is copied too, so the tree shares nothing — and counted, as a `$ref`
-        // resolved inside a value can expand like a schema can
-        copyRecord[key] = copyJsonValue(value, budget, { label: `The \`${key}\` value of a schema` });
+        // resolved inside a value can expand like a schema can. Inside an
+        // extension, each `$ref` the document wrote is given back as written
+        copyRecord[key] = copyJsonValue(value, budget, {
+          label: `The \`${key}\` value of a schema`,
+          asWritten: extension,
+        });
       }
     }
     return copy;

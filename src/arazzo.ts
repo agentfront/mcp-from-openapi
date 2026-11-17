@@ -10,10 +10,10 @@
  * never fetches source URLs, performs HTTP, or evaluates expressions.
  */
 import { OpenAPIToolGenerator, fnv1aHex, normalizeToolName } from './generator';
-import { ArazzoError } from './errors';
+import { ArazzoError, SchemaError } from './errors';
 import { collectPayloadExpressions, parseExpressionValue, parseRuntimeExpression } from './arazzo-expressions';
 import { inferAnnotationsFromMethod } from './annotations';
-import { SchemaBuilder, resolveSchemaLimits } from './schema-builder';
+import { SchemaBuilder, fitSchemaDepth, resolveSchemaLimits } from './schema-builder';
 import { applyClientTarget } from './client-targets';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { emitToolTypeScript } from './type-signature';
@@ -29,6 +29,7 @@ import {
   resolveOperationLayout,
   toStandardMethod,
   wireMethod,
+  type SpecDiagnostic,
 } from './spec';
 import { fragmentPointerTokens } from './base-uri';
 import * as yaml from 'yaml';
@@ -123,6 +124,23 @@ export interface FromArazzoOptions {
    * `documentUri` here throws an `ArazzoError`.
    */
   loadOptions?: Pick<LoadOptions, 'dereference' | 'validate' | 'baseUrl' | 'overlays'>;
+
+  /**
+   * Called with each finding while the workflows are made, since
+   * `fromArazzo` returns only the tools:
+   *
+   * - a workflow's input or output schema cut shallower than `maxSchemaDepth`
+   *   to fit `maxSchemaNodes` (`SCHEMA_DEPTH_REDUCED`, with a `path` into the
+   *   Arazzo document and no `source`);
+   * - then the diagnostics of each generator `fromArazzo` created for a raw
+   *   document in `sources` (`source`: its name; `path` points into that
+   *   document), a step's tool cut shallower among them.
+   *
+   * Called once every tool is made, never when `fromArazzo` throws. A
+   * generator passed in `sources` keeps its findings in its own
+   * `getDiagnostics()`.
+   */
+  onDiagnostic?: (diagnostic: SpecDiagnostic, source?: string) => void;
 }
 
 const ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -489,6 +507,8 @@ function resolveInputRefs(node: unknown, components: ArazzoComponents | undefine
 
 interface SourceContext {
   generators: Map<string, OpenAPIToolGenerator>;
+  /** The sources given as raw documents, whose generators `fromArazzo` created */
+  created: Set<string>;
   /** operationId → every (source, path, method) that declares it. */
   operationIndex: Map<string, Array<{ source: string; path: string; method: HTTPMethod }>>;
   sourceTypes: Map<string, 'openapi' | 'arazzo'>;
@@ -560,6 +580,7 @@ async function prepareSources(doc: ArazzoDocument, options: FromArazzoOptions): 
   }
   const declared = new Map(doc.sourceDescriptions.map((s) => [s.name, s]));
   const generators = new Map<string, OpenAPIToolGenerator>();
+  const created = new Set<string>();
   const sourceTypes = new Map<string, 'openapi' | 'arazzo'>();
 
   for (const [name, source] of Object.entries(options.sources ?? {})) {
@@ -572,6 +593,7 @@ async function prepareSources(doc: ArazzoDocument, options: FromArazzoOptions): 
       generators.set(name, source);
     } else {
       generators.set(name, await OpenAPIToolGenerator.fromJSON(source, options.loadOptions));
+      created.add(name);
     }
   }
   for (const [name, source] of declared) {
@@ -592,7 +614,7 @@ async function prepareSources(doc: ArazzoDocument, options: FromArazzoOptions): 
       }
     }
   }
-  return { generators, operationIndex, sourceTypes };
+  return { generators, created, operationIndex, sourceTypes };
 }
 
 function requireGenerator(ctx: SourceContext, source: string, path: string): OpenAPIToolGenerator {
@@ -997,7 +1019,7 @@ function primaryResponseSchema(outputSchema: unknown): unknown {
 function deriveOutputSchema(
   ast: RuntimeExpressionAST,
   steps: Map<string, WorkflowStepIR>,
-  inputSchema: JsonSchema | undefined,
+  inputSchema: () => JsonSchema | undefined,
   depth: number,
   stepContext?: OperationStepIR,
 ): JsonSchema {
@@ -1022,7 +1044,8 @@ function deriveOutputSchema(
     return isRecord(target) ? (target as JsonSchema) : {};
   }
   if (ast.type === 'inputs') {
-    const properties = isRecord(inputSchema) ? inputSchema['properties'] : undefined;
+    const inputs = inputSchema();
+    const properties = isRecord(inputs) ? inputs['properties'] : undefined;
     // Input names may legally contain dots — the whole remainder is the name
     const target = isRecord(properties) ? properties[ast.path.join('.')] : undefined;
     return isRecord(target) ? (target as JsonSchema) : {};
@@ -1040,10 +1063,14 @@ function deriveOutputSchema(
   return {};
 }
 
+/**
+ * The output schema the workflow's `outputs` describe. `inputSchema` gives the
+ * converted workflow inputs, asked for only when an output is `$inputs.<name>`.
+ */
 function deriveOutputsSchema(
   outputs: Record<string, RuntimeExpressionAST> | undefined,
   steps: WorkflowStepIR[],
-  inputSchema: JsonSchema | undefined,
+  inputSchema: () => JsonSchema | undefined,
 ): JsonSchema | undefined {
   if (!outputs) {
     return undefined;
@@ -1065,15 +1092,18 @@ function deriveOutputsSchema(
 // Tool assembly
 // ---------------------------------------------------------------------------
 
-/** The exact generateTool post-pipeline: formats → depth → trims → target. */
-function applySchemaPipeline(schema: JsonSchema, options: ArazzoGenerateOptions, isInputRoot: boolean): JsonSchema {
+/** The format resolution of the generateTool pipeline, which runs before depth truncation */
+function resolveFormats(schema: JsonSchema, options: ArazzoGenerateOptions): JsonSchema {
   const formatResolvers = {
     ...(options.resolveFormats ? BUILTIN_FORMAT_RESOLVERS : {}),
     ...options.formatResolvers,
   };
-  let resolved = Object.keys(formatResolvers).length > 0 ? resolveSchemaFormats(schema, formatResolvers) : schema;
-  const { maxDepth, maxNodes } = resolveSchemaLimits(options);
-  resolved = SchemaBuilder.truncateDepth(resolved, maxDepth, { maxNodes });
+  return Object.keys(formatResolvers).length > 0 ? resolveSchemaFormats(schema, formatResolvers) : schema;
+}
+
+/** The rest of the generateTool pipeline, after depth truncation: trims → target */
+function shapeSchema(schema: JsonSchema, options: ArazzoGenerateOptions, isInputRoot: boolean): JsonSchema {
+  let resolved = schema;
   if (options.stripExamples) resolved = SchemaBuilder.stripExamples(resolved);
   if (options.maxDescriptionLength !== undefined) {
     resolved = SchemaBuilder.capDescriptions(resolved, options.maxDescriptionLength);
@@ -1093,33 +1123,92 @@ function applySchemaPipeline(schema: JsonSchema, options: ArazzoGenerateOptions,
     }
   }
   if (options.target) {
-    resolved = applyClientTarget(resolved, options.target, { maxNodes });
+    resolved = applyClientTarget(resolved, options.target, { maxNodes: resolveSchemaLimits(options).maxNodes });
   }
   return resolved;
 }
 
+/**
+ * The consolidated tool of one workflow, and the findings about it (a schema
+ * cut shallower), which hold only once the tool is made.
+ */
 function buildWorkflowTool(
   workflow: ArazzoWorkflow,
   stepIRs: WorkflowStepIR[],
   ctx: BuildContext,
   wPath: string,
-): McpOpenAPITool {
+): { tool: McpOpenAPITool; findings: SpecDiagnostic[] } {
   const options = ctx.generateOptions;
+  const findings: SpecDiagnostic[] = [];
 
-  // Input schema: workflow inputs → components refs resolved → normalized
+  // The generateTool pipeline: formats → depth → trims → target. As there, a
+  // schema over maxSchemaNodes at maxSchemaDepth is cut at the deepest depth
+  // that fits, and a conversion at maxSchemaDepth serves any smaller depth
+  const { maxDepth, maxNodes } = resolveSchemaLimits(options);
+  const fit = <T>(
+    what: string,
+    path: string,
+    build: (depth: number) => T,
+  ): T => {
+    const { value, depth } = fitSchemaDepth(maxDepth, build, (error) => {
+      throw new SchemaError(
+        `its ${what} exceeds the node budget of ${maxNodes} (maxSchemaNodes) even cut at depth 1 (maxSchemaDepth ` +
+          `${maxDepth} was tried first): shared or recursive $refs expand into more schema nodes than allowed. ` +
+          'Raise maxSchemaNodes.',
+        { ...error.context, maxNodes, maxSchemaDepth: maxDepth, schema: what },
+      );
+    });
+    if (depth !== maxDepth) {
+      findings.push({
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.SCHEMA_DEPTH_REDUCED,
+        message:
+          `Workflow ${describeValue(workflow.workflowId)}: its ${what} exceeds the node budget of ${maxNodes} ` +
+          `(maxSchemaNodes) at maxSchemaDepth ${maxDepth}, so it is cut at depth ${depth}; raise maxSchemaNodes to ` +
+          'keep more of it',
+        path,
+      });
+    }
+    return value;
+  };
+
+  // Input schema: workflow inputs → components refs resolved → normalized.
+  // The conversion at maxSchemaDepth serves any smaller depth too, so it is
+  // kept once it fits the budget
+  const resolvedInputs =
+    workflow.inputs !== undefined
+      ? resolveInputRefs(workflow.inputs, ctx.doc.components, `${wPath}/inputs`, new Set())
+      : undefined;
+  let inputsAtMaxDepth: JsonSchema | undefined;
+  const convertInputs = (depth: number): JsonSchema => {
+    if (inputsAtMaxDepth) return inputsAtMaxDepth;
+    const raw = toJsonSchema(resolvedInputs as SchemaObject, { maxDepth: depth, maxNodes });
+    if (depth === maxDepth) inputsAtMaxDepth = raw;
+    return raw;
+  };
   let inputSchema: JsonSchema;
   let rawInputSchema: JsonSchema | undefined;
-  if (workflow.inputs !== undefined) {
-    const resolved = resolveInputRefs(workflow.inputs, ctx.doc.components, `${wPath}/inputs`, new Set());
-    const { maxDepth, maxNodes } = resolveSchemaLimits(options);
-    rawInputSchema = toJsonSchema(resolved as SchemaObject, { maxDepth, maxNodes });
-    inputSchema = applySchemaPipeline(rawInputSchema, options, true);
+  if (resolvedInputs !== undefined) {
+    const input = fit('input schema', `${wPath}/inputs`, (depth) => {
+      const raw = convertInputs(depth);
+      return { raw, truncated: SchemaBuilder.truncateDepth(resolveFormats(raw, options), depth, { maxNodes }) };
+    });
+    rawInputSchema = input.raw;
+    inputSchema = shapeSchema(input.truncated, options, true);
   } else {
     inputSchema = { type: 'object', properties: {} };
   }
 
-  const derivedOutput = deriveOutputsSchema(parseOutputs(workflow.outputs, `${wPath}/outputs`), stepIRs, rawInputSchema);
-  const outputSchema = derivedOutput ? applySchemaPipeline(derivedOutput, options, false) : undefined;
+  // Output schema: derived at each depth tried from the inputs converted at
+  // that depth, so an input embedded in it is cut where the output is
+  const outputs = parseOutputs(workflow.outputs, `${wPath}/outputs`);
+  const output = fit('output schema', `${wPath}/outputs`, (depth) => {
+    const derived = deriveOutputsSchema(outputs, stepIRs, () =>
+      resolvedInputs === undefined ? undefined : convertInputs(depth),
+    );
+    return derived && SchemaBuilder.truncateDepth(resolveFormats(derived, options), depth, { maxNodes });
+  });
+  const outputSchema = output && shapeSchema(output, options, false);
 
   const name = normalizeToolName(workflow.workflowId, options.maxToolNameLength ?? 64, workflow.workflowId);
   const description =
@@ -1194,7 +1283,7 @@ function buildWorkflowTool(
       maxDepth: Math.max(1, options.maxSchemaDepth ?? 10),
     });
   }
-  return tool;
+  return { tool, findings };
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,6 +1355,7 @@ export async function fromArazzo(document: ArazzoDocument | string, options: Fro
   };
 
   const tools: McpOpenAPITool[] = [];
+  const findings: SpecDiagnostic[] = [];
   const usedNames = new Set<string>();
   for (let wIndex = 0; wIndex < doc.workflows.length; wIndex++) {
     const workflow = doc.workflows[wIndex];
@@ -1276,7 +1366,9 @@ export async function fromArazzo(document: ArazzoDocument | string, options: Fro
     }
     let tool: McpOpenAPITool;
     try {
-      tool = buildWorkflowTool(workflow, stepIRs, ctx, wPath);
+      const built = buildWorkflowTool(workflow, stepIRs, ctx, wPath);
+      tool = built.tool;
+      findings.push(...built.findings);
     } catch (error: unknown) {
       // Schema failures (e.g. maxSchemaNodes) surface as ArazzoError, like step failures
       if (error instanceof ArazzoError) throw error;
@@ -1299,6 +1391,13 @@ export async function fromArazzo(document: ArazzoDocument | string, options: Fro
     }
     usedNames.add(tool.name);
     tools.push(tool);
+  }
+  // Every tool is made: the findings about the workflows, then those of the generators made here
+  if (options.onDiagnostic) {
+    for (const finding of findings) options.onDiagnostic(finding);
+    for (const name of sources.created) {
+      for (const diagnostic of sources.generators.get(name)!.getDiagnostics()) options.onDiagnostic(diagnostic, name);
+    }
   }
   return tools;
 }

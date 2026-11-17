@@ -618,6 +618,8 @@ const UNPROCESSED_CODES: ReadonlySet<string> = new Set([
   'INVALID_PARAMETER_NAME',
   // the tool is made, but no call of it can succeed: a required input whose schema is `false` or `{ not: {} }`
   'REQUIRED_INPUT_ACCEPTS_NOTHING',
+  // the tool is made, with a schema cut shallower than maxSchemaDepth: at that depth it exceeds maxSchemaNodes
+  'SCHEMA_DEPTH_REDUCED',
   // the tool is made, but a call with some values cannot be built: a JSON cookie value that holds `"` or `,`, an API key
   // in the query string next to a whole query string that is not form-encoded
   'COOKIE_CONTENT_NOT_SENDABLE',

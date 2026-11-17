@@ -11,7 +11,7 @@ export interface ExtensionOverridesOptions {
    * `x-frontmcp` together): every copied value counts. Dereferencing resolves
    * `$ref`s there too, and each occurrence is copied, so a few `$ref`s to
    * schemas that share a child can expand into an enormous value. Past the
-   * budget a `SchemaError` is thrown. Defaults to 100000 —
+   * budget a `SchemaError` is thrown. Defaults to 25000 —
    * `OpenAPIToolGenerator` passes `maxSchemaNodes` — and `Infinity` disables it.
    */
   maxMetaNodes?: number;
