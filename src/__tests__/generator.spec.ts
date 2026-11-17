@@ -4946,35 +4946,35 @@ describe('Shared $ref expansion stays bounded (issue #48)', () => {
       .map((d) => `${d.message} @${d.path}`);
 
   it('cuts a schema over maxSchemaNodes at maxSchemaDepth at the deepest depth that fits, and says so', async () => {
-    // 5 references per level: 5^10 nodes survive the default depth truncation, 5^6 fit
+    // 5 references per level: 5^10 nodes survive the default depth truncation, 5^5 fit
     const generator = await OpenAPIToolGenerator.fromJSON(specWithChain(12, { width: 5 }));
     const tool = await generator.generateTool('/item', 'get');
 
     expect(reducedDepths(generator)).toEqual([
-      'GET /item: its output schema exceeds the node budget of 100000 (maxSchemaNodes) at maxSchemaDepth 10, so it ' +
-        'is cut at depth 6; raise maxSchemaNodes to keep more of it @/paths/~1item/get/responses',
+      'GET /item: its output schema exceeds the node budget of 25000 (maxSchemaNodes) at maxSchemaDepth 10, so it ' +
+        'is cut at depth 5; raise maxSchemaNodes to keep more of it @/paths/~1item/get/responses',
     ]);
-    // Exactly the tool asked for at depth 6, which fits without a diagnostic
+    // Exactly the tool asked for at depth 5, which fits without a diagnostic
+    const atFive = await OpenAPIToolGenerator.fromJSON(specWithChain(12, { width: 5 }));
+    expect(tool).toEqual(await atFive.generateTool('/item', 'get', { maxSchemaDepth: 5 }));
+    expect(reducedDepths(atFive)).toEqual([]);
+    // Depth 6 does not fit: asked for, it is cut at 5 too
     const atSix = await OpenAPIToolGenerator.fromJSON(specWithChain(12, { width: 5 }));
-    expect(tool).toEqual(await atSix.generateTool('/item', 'get', { maxSchemaDepth: 6 }));
-    expect(reducedDepths(atSix)).toEqual([]);
-    // Depth 7 does not fit: asked for, it is cut at 6 too
-    const atSeven = await OpenAPIToolGenerator.fromJSON(specWithChain(12, { width: 5 }));
-    expect(await atSeven.generateTool('/item', 'get', { maxSchemaDepth: 7 })).toEqual(tool);
-    expect(reducedDepths(atSeven)).toEqual([expect.stringContaining('at maxSchemaDepth 7, so it is cut at depth 6')]);
+    expect(await atSix.generateTool('/item', 'get', { maxSchemaDepth: 6 })).toEqual(tool);
+    expect(reducedDepths(atSix)).toEqual([expect.stringContaining('at maxSchemaDepth 6, so it is cut at depth 5')]);
     // The input schema fitted at maxSchemaDepth: only the output one is named
     expect(JSON.stringify(tool.outputSchema)).toContain('[Truncated: nested schema exceeds maxSchemaDepth]');
   });
 
   it('stops converting a cycle of wide shared references at the node budget, then converts it shallower', async () => {
     // A 10-schema cycle closes within the default depth, so conversion walks it
-    // per path (5^9 paths) and stops at the budget; at depth 6 it fits
+    // per path (5^9 paths) and stops at the budget; at depth 5 it fits
     const generator = await OpenAPIToolGenerator.fromJSON(specWithChain(10, { width: 5, closeCycle: true }));
     const tool = await generator.generateTool('/item', 'get');
 
-    expect(reducedDepths(generator)).toEqual([expect.stringContaining('maxSchemaDepth 10, so it is cut at depth 6')]);
-    const atSix = await OpenAPIToolGenerator.fromJSON(specWithChain(10, { width: 5, closeCycle: true }));
-    expect(tool).toEqual(await atSix.generateTool('/item', 'get', { maxSchemaDepth: 6 }));
+    expect(reducedDepths(generator)).toEqual([expect.stringContaining('maxSchemaDepth 10, so it is cut at depth 5')]);
+    const atFive = await OpenAPIToolGenerator.fromJSON(specWithChain(10, { width: 5, closeCycle: true }));
+    expect(tool).toEqual(await atFive.generateTool('/item', 'get', { maxSchemaDepth: 5 }));
   });
 
   it('fails a tool whose schema exceeds maxSchemaNodes even cut at depth 1 with a SchemaError', async () => {
@@ -5249,7 +5249,8 @@ describe('Deeply nested schemas (issue #50)', () => {
   it('flattens an 8000-link allOf request body that adds a property per link, in linear time', async () => {
     // Merging a full property map per link took quadratic time and memory:
     // 5000 links took 2.8 s, 8000 would take about 7 s. The mapper's 8000
-    // entries must not exhaust the default node budget either.
+    // entries must not exhaust the node budget either (an input of 8000
+    // properties is wider than the default budget at any depth, so it is set).
     const schemas: Record<string, unknown> = {};
     for (let i = 0; i < 8000; i++) {
       const own = { type: 'object', properties: { [`p${i}`]: { type: 'string' }, shared: { description: `link ${i}` } } };
@@ -5259,7 +5260,9 @@ describe('Deeply nested schemas (issue #50)', () => {
     Object.assign(spec.components.schemas, schemas);
     spec.paths['/item'].post.requestBody.content['application/json'].schema = { $ref: '#/components/schemas/S0' };
 
-    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'post');
+    const tool = await (await OpenAPIToolGenerator.fromJSON(spec)).generateTool('/item', 'post', {
+      maxSchemaNodes: 100000,
+    });
 
     // Keys in the order they are first assigned — the deepest link first — and
     // each with the value assigned last, by the shallowest link
@@ -5369,7 +5372,7 @@ describe('Deeply nested schemas (issue #50)', () => {
     // so the other tools still generate
     const generator = await OpenAPIToolGenerator.fromJSON(specWithSharedMeta(40));
     await expect(generator.generateTool('/item', 'get')).rejects.toThrow(
-      'Extension meta exceeds the node budget of 100000 (maxSchemaNodes)',
+      'Extension meta exceeds the node budget of 25000 (maxSchemaNodes)',
     );
 
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -5378,7 +5381,7 @@ describe('Deeply nested schemas (issue #50)', () => {
       expect(await generator.generateTools({ readOnlyOnly: true })).toEqual([]);
       expect(warn).toHaveBeenCalledWith(
         'Failed to generate tool for GET /item:',
-        expect.stringContaining('Extension meta exceeds the node budget of 100000'),
+        expect.stringContaining('Extension meta exceeds the node budget of 25000'),
       );
     } finally {
       warn.mockRestore();
@@ -5443,10 +5446,10 @@ describe('Values copied from the spec into a tool (issue #50)', () => {
 
   it.each<[Place, string]>([
     // A value is copied whole at any depth: a shallower schema does not help
-    ['default', 'The input schema of POST /item exceeds the node budget of 100000 (maxSchemaNodes) even cut at depth 1'],
-    ['example', 'The input schema of POST /item exceeds the node budget of 100000 (maxSchemaNodes) even cut at depth 1'],
-    ['x-frontmcp', 'The metadata of POST /item exceeds the node budget of 100000 (maxSchemaNodes)'],
-    ['tags', 'The metadata of POST /item exceeds the node budget of 100000 (maxSchemaNodes)'],
+    ['default', 'The input schema of POST /item exceeds the node budget of 25000 (maxSchemaNodes) even cut at depth 1'],
+    ['example', 'The input schema of POST /item exceeds the node budget of 25000 (maxSchemaNodes) even cut at depth 1'],
+    ['x-frontmcp', 'The metadata of POST /item exceeds the node budget of 25000 (maxSchemaNodes)'],
+    ['tags', 'The metadata of POST /item exceeds the node budget of 25000 (maxSchemaNodes)'],
   ])('fails just the tool whose %s $refs a value expanding past maxSchemaNodes', async (place, message) => {
     // v2.9.2 returned this tool, sharing the value: serializing it took 2^41 values
     const generator = await OpenAPIToolGenerator.fromJSON(specWithSharedValue(place, 40));
@@ -5873,7 +5876,7 @@ describe('Wide schemas and inlined definitions stay bounded (issue #50)', () => 
     );
 
     await expect(generator.generateTool('/x', 'get', { target: 'claude' })).rejects.toThrow(
-      'Inlining the local $refs of a schema exceeds the node budget of 100000 (maxSchemaNodes)',
+      'Inlining the local $refs of a schema exceeds the node budget of 25000 (maxSchemaNodes)',
     );
   });
 });

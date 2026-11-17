@@ -1712,7 +1712,7 @@ export interface GenerateOptions {
    * tool with a warning, like any other per-tool failure. A `$ref` inside a
    * schema's `x-` extension is kept as written, so it costs two nodes, not
    * the graph it names. `Infinity` disables the budget.
-   * @default 100000
+   * @default 25000
    */
   maxSchemaNodes?: number;
 

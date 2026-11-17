@@ -1043,7 +1043,7 @@ describe('resolveSchemaLimits', () => {
 
   it('defaults to depth 10 and the default node budget', () => {
     expect(resolveSchemaLimits({})).toEqual({ maxDepth: 10, maxNodes: DEFAULT_MAX_SCHEMA_NODES });
-    expect(DEFAULT_MAX_SCHEMA_NODES).toBe(100_000);
+    expect(DEFAULT_MAX_SCHEMA_NODES).toBe(25_000);
   });
 
   it('normalizes the depth exactly as truncateDepth applies it, with a floor of 1', () => {

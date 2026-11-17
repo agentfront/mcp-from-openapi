@@ -69,7 +69,7 @@ import {
   type QuerystringProblem,
 } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
-import { SchemaBuilder, resolveSchemaLimits } from './schema-builder';
+import { SchemaBuilder, fitSchemaDepth, resolveSchemaLimits } from './schema-builder';
 import {
   extractExtensionOverrides,
   extractExtensionSettings,
@@ -163,44 +163,6 @@ function setOwnProperty(target: Record<string, unknown>, key: string, value: unk
     Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
   } else {
     target[key] = value;
-  }
-}
-
-/** Whether `error` is a node-budget failure (`maxSchemaNodes`), which a smaller depth may avoid */
-function isNodeBudgetError(error: unknown): error is SchemaError {
-  return error instanceof SchemaError && typeof error.context?.['maxNodes'] === 'number';
-}
-
-/**
- * `build(maxDepth)`; when that exceeds the node budget, `build` at the deepest
- * smaller depth that fits, found by bisection: a schema cut shallower never
- * needs more nodes (conversion visits fewer, truncation keeps a subset). When
- * no depth from 1 fits, `exhausted` throws with the first budget error; any
- * other error is thrown as it is.
- */
-function fitSchemaDepth<T>(
-  maxDepth: number,
-  build: (depth: number) => T,
-  exhausted: (error: SchemaError) => never,
-): { value: T; depth: number } {
-  try {
-    return { value: build(maxDepth), depth: maxDepth };
-  } catch (error: unknown) {
-    if (!isNodeBudgetError(error)) throw error;
-    let fitted: { value: T; depth: number } | undefined;
-    let low = 1;
-    let high = maxDepth - 1;
-    while (low <= high) {
-      const depth = Math.floor((low + high) / 2);
-      try {
-        fitted = { value: build(depth), depth };
-        low = depth + 1;
-      } catch (retryError: unknown) {
-        if (!isNodeBudgetError(retryError)) throw retryError;
-        high = depth - 1;
-      }
-    }
-    return fitted ?? exhausted(error);
   }
 }
 

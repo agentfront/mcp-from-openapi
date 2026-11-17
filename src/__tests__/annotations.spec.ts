@@ -407,7 +407,7 @@ describe('meta extension values of any shape (issue #50)', () => {
   it('stops a shared value copied per occurrence at the default budget, unless the budget is disabled', () => {
     expect(() => extractExtensionOverrides({ 'x-mcp': { meta: { tree: shared(40) } } } as any)).toThrow(
       new SchemaError(
-        'Extension meta exceeds the node budget of 100000 (maxSchemaNodes): with its $refs resolved, the ' +
+        'Extension meta exceeds the node budget of 25000 (maxSchemaNodes): with its $refs resolved, the ' +
           'x-mcp/x-frontmcp meta expands into more nodes than allowed. Remove the references or raise maxSchemaNodes.',
       ),
     );
