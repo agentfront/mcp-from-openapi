@@ -80,6 +80,23 @@ describe('example: swagger-2.0', () => {
     expect(wire.headers['x-api-key']).toBeUndefined();
   });
 
+  it('never takes a credential from the tool input: only the security context supplies one', async () => {
+    const { tools } = await loadTools(petStore);
+    const listPets = tools.get('listPets')!;
+    const keyEntry = listPets.mapper.find((entry) => entry.security)!;
+
+    // No credential in the context, and the input carries a value under the security entry's own input key
+    await callTool(listPets, { tags: ['a'], [keyEntry.inputKey]: 'from-the-input' }, { apiBaseUrl });
+
+    const wire = loopback.requests.at(-1)!;
+    expect(wire.url).toBe('/v2/pets?tags=a');
+    expect(wire.headers['x-api-key']).toBeUndefined();
+
+    // With one in the context, the context's value is sent, whatever the input says
+    await callTool(listPets, { tags: ['a'], [keyEntry.inputKey]: 'from-the-input' }, { apiBaseUrl, auth });
+    expect(loopback.requests.at(-1)!.headers['x-api-key']).toBe('k-123');
+  });
+
   it('sends an in: body parameter as a JSON body whose properties are the tool inputs', async () => {
     const { tools } = await loadTools(petStore);
     const add = tools.get('addPet')!;

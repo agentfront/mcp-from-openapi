@@ -116,7 +116,9 @@ export async function callTool(
 ) {
   const security = await new SecurityResolver().resolve(tool.mapper, createSecurityContext(options.auth ?? {}));
   // Each resolved credential goes to buildHttpRequest as input, under its security mapper entry's inputKey: it places
-  // the value (a header, or a query pair for `in: query`). Never append a credential to the URL yourself.
+  // the value (a header, or a query pair for `in: query`). Never append a credential to the URL yourself. A credential
+  // the context does not hold is `undefined` here ON PURPOSE: it replaces whatever `input` carries under that key, so
+  // the caller of the tool (a model) can never supply or override a credential.
   const where: Record<string, Record<string, string> | undefined> = { header: security.headers, query: security.query };
   const credentials = Object.fromEntries(
     tool.mapper.filter((m) => m.security).map((m) => [m.inputKey, where[m.type]?.[m.key]]),

@@ -2100,9 +2100,10 @@ interface SchemaNode {
  *   has no OpenAPI 3.0 form and is dropped (`SWAGGER_NOT_CONVERTED`);
  * - a tuple `items` (a list) becomes `items: {}` (`SWAGGER_NOT_CONVERTED`);
  * - `additionalItems` is dropped (`SWAGGER_NOT_CONVERTED`), with a tuple or
- *   alone: draft-04 reads it only beside a tuple `items`, which the line
- *   above replaces, so dropping it loses no constraint, and OpenAPI 3.0 does
- *   not define the keyword (the official 2.0 schema does not list it either;
+ *   alone: OpenAPI 3.0 does not define the keyword. Draft-04 reads it only
+ *   beside a tuple `items`, which the line above replaces by `items: {}`:
+ *   the limit it set on extra items is lost with the tuple (both reported),
+ *   and without a tuple it constrained nothing (the official 2.0 schema does not list it either;
  *   the other draft-04 keywords neither version lists, `patternProperties`,
  *   `const`, ..., stay, as generated tools use them);
  * - `$ref: "#/definitions/X"` becomes `$ref: "#/components/schemas/X"`.
@@ -2243,8 +2244,8 @@ class SchemaRewriter {
         childTrail(trail, 'items'),
       );
     }
-    // Draft-04 reads `additionalItems` only beside a tuple `items` (replaced above), and OpenAPI 3.0 has no such
-    // keyword: dropping it loses no constraint
+    // OpenAPI 3.0 has no `additionalItems`. Draft-04 reads it only beside a tuple `items` (replaced above by `items: {}`,
+    // so its limit on extra items goes with the tuple); without a tuple it constrained nothing
     if (ownProperty(schema, 'additionalItems') !== undefined) {
       changes = true;
       this.report(
