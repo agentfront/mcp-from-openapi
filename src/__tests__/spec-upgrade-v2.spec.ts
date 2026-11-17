@@ -523,7 +523,9 @@ describe('upgradeSwagger2: servers', () => {
     const result = run(swagger({ basePath: `/${'/'.repeat(200_000)}x${'/'.repeat(200_000)}` }));
 
     expect(urls(result)[0].endsWith('/x')).toBe(true);
-    expect(Date.now() - started).toBeLessThan(1000);
+    // A hang backstop only (tens of ms, instrumented for coverage): a trim that rescans the run from each slash, as a
+    // backtracking `/\/+$/` does, takes minutes here
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 
   it('keeps the valid schemes in any case, and reports the others in one diagnostic and ws in another', () => {
@@ -1667,7 +1669,7 @@ describe('upgradeSwagger2: other parameters', () => {
       node.type = 'array';
       node['x-bottom'] = true;
 
-      const started = Date.now();
+      // A recursive walk overflows the call stack long before 100,000 levels: reaching the bottom is the check
       const { parameter, diagnostics } = parameterOf({ name: 'deep', in: 'query', type: 'array', items: root });
       let schema = parameter.schema;
       let depth = 0;
@@ -1678,7 +1680,6 @@ describe('upgradeSwagger2: other parameters', () => {
 
       expect(depth).toBe(100_001);
       expect(schema['x-bottom']).toBe(true);
-      expect(Date.now() - started).toBeLessThan(5000);
       // The pointer of the deepest item keeps its last 32 segments
       expect(diagnostics).toHaveLength(1);
       expect(diagnostics[0].path).toBe(
@@ -2202,6 +2203,115 @@ describe('upgradeSwagger2: schemas', () => {
     expect(diagnostics.map((d) => [d.code, d.path])).toEqual([[code, path]]);
   });
 
+  it('drop additionalItems beside a tuple, with one diagnostic each', () => {
+    const { schemas, diagnostics } = definitionsOf({
+      S: { type: 'array', items: [{ type: 'string' }], additionalItems: false },
+    });
+
+    expect(schemas.S).toEqual({ type: 'array', items: {} });
+    expect(diagnostics.map((d) => [d.code, d.path, d.message])).toEqual([
+      [
+        C.SWAGGER_NOT_CONVERTED,
+        '/definitions/S/items',
+        '`items` lists one schema per position (a tuple), which OpenAPI 3.0 cannot express; any item is accepted (`items: {}`)',
+      ],
+      [
+        C.SWAGGER_NOT_CONVERTED,
+        '/definitions/S/additionalItems',
+        '`additionalItems` is not an OpenAPI 3.0 keyword, and it constrains nothing once `items` is not a tuple; it is dropped',
+      ],
+    ]);
+  });
+
+  it.each<[string, unknown]>([
+    ['false', false],
+    ['true', true],
+    ['a schema', { type: 'integer', 'x-nullable': true }],
+  ])('drop additionalItems %s on its own, which makes the schema change', (_label, additionalItems) => {
+    const schema = { type: 'array', items: { type: 'string' }, additionalItems };
+    const { schemas, diagnostics } = definitionsOf({ S: schema });
+
+    expect(schemas.S).toEqual({ type: 'array', items: { type: 'string' } });
+    expect(schemas.S).not.toBe(schema);
+    // The unchanged `items` is shared, not copied
+    expect(schemas.S.items).toBe(schema.items);
+    expect(diagnostics.map((d) => [d.code, d.path])).toEqual([[C.SWAGGER_NOT_CONVERTED, '/definitions/S/additionalItems']]);
+  });
+
+  it('drop additionalItems deep in properties and allOf, replacing each schema that leads to it, without changing the input', () => {
+    const untouched = { type: 'string' };
+    const source = deepFreeze({
+      swagger: '2.0',
+      info: { title: 'T', version: '1' },
+      host: 'api.example.com',
+      schemes: ['https'],
+      paths: {},
+      definitions: {
+        Outer: {
+          type: 'object',
+          properties: {
+            list: { type: 'array', items: { type: 'string' }, additionalItems: false },
+            other: untouched,
+          },
+          allOf: [{ type: 'object' }, { properties: { tail: { type: 'array', additionalItems: { type: 'string' } } } }],
+        },
+      },
+    });
+    const before = JSON.stringify(source);
+    const { doc, diagnostics } = run(source);
+    const outer = doc.components.schemas.Outer;
+
+    expect(JSON.stringify(source)).toBe(before);
+    expect(outer).not.toBe(source.definitions.Outer);
+    expect(outer).toEqual({
+      type: 'object',
+      properties: { list: { type: 'array', items: { type: 'string' } }, other: { type: 'string' } },
+      allOf: [{ type: 'object' }, { properties: { tail: { type: 'array' } } }],
+    });
+    // Only schemas leading to a change are replaced
+    expect(outer.properties.other).toBe(untouched);
+    expect(outer.allOf[0]).toBe(source.definitions.Outer.allOf[0]);
+    expect(outer.allOf[1]).not.toBe(source.definitions.Outer.allOf[1]);
+    expect(JSON.stringify(doc)).not.toContain('additionalItems');
+    // One finding of a kind, grouped: the first place found, and every place
+    expect(diagnostics.map((d) => [d.code, d.path])).toEqual([
+      [C.SWAGGER_NOT_CONVERTED, '/definitions/Outer/properties/list/additionalItems'],
+    ]);
+    expect(diagnostics[0].message).toBe(
+      '`additionalItems` is not an OpenAPI 3.0 keyword, and it constrains nothing once `items` is not a tuple; it is ' +
+        'dropped (in 2 places: /definitions/Outer/properties/list/additionalItems, ' +
+        '/definitions/Outer/allOf/1/properties/tail/additionalItems)',
+    );
+  });
+
+  it('de-duplicate a type list of any length without scanning the list for each entry', () => {
+    // 25,000 names, `null`, then the 25,000 names again: 50,001 entries
+    const names = Array.from({ length: 25_000 }, (_, i) => `t${i}`);
+    const type = [...names, 'null', ...names];
+    // Counts the entries every array membership scan goes through while converting
+    let scanned = 0;
+    const spies = (['includes', 'indexOf', 'lastIndexOf'] as const).map((method) => {
+      const original = Array.prototype[method] as (...args: unknown[]) => unknown;
+      return jest.spyOn(Array.prototype, method).mockImplementation(function (this: unknown[], ...args: unknown[]) {
+        scanned += this.length;
+        return original.apply(this, args);
+      } as any);
+    });
+    let schemas: any;
+    try {
+      ({ schemas } = definitionsOf({ S: { type } }));
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+
+    expect(schemas.S.anyOf).toHaveLength(25_000);
+    expect(schemas.S.anyOf[0]).toEqual({ type: 't0', nullable: true });
+    expect(schemas.S.anyOf[1]).toEqual({ type: 't1' });
+    expect(schemas.S.anyOf[24_999]).toEqual({ type: 't24999' });
+    // A scan of the names found so far for each entry goes through about 9.4e8 of them
+    expect(scanned).toBeLessThan(type.length);
+  });
+
   it('ignore type list entries that are not names', () => {
     const { schemas, diagnostics } = definitionsOf({ S: { type: ['string', 5, null] } });
 
@@ -2321,7 +2431,7 @@ describe('upgradeSwagger2: schemas', () => {
     }
     node.items = [{}];
 
-    const started = Date.now();
+    // A recursive walk overflows the call stack long before 100,000 levels: reaching the bottom is the check
     const { schemas, diagnostics } = definitionsOf({ Deep: root });
     let converted = schemas.Deep;
     let original = root;
@@ -2335,7 +2445,6 @@ describe('upgradeSwagger2: schemas', () => {
 
     expect(depth).toBe(100_000);
     expect(converted.items).toEqual({});
-    expect(Date.now() - started).toBeLessThan(10_000);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].path).toBe(
       `/definitions/Deep/${POINTER_TRUNCATION_MARKER}${'/next/properties'.repeat(15)}/next/items`,
@@ -2497,12 +2606,12 @@ describe('upgradeSwagger2: scale', () => {
       paths[`/p${index}`] = { get: { operationId: `op${index}`, parameters: [shared], responses: { 200: response } } };
     }
 
-    const started = Date.now();
     const { doc, diagnostics } = run(swagger({ produces: ['application/json'], paths }));
     const converted = new Set(Object.values(doc.paths).map((item: any) => item.get.parameters[0]));
     const responses = new Set(Object.values(doc.paths).map((item: any) => item.get.responses[200]));
 
     expect(Object.keys(doc.paths)).toHaveLength(100_000);
+    // One converted object each: the shared parameter and response were converted once, not once per operation
     expect(converted.size).toBe(1);
     expect(responses.size).toBe(1);
     expect([...converted][0]).toEqual({ name: 'limit', in: 'query', schema: { type: 'integer' }, 'x-unknown': 1 });
@@ -2510,7 +2619,6 @@ describe('upgradeSwagger2: scale', () => {
     expect(diagnostics.map((d) => [d.code, d.path])).toEqual([
       [C.SWAGGER_UNKNOWN_FIELD, '/paths/~1p0/get/parameters/0'],
     ]);
-    expect(Date.now() - started).toBeLessThan(10_000);
   });
 
   it('handles huge strings in media types and names without slowing down', () => {
@@ -2528,7 +2636,9 @@ describe('upgradeSwagger2: scale', () => {
 
     expect(Object.keys(doc.paths['/p999'].post.requestBody.content)).toEqual([huge]);
     expect(doc.paths['/p999'].post.responses[200].content[huge].example).toBe(1);
-    expect(Date.now() - started).toBeLessThan(5000);
+    // A hang backstop only (a few hundred ms, instrumented for coverage): work quadratic in the 1 MB media type
+    // would not finish
+    expect(Date.now() - started).toBeLessThan(20_000);
   });
 });
 

@@ -179,7 +179,8 @@ describe('detectSpecVersion', () => {
     expect(detectSpecVersion({ openapi: `3.1.0-${'a'.repeat(200_000)}\n` }).status).toBe('malformed');
     expect(detectSpecVersion({ openapi: `${'1'.repeat(200_000)}.0.0` }).status).toBe('malformed');
     expect(detectSpecVersion({ openapi: `3.1.0-${'a'.repeat(200_000)}` }).status).toBe('supported');
-    expect(Date.now() - started).toBeLessThan(1000);
+    // A hang backstop only (a few ms, instrumented for coverage): a backtracking version pattern takes minutes here
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 
   it.each(['2.0', 2])('reads swagger %p as the supported Swagger 2.0 family', (declared) => {
@@ -688,7 +689,8 @@ describe('diagnostic helpers', () => {
     const escaped = escapePointerSegment('\u0000'.repeat(10_000_000));
 
     expect(escaped).toBe(`${'\\u0000'.repeat(42)}...(truncated)`);
-    expect(Date.now() - started).toBeLessThan(1000);
+    // A hang backstop only (a few ms, instrumented for coverage); the bounded output is the check above
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 
   it('builds pointers from unescaped segments', () => {

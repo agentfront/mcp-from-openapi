@@ -330,7 +330,8 @@ function objectExpr(r: SchemaRecord, ctx: PrintContext, depth: number, indent: s
  * Mirrors the printer's branch order.
  */
 function isPlainObjectBody(schema: unknown): boolean {
-  if (!isSchemaRecord(schema) || schema['$ref'] !== undefined) {
+  // A schema that accepts no value prints as `never` whatever else it says (`typeExpr`)
+  if (!isSchemaRecord(schema) || schema['$ref'] !== undefined || isNeverSchema(schema)) {
     return false;
   }
   if (('const' in schema && literalOf(schema['const']) !== 'unknown') || Array.isArray(schema['enum'])) {

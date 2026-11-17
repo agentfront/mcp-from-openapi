@@ -307,9 +307,15 @@ export class ResponseBuilder {
    * 4. any explicit 3xx status code, else the range `3XX`;
    * 5. the first candidate.
    *
-   * An explicit status code therefore always wins over a range of the same
-   * class (`{ 299, '2XX' }` gives 299, even though `2XX` covers the preferred
-   * 200): a range is a fallback for the codes the document does not list.
+   * So an explicit status code wins over the range of its class when the code
+   * is in `preferredStatusCodes` (rule 1) and whenever it is a 2xx (rule 2:
+   * `{ 299, '2XX' }` gives 299, even though `2XX` covers the preferred 200).
+   * A 3xx code wins over `3XX` only while no range covers a preferred code
+   * (rule 3 comes first: `{ 399, '3XX' }` gives `3XX` with `[301]`, 399 with
+   * the defaults). In the other classes the range wins when it covers a
+   * preferred code (`{ 499, '4XX' }` gives `4XX` with `[404]`); otherwise
+   * neither is chosen by a rule, and rule 5 takes the first in key order
+   * (integer keys first, so 499 with the defaults).
    */
   private selectPreferredResponse<T extends { statusCode: ResponseStatus }>(candidates: T[]): T {
     for (const preferredCode of this.preferredStatusCodes) {

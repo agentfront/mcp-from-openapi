@@ -2099,6 +2099,12 @@ interface SchemaNode {
  *   already has `anyOf`); `type: "null"` alone, or a list of nothing else,
  *   has no OpenAPI 3.0 form and is dropped (`SWAGGER_NOT_CONVERTED`);
  * - a tuple `items` (a list) becomes `items: {}` (`SWAGGER_NOT_CONVERTED`);
+ * - `additionalItems` is dropped (`SWAGGER_NOT_CONVERTED`), with a tuple or
+ *   alone: draft-04 reads it only beside a tuple `items`, which the line
+ *   above replaces, so dropping it loses no constraint, and OpenAPI 3.0 does
+ *   not define the keyword (the official 2.0 schema does not list it either;
+ *   the other draft-04 keywords neither version lists, `patternProperties`,
+ *   `const`, ..., stay, as generated tools use them);
  * - `$ref: "#/definitions/X"` becomes `$ref: "#/components/schemas/X"`.
  *
  * A schema that leads to a changed one (through `properties`,
@@ -2237,6 +2243,17 @@ class SchemaRewriter {
         childTrail(trail, 'items'),
       );
     }
+    // Draft-04 reads `additionalItems` only beside a tuple `items` (replaced above), and OpenAPI 3.0 has no such
+    // keyword: dropping it loses no constraint
+    if (ownProperty(schema, 'additionalItems') !== undefined) {
+      changes = true;
+      this.report(
+        'warning',
+        SPEC_DIAGNOSTIC_CODES.SWAGGER_NOT_CONVERTED,
+        '`additionalItems` is not an OpenAPI 3.0 keyword, and it constrains nothing once `items` is not a tuple; it is dropped',
+        childTrail(trail, 'additionalItems'),
+      );
+    }
     const ref = ownProperty(schema, '$ref');
     if (typeof ref === 'string') {
       if (ref.startsWith(DEFINITIONS_PREFIX)) {
@@ -2301,6 +2318,8 @@ class SchemaRewriter {
         case 'x-nullable':
           if (!convertsNullable) setEntry(target, key, value);
           break;
+        case 'additionalItems':
+          break;
         default:
           setEntry(target, key, value);
       }
@@ -2316,12 +2335,13 @@ class SchemaRewriter {
 
   /** Replaces a `type` list as described on the class. */
   private fillTypeList(target: SpecRecord, type: readonly unknown[]): void {
-    const names: string[] = [];
+    // A set for membership, so a list of any length is de-duplicated in linear time; it keeps the order written
+    const names = new Set<string>();
     for (const entry of type) {
-      if (typeof entry === 'string' && !names.includes(entry)) names.push(entry);
+      if (typeof entry === 'string') names.add(entry);
     }
-    const nullable = names.includes('null');
-    const types = names.filter((name) => name !== 'null');
+    const nullable = names.has('null');
+    const types = [...names].filter((name) => name !== 'null');
     delete target['type'];
     if (types.length === 1) {
       target['type'] = types[0];

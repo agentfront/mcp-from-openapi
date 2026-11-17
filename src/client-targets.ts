@@ -300,14 +300,20 @@ function mergeAllOf(node: SchemaRecord): SchemaRecord {
   return merged;
 }
 
-/** Is this the `anyOf: [X, { type: 'null' }]` wrapper toJsonSchema emits for nullable schemas? */
+/**
+ * Is this the `anyOf: [X, { type: 'null' }]` wrapper toJsonSchema emits for
+ * nullable schemas? Not when X accepts no value (`{ not: {} }`: a `false`, or
+ * OpenAPI 3.0's `not: {}` with `nullable: true`): then only `null` is valid,
+ * and unwrapping to X would reject `null` too, so the union is left to the
+ * union rules.
+ */
 function nullableWrapperMember(node: SchemaRecord): SchemaRecord | undefined {
   const anyOf = node['anyOf'];
   if (!Array.isArray(anyOf) || anyOf.length !== 2) return undefined;
   const nullIndex = anyOf.findIndex((m) => isSchemaObject(m) && (m as SchemaRecord)['type'] === 'null');
   if (nullIndex === -1) return undefined;
   const other = anyOf[1 - nullIndex];
-  return isSchemaObject(other) ? (other as SchemaRecord) : undefined;
+  return isSchemaObject(other) && !isNeverSchema(other) ? (other as SchemaRecord) : undefined;
 }
 
 function describeVariants(members: unknown[]): string {

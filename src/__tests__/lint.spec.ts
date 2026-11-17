@@ -897,4 +897,33 @@ describe('lintDocument on a Swagger 2.0 document', () => {
     const generator = await OpenAPIToolGenerator.fromJSON(swagger);
     expect(await generator.lint()).toEqual(lintDocument(swagger));
   });
+
+  it('is one error, not a clean result, when the conversion is abandoned at MAX_CONVERSION_ENTRIES', async () => {
+    // 100 operations, each with its own 32-type produces list, x 330 shared responses: 1,056,000 content entries
+    const types = Array.from({ length: 32 }, (_, i) => `application/vnd.t${i}+json`);
+    const responses = Object.fromEntries(
+      Array.from({ length: 330 }, (_, i) => [String(200 + i), { description: 'r', schema: { type: 'string' } }]),
+    );
+    const paths: Record<string, unknown> = {};
+    for (let i = 0; i < 100; i++) paths[`/p${i}`] = { get: { produces: [...types], responses } };
+    const swagger: any = { swagger: '2.0', info: { title: 'T', version: '1' }, host: 'api.example.com', paths };
+
+    const result = lintDocument(swagger);
+    expect(result.counts).toEqual({ error: 1, warning: 0, info: 0 });
+    expect(result.findings).toEqual([
+      {
+        severity: 'error',
+        code: 'swagger-conversion-too-large',
+        message:
+          'The Swagger 2.0 document cannot be converted to OpenAPI 3.0: it needs more than 1000000 media type, ' +
+          'encoding, header and form property entries (MAX_CONVERSION_ENTRIES), as its `consumes`, `produces` and ' +
+          'path-level parameters apply to every operation. No operation was linted, and no tool can be generated from it.',
+        path: '',
+        hint: 'Shorten the root `consumes`/`produces` lists (or give the operations their own), or convert the document to OpenAPI 3 first.',
+      },
+    ]);
+    // generator.lint() refuses the same document with the ParseError generation throws
+    const generator = await OpenAPIToolGenerator.fromJSON(swagger, { validate: false });
+    await expect(generator.lint()).rejects.toMatchObject({ context: { code: 'SWAGGER_CONVERSION_TOO_LARGE' } });
+  });
 });

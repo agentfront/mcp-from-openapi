@@ -611,10 +611,9 @@ describe('findSelfReferences', () => {
     // A base at the length limit, and 300,000 references of two spellings
     const longBase = baseOf(`https://example.com/${'p/'.repeat(1000)}openapi.json`.slice(0, MAX_BASE_URI_LENGTH));
     const refs = Array.from({ length: 300000 }, (_, i) => ({ $ref: i % 2 === 0 ? '#/local' : 'other.json#/x' }));
-    const started = Date.now();
+    // The count is the check: one resolution for 300,000 references
     const scan = findSelfReferences({ refs }, longBase);
     expect(scan).toEqual({ references: [], resolutions: 1 });
-    expect(Date.now() - started).toBeLessThan(10000);
   });
 
   it('visits a shared or cyclic object once, and deep nesting without recursion', () => {

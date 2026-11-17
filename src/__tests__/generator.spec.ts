@@ -6939,6 +6939,7 @@ describe('OpenAPI 3.2 parameters and responses (issue #55)', () => {
       );
       const started = Date.now();
       const [tool] = await generator.generateTools();
+      // A backstop for work quadratic in the 50,000 media types only (about 150 ms instrumented for coverage)
       expect(Date.now() - started).toBeLessThan(5_000);
       expect(tool.mapper[0].serialization).toEqual({ contentType: 'x-type/0' });
       const [diagnostic] = generator.getDiagnostics();
@@ -8539,6 +8540,8 @@ describe('Base URI, $self and references to other documents', () => {
       const generator = await OpenAPIToolGenerator.fromJSON(many, { documentUri: longOwn });
       expect((await generator.validate()).valid).toBe(true);
       expect(await generator.generateTools()).toHaveLength(1);
+      // A hang backstop only (about 1.5 s instrumented for coverage); the work per distinct reference is counted in
+      // base-uri.spec.ts (`resolutions`)
       expect(Date.now() - started).toBeLessThan(30000);
       expect(spy).not.toHaveBeenCalled();
     });
@@ -8635,6 +8638,33 @@ describe('Base URI, $self and references to other documents', () => {
         (await failing({ B: 'http://refused.example/refused.json', A: `${origin}/slow.json` }, policy)).generateTools(),
       );
       expect(refusedFirst.context).toMatchObject({ rule: 'host-blocked', path: '/components/schemas/B' });
+    });
+
+    it('settles only once no read is in flight, and starts no read after the failure', async () => {
+      // A is not JSON (rejected as soon as it is parsed); B answers later and refers to a third document
+      routes['/bad.json'] = '{"type": ';
+      let slowAnswered = false;
+      let answered: () => void = () => undefined;
+      const slowDone = new Promise<void>((resolve) => (answered = resolve));
+      routes['/slow.json'] = (_req: unknown, res: import('http').ServerResponse) => {
+        setTimeout(() => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ type: 'object', properties: { x: { $ref: 'third.json' } } }), () => {
+            slowAnswered = true;
+            answered();
+          });
+        }, 150);
+      };
+      routes['/third.json'] = pet;
+      const error = await rejection((await failing({ A: `${origin}/bad.json`, B: `${origin}/slow.json` })).generateTools());
+      expect(error.context).toEqual({ rule: 'invalid-document' });
+      // The read of B, already started, ended before the promise settled
+      expect(slowAnswered).toBe(true);
+      expect(requested()).toEqual(['/bad.json', '/slow.json']);
+      // ...and the reference B holds is never read: nothing starts once the dereference has failed
+      await slowDone;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(requested()).toEqual(['/bad.json', '/slow.json']);
     });
 
     it('keeps that order into referenced documents', async () => {
@@ -9637,16 +9667,15 @@ describe('Swagger 2.0 documents', () => {
           },
         };
       }
-      const started = Date.now();
       const generator = await OpenAPIToolGenerator.fromJSON(minimal(paths, { consumes: types, produces: types }));
       const tools = await generator.generateTools();
       expect(tools).toHaveLength(2000);
       expect(tools[0].mapper[0].serialization?.contentType).toBe('application/vnd.t0+json');
+      // The size is the check: 32 media types per body, not 2,000 (the uncapped conversion of a document twice this
+      // size ran out of heap)
       const converted = generator.getDocument() as any;
       expect(Object.keys(converted.paths['/p0'].post.requestBody.content)).toHaveLength(32);
       expect(codes(generator)).toEqual(['SWAGGER_MEDIA_TYPE_LIMIT']);
-      // generous backstop: the uncapped conversion of a document twice this size ran out of heap
-      expect(Date.now() - started).toBeLessThan(30_000);
     }, 60_000);
 
     it('never generates a tool whose required scheme could not be converted, with or without other schemes', async () => {

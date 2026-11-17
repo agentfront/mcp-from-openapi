@@ -527,6 +527,20 @@ const nextTurn = (): Promise<void> =>
   /* c8 ignore next -- `$RefParser` runs on Node, which has setImmediate */
   new Promise((resolve) => (typeof setImmediate === 'function' ? setImmediate(resolve) : setTimeout(resolve, 0)));
 
+/** The reads of one dereference (see {@link orderedReads}). */
+interface OrderedReads {
+  /** Starts `read` (unless reading has stopped) and delivers its result in the order asked. */
+  read: <T>(read: () => Promise<T>) => Promise<T>;
+  /**
+   * Stops reading: no read asked from now on is started. Resolves once every
+   * read already started has ended, so a failed dereference leaves no
+   * request or file read running after it settles.
+   */
+  settle(): Promise<void>;
+}
+
+const ignore = (): void => undefined;
+
 /**
  * Wraps the reads of one dereference so their results are delivered in the
  * order they were asked for, one per turn of the event loop, while the reads
@@ -534,20 +548,29 @@ const nextTurn = (): Promise<void> =>
  * document's references depth-first, then each document's as it is parsed),
  * so the first reference that cannot be read is always the one reported,
  * whatever order the network or the disk answers in. Once one fails, reads
- * asked for later are not started.
+ * asked for later are not started; neither are they once `settle` is called
+ * (the dereference failed some other way: a document that does not parse).
  */
-function orderedReads(): <T>(read: () => Promise<T>) => Promise<T> {
+function orderedReads(): OrderedReads {
   let tail: Promise<unknown> = Promise.resolve();
   let failed = false;
-  return <T>(read: () => Promise<T>): Promise<T> => {
-    const started = failed ? Promise.reject(new Error('Not read: an earlier reference could not be read')) : read();
-    started.catch(() => undefined);
-    const delivered = tail.then(() => started);
-    delivered.catch(() => {
+  const started: Array<Promise<void>> = [];
+  return {
+    read: <T>(read: () => Promise<T>): Promise<T> => {
+      const reading = failed ? Promise.reject(new Error('Not read: an earlier reference could not be read')) : read();
+      if (!failed) started.push(reading.then(ignore, ignore));
+      reading.catch(ignore);
+      const delivered = tail.then(() => reading);
+      delivered.catch(() => {
+        failed = true;
+      });
+      tail = delivered.then(nextTurn, nextTurn);
+      return delivered;
+    },
+    settle: async () => {
       failed = true;
-    });
-    tail = delivered.then(nextTurn, nextTurn);
-    return delivered;
+      await Promise.all(started);
+    },
   };
 }
 
@@ -1346,9 +1369,12 @@ export class OpenAPIToolGenerator {
    * document order whatever order the reads finish in.
    *
    * `fileResolver` is `$RefParser`'s own file resolver, whose `read` is
-   * wrapped (its `canRead` is kept).
+   * wrapped (its `canRead` is kept); `ordered` is the dereference's read queue.
    */
-  private buildRefParserOptions(fileResolver: { read(file: RefTarget): unknown }): ParserOptions {
+  private buildRefParserOptions(
+    fileResolver: { read(file: RefTarget): unknown },
+    ordered: OrderedReads['read'],
+  ): ParserOptions {
     const raw = this.options.refResolution;
     const refOpts: Required<RefResolutionOptions> = {
       allowedProtocols: raw.allowedProtocols ?? ['http', 'https'],
@@ -1398,7 +1424,6 @@ export class OpenAPIToolGenerator {
     };
     const fileAllowed = allowedProtocols.has('file');
     const documentHasBase = this.documentBase?.href !== undefined;
-    const ordered = orderedReads();
     // Where the `$ref` is, when it is in the entry document (`$RefParser` passes its `$Refs` third)
     const locate = (file: RefTarget, refs: RefParserRefs | undefined): string[] | undefined => {
       const hash = file.baseUrl?.indexOf('#') ?? -1;
@@ -1736,17 +1761,21 @@ export class OpenAPIToolGenerator {
       return;
     }
     let refParser: typeof import('@apidevtools/json-schema-ref-parser') | undefined;
+    const reads = orderedReads();
     try {
       refParser = await import('@apidevtools/json-schema-ref-parser');
       // Its `read` is a function; the type also allows the static forms a plugin may take
       const fileResolver = refParser.FileResolver as unknown as { read(file: RefTarget): unknown };
-      const refParserOptions = this.buildRefParserOptions(fileResolver);
+      const refParserOptions = this.buildRefParserOptions(fileResolver, reads.read);
       const root = await this.refParserRoot();
       // Without a base URI, as in earlier releases: relative refs resolve against the working directory
       this.dereferencedDocument = (await (root === undefined
         ? refParser.default.dereference(copy, refParserOptions)
         : refParser.default.dereference(root, copy, refParserOptions))) as OpenAPIDocument;
     } catch (error: unknown) {
+      // `$RefParser` rejects at the first failure while other reads may still run, and goes on
+      // parsing what they deliver: start no more, and wait for those, so none outlives the rejection
+      await reads.settle();
       // A retry prepares a new copy: this one may hold references resolved before the failure
       throw dereferenceError(error, refParser);
     }

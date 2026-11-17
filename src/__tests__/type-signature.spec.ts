@@ -328,6 +328,22 @@ describe('emitToolTypeScript assembly', () => {
     expect(intersection.declaration).toContain('type TOutput = {\n  a?: string;\n} & {\n  b?: number;\n};');
   });
 
+  it('declares an object root that accepts no value (`not: {}` beside its properties) as `type X = never;`, never an interface', () => {
+    // `{ not: {} }` rejects every value, so the properties next to it describe nothing: the type is `never`, and
+    // `interface X never` is not TypeScript
+    const nothing = { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] };
+    const { declaration } = emitToolTypeScript(
+      'get.thing',
+      undefined,
+      { ...nothing, not: {} } as JsonSchema,
+      { ...nothing, not: true } as JsonSchema,
+    );
+    expect(declaration).toBe(
+      'type GetThingInput = never;\n\ntype GetThingOutput = never;\n\ndeclare function getThing(input: GetThingInput): Promise<GetThingOutput>;',
+    );
+    expect(declaration).not.toContain('interface');
+  });
+
   it('escapes comment-breaking content types and statuses in variant comments', () => {
     const { declaration } = emitToolTypeScript('t', undefined, { type: 'object', properties: {} } as JsonSchema, {
       oneOf: [

@@ -847,6 +847,12 @@ describe('ResponseBuilder: response status ranges', () => {
     ['an explicit redirect before the 3XX range', { '3XX': 0, 304: 0 }, [], 304],
     ['the 3XX range when nothing else matches', { 500: 0, '3XX': 0 }, [], '3XX'],
     ['the first candidate otherwise', { 503: 0, '4XX': 0 }, [], 503],
+    // Where an explicit code does NOT beat the range of its class (JSDoc of selectPreferredResponse)
+    ['an explicit 2xx over 2XX, whatever the preferences', { 299: 0, '2XX': 0 }, [201], 299],
+    ['the 3XX range covering a preference over an explicit 3xx', { 399: 0, '3XX': 0 }, [301], '3XX'],
+    ['an explicit 3xx over 3XX when no range covers a preference', { 399: 0, '3XX': 0 }, undefined, 399],
+    ['the 4XX range covering a preference over an explicit 4xx', { 499: 0, '4XX': 0 }, [404], '4XX'],
+    ['an explicit 4xx over 4XX only as the first in key order', { '4XX': 0, 499: 0 }, undefined, 499],
   ])('selects %s', (_label, keys, preferredStatusCodes, expected) => {
     const responses = Object.fromEntries(Object.keys(keys).map((key) => [key, json('object')]));
     expect(preferred(responses, preferredStatusCodes)).toBe(expected);

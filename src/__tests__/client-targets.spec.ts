@@ -805,6 +805,61 @@ describe('schemas no value satisfies ({ not: {} }, a false in the document)', ()
     expect(result.properties.none).toEqual(NEVER);
   });
 
+  it('collapseNestedUnions keeps null from a nullable wrapper whose other member accepts nothing, in either order', () => {
+    // `anyOf: [false, { type: 'null' }]` (or OpenAPI 3.0's `not: {}` with `nullable: true`) accepts exactly `null`;
+    // unwrapping to the never member would reject `null` too
+    const result: any = collapseNestedUnions({
+      type: 'object',
+      properties: {
+        first: { anyOf: [NEVER, { type: 'null' }], description: 'd' },
+        last: { anyOf: [{ type: 'null' }, { not: true }] },
+        one: { oneOf: [NEVER, { type: 'null' }] },
+        // `not: {}` beside the type list: the schema itself accepts nothing, and still does
+        list: { type: ['string', 'null'], not: {} },
+        // an ordinary nullable wrapper still unwraps
+        plain: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+      },
+    } as any);
+    expect(result.properties).toEqual({
+      first: { type: 'null', description: 'd' },
+      last: { type: 'null' },
+      one: { type: 'null' },
+      list: { type: 'string', not: {}, description: 'May be null.' },
+      plain: { type: 'string', description: 'May be null.' },
+    });
+  });
+
+  it('collapseRootCompositions does not unwrap a root nullable wrapper whose other member accepts nothing', () => {
+    // Left to the root union rule (a permissive node listing its variants) instead of `{ not: {} }`, which rejects null
+    const root = { anyOf: [NEVER, { type: 'null' }] } as any;
+    for (const target of ['claude', 'strict', 'openai'] as const) {
+      expect(applyClientTarget(root, target)).toEqual({
+        description: 'Accepts one of 2 variants: variant 1; type null.',
+        'x-variants': [NEVER, { type: 'null' }],
+      });
+    }
+    expect(applyClientTarget(root, 'gemini')).toEqual({ type: 'null' });
+  });
+
+  it('gives Gemini `type: null` for an OpenAPI 3.0 `not: {}` with `nullable: true`, through the generator', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON({
+      openapi: '3.0.3',
+      info: { title: 'T', version: '1' },
+      servers: [{ url: 'https://api.example.com' }],
+      paths: {
+        '/x': {
+          get: {
+            operationId: 'x',
+            parameters: [{ name: 'gone', in: 'query', schema: { not: {}, nullable: true } }],
+            responses: { 200: { description: 'ok' } },
+          },
+        },
+      },
+    } as any);
+    const [tool] = await generator.generateTools({ target: 'gemini' });
+    expect((tool.inputSchema.properties as any).gone).toEqual({ type: 'null', 'x-parameter-location': 'query' });
+  });
+
   it('every target passes { not: {} } elsewhere through unchanged', () => {
     const schema = { type: 'object', properties: { list: { type: 'array', items: NEVER } } } as any;
     for (const target of ['claude', 'strict', 'gemini'] as const) {

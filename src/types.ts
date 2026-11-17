@@ -1648,8 +1648,14 @@ export interface GenerateOptions {
    * 5. the first response with a schema (`default` only when nothing else
    *    has one).
    *
-   * An explicit code therefore always wins over a range of its own class:
-   * `{ 299, 2XX }` gives 299, although `2XX` covers the preferred 200.
+   * So an explicit code wins over the range of its class when the code is in
+   * this list (rule 1) and whenever it is a 2xx (rule 2: `{ 299, 2XX }` gives
+   * 299, although `2XX` covers the preferred 200). A 3xx code wins over `3XX`
+   * only while no range covers a code of this list (rule 3 comes first:
+   * `{ 399, 3XX }` gives `3XX` with `[301]`, 399 with the default). In the
+   * other classes the range wins when it covers a code of this list
+   * (`{ 499, 4XX }` gives `4XX` with `[404]`); otherwise rule 5 takes the
+   * first in key order (integer keys first, so 499 with the default).
    * @default [200, 201, 204, 202, 203, 206]
    */
   preferredStatusCodes?: number[];

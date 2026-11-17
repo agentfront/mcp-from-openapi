@@ -2,6 +2,7 @@ import type { ParameterObject } from './types';
 import { isReferenceObject } from './types';
 import { analyzeParameters } from './parameter-resolver';
 import {
+  MAX_CONVERSION_ENTRIES,
   detectSpecVersion,
   isSpecObject,
   isSwagger2,
@@ -15,7 +16,8 @@ import {
 export type LintSeverity = 'error' | 'warning' | 'info';
 
 /**
- * One agent-readiness finding. `path` names the operation (`GET /users`);
+ * One agent-readiness finding. `path` names the operation (`GET /users`), or
+ * is empty for a finding about the whole document;
  * `hint` says how to fix it — in the spec or via generate options/overlays.
  */
 export interface LintFinding {
@@ -191,10 +193,18 @@ function readParameters(value: unknown): ParameterObject[] {
  * A Swagger 2.0 document is converted to OpenAPI 3.0 first (`upgradeSwagger2`,
  * whose diagnostics are not reported here), so its findings are those of the
  * tools it generates; pass it dereferenced, as `generator.lint()` does: a
- * `$ref` left in it is not followed.
+ * `$ref` left in it is not followed. A conversion abandoned at
+ * `MAX_CONVERSION_ENTRIES` leaves no operation to lint: the result is one
+ * `swagger-conversion-too-large` error about the whole document (path `''`),
+ * so it never reads as a clean document (`generator.lint()` throws the
+ * `ParseError` generation throws instead).
  */
 export function lintDocument(document: object): LintResult {
-  if (isSwagger2(document)) return lintDocument(upgradeSwagger2(document).document);
+  if (isSwagger2(document)) {
+    const upgraded = upgradeSwagger2(document);
+    if (upgraded.tooLarge) return lintResult([conversionTooLarge()]);
+    return lintDocument(upgraded.document);
+  }
   const findings: LintFinding[] = [];
   const operationIds = new Map<string, string[]>();
 
@@ -382,6 +392,25 @@ export function lintDocument(document: object): LintResult {
     }
   }
 
+  return lintResult(findings);
+}
+
+/** The finding for a Swagger 2.0 document whose conversion was abandoned: nothing of it could be linted. */
+function conversionTooLarge(): LintFinding {
+  return {
+    severity: 'error',
+    code: 'swagger-conversion-too-large',
+    message:
+      `The Swagger 2.0 document cannot be converted to OpenAPI 3.0: it needs more than ${MAX_CONVERSION_ENTRIES} media ` +
+      'type, encoding, header and form property entries (MAX_CONVERSION_ENTRIES), as its `consumes`, `produces` and ' +
+      'path-level parameters apply to every operation. No operation was linted, and no tool can be generated from it.',
+    path: '',
+    hint: 'Shorten the root `consumes`/`produces` lists (or give the operations their own), or convert the document to OpenAPI 3 first.',
+  };
+}
+
+/** Sorts the findings (errors first, then warnings, then infos; by path, then code) and counts them. */
+function lintResult(findings: LintFinding[]): LintResult {
   const rank: Record<LintSeverity, number> = { error: 0, warning: 1, info: 2 };
   findings.sort(
     (a, b) => rank[a.severity] - rank[b.severity] || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0) || (a.code < b.code ? -1 : 1),
