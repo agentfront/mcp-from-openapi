@@ -368,17 +368,18 @@ export function applyOverlay<T extends object>(document: T, overlay: OverlayDocu
 
     for (const match of matches) {
       const node = match.value;
+      const update: unknown = JSON.parse(JSON.stringify(action.update));
       if (Array.isArray(node)) {
-        node.push(action.update);
-      } else if (isContainer(node) && isContainer(action.update) && !Array.isArray(action.update)) {
-        deepMerge(node as Record<string, unknown>, action.update as Record<string, unknown>);
+        node.push(update);
+      } else if (isContainer(node) && isContainer(update) && !Array.isArray(update)) {
+        deepMerge(node as Record<string, unknown>, update as Record<string, unknown>);
       } else {
         if (match.parent === null) {
           throw new OverlayError('Overlay cannot replace the document root with a non-object', {
             target: action.target,
           });
         }
-        (match.parent as Record<string, unknown>)[match.key as string] = action.update;
+        (match.parent as Record<string, unknown>)[match.key as string] = update;
       }
     }
   }

@@ -62,15 +62,17 @@ export function resolveSchemaLimits(options: { maxSchemaDepth?: number; maxSchem
   };
 }
 
-/** The `maxTotalSchemaNodes` of a run: the option when it is a positive number, else the `secureDefaults` value or no limit */
-export function resolveMaxTotalSchemaNodes(maxTotalSchemaNodes: unknown, secureDefaults: boolean): number {
-  if (typeof maxTotalSchemaNodes === 'number' && maxTotalSchemaNodes > 0) return maxTotalSchemaNodes;
-  return maxTotalSchemaNodes === undefined && secureDefaults ? SECURE_MAX_TOTAL_SCHEMA_NODES : Infinity;
+/** `value` when it is a positive number, else `fallback` */
+export function positiveOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && value > 0 ? value : fallback;
 }
 
-/** The `maxToolNameLength` of a run: the option when it is a number of at least 1, else the default */
-export function resolveMaxToolNameLength(maxToolNameLength: unknown, defaultLength: number): number {
-  return typeof maxToolNameLength === 'number' && maxToolNameLength >= 1 ? maxToolNameLength : defaultLength;
+/** The `maxTotalSchemaNodes` of a run: the option, else the `secureDefaults` value or no limit */
+export function resolveMaxTotalSchemaNodes(maxTotalSchemaNodes: unknown, secureDefaults: boolean): number {
+  return positiveOr(
+    maxTotalSchemaNodes,
+    maxTotalSchemaNodes === undefined && secureDefaults ? SECURE_MAX_TOTAL_SCHEMA_NODES : Infinity,
+  );
 }
 
 /** Whether `error` is a node-budget failure (`maxSchemaNodes`), which a smaller depth may avoid */

@@ -29,7 +29,12 @@ import type {
   ReferenceObject,
   ResponseStatusRange,
 } from './types';
-import { DIAGNOSTIC_CODES, MAX_DIAGNOSTICS } from './types';
+import {
+  DEFAULT_MAX_REFERENCED_BYTES,
+  DEFAULT_MAX_REFERENCED_DOCUMENTS,
+  DIAGNOSTIC_CODES,
+  MAX_DIAGNOSTICS,
+} from './types';
 import {
   appendPointer,
   describeValue,
@@ -71,7 +76,7 @@ import { ResponseBuilder } from './response-builder';
 import {
   SchemaBuilder,
   fitSchemaDepth,
-  resolveMaxToolNameLength,
+  positiveOr,
   resolveMaxTotalSchemaNodes,
   resolveSchemaLimits,
 } from './schema-builder';
@@ -315,6 +320,7 @@ type RefRule =
   | 'missing-target'
   | 'invalid-document'
   | 'base-too-long'
+  | 'too-many-documents'
   | 'unreadable';
 
 /** Why a reference cannot be read, for `ExternalRefError`. */
@@ -550,27 +556,72 @@ interface OrderedReads {
    * request or file read running after it settles.
    */
   settle(): Promise<void>;
+  /** Counts one more referenced document; why it may not be read when a limit is reached, which stops reading */
+  admit(): RefRefusal | undefined;
+  /** Counts the bytes of a document read; why reading stops when they pass the limit */
+  account(size: number): RefRefusal | undefined;
+}
+
+/** How many referenced documents are read at the same time */
+const MAX_CONCURRENT_READS = 8;
+
+/** A dereference may run this many times `LoadOptions.timeout` */
+const DEREFERENCE_TIMEOUT_FACTOR = 10;
+
+/** The limits of the referenced documents one dereference reads */
+interface ReadLimits {
+  /** `refResolution.maxDocuments` */
+  maxDocuments: number;
+  /** `refResolution.maxTotalBytes` */
+  maxTotalBytes: number;
+  /** `LoadOptions.timeout`; the dereference may take `DEREFERENCE_TIMEOUT_FACTOR` times it */
+  timeoutMs: number;
 }
 
 const ignore = (): void => undefined;
 
+const notRead = (): Error => new Error('Not read: an earlier reference could not be read');
+
 /**
  * Wraps the reads of one dereference so their results are delivered in the
- * order they were asked for, one per turn of the event loop, while the reads
- * themselves run in parallel. `$RefParser` asks in document order (the entry
- * document's references depth-first, then each document's as it is parsed),
+ * order they were asked for, one per turn of the event loop, while at most
+ * `MAX_CONCURRENT_READS` run at a time. `$RefParser` asks in document order,
  * so the first reference that cannot be read is always the one reported,
- * whatever order the network or the disk answers in. Once one fails, reads
- * asked for later are not started; neither are they once `settle` is called
- * (the dereference failed some other way: a document that does not parse).
+ * whatever order the network or the disk answers in. Once one fails, or
+ * `settle` is called, reads asked for later are not started.
  */
-function orderedReads(): OrderedReads {
+function orderedReads(limits: ReadLimits): OrderedReads {
   let tail: Promise<unknown> = Promise.resolve();
   let failed = false;
+  let running = 0;
+  let documents = 0;
+  let bytes = 0;
+  const deadline = Date.now() + limits.timeoutMs * DEREFERENCE_TIMEOUT_FACTOR;
+  const waiting: Array<() => void> = [];
   const started: Array<Promise<void>> = [];
+  const startWaiting = (): void => {
+    while (waiting.length > 0 && (failed || running < MAX_CONCURRENT_READS)) (waiting.shift() as () => void)();
+  };
+  const startWhenFree = <T>(read: () => Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      waiting.push(() => {
+        if (failed) {
+          reject(notRead());
+          return;
+        }
+        running++;
+        read()
+          .then(resolve, reject)
+          .finally(() => {
+            running--;
+            startWaiting();
+          });
+      });
+      startWaiting();
+    });
   return {
     read: <T>(read: () => Promise<T>): Promise<T> => {
-      const reading = failed ? Promise.reject(new Error('Not read: an earlier reference could not be read')) : read();
+      const reading = failed ? Promise.reject(notRead()) : startWhenFree(read);
       if (!failed) started.push(reading.then(ignore, ignore));
       reading.catch(ignore);
       const delivered = tail.then(() => reading);
@@ -582,7 +633,35 @@ function orderedReads(): OrderedReads {
     },
     settle: async () => {
       failed = true;
+      startWaiting();
       await Promise.all(started);
+    },
+    admit: () => {
+      if (++documents > limits.maxDocuments) {
+        failed = true;
+        return {
+          rule: 'too-many-documents',
+          reason: `the document needs more than ${limits.maxDocuments} referenced documents (refResolution.maxDocuments)`,
+          allow: 'raise refResolution.maxDocuments to read them',
+        };
+      }
+      if (Date.now() > deadline) {
+        failed = true;
+        return {
+          rule: 'timeout',
+          reason: `reading the referenced documents takes longer than ${limits.timeoutMs * DEREFERENCE_TIMEOUT_FACTOR} ms (ten times LoadOptions.timeout)`,
+        };
+      }
+      return undefined;
+    },
+    account: (size) => {
+      if ((bytes += size) <= limits.maxTotalBytes) return undefined;
+      failed = true;
+      return {
+        rule: 'too-large',
+        reason: `the referenced documents read hold more than ${limits.maxTotalBytes} bytes (refResolution.maxTotalBytes)`,
+        allow: 'raise refResolution.maxTotalBytes to read them',
+      };
     },
   };
 }
@@ -1398,12 +1477,10 @@ export class OpenAPIToolGenerator {
    * `fileResolver` is `$RefParser`'s own file resolver, whose `read` is
    * wrapped (its `canRead` is kept); `ordered` is the dereference's read queue.
    */
-  private buildRefParserOptions(
-    fileResolver: { read(file: RefTarget): unknown },
-    ordered: OrderedReads['read'],
-  ): ParserOptions {
+  private buildRefParserOptions(fileResolver: { read(file: RefTarget): unknown }, reads: OrderedReads): ParserOptions {
+    const ordered = reads.read;
     const raw = this.options.refResolution;
-    const refOpts: Required<RefResolutionOptions> = {
+    const refOpts: Omit<Required<RefResolutionOptions>, 'maxDocuments' | 'maxTotalBytes'> = {
       allowedProtocols: raw.allowedProtocols ?? ['http', 'https'],
       allowedHosts: raw.allowedHosts ?? [],
       blockedHosts: raw.blockedHosts ?? [],
@@ -1460,28 +1537,41 @@ export class OpenAPIToolGenerator {
     const refuse = (file: RefTarget, refs: RefParserRefs | undefined, refusal: RefRefusal): never => {
       throw new ExternalRefError(file, refusal, { documentHasBase, location: locate(file, refs) });
     };
+    const withinLimits = async <T>(
+      file: RefTarget,
+      refs: RefParserRefs | undefined,
+      read: () => Promise<T>,
+    ): Promise<T> => {
+      const refusal = reads.admit();
+      if (refusal) refuse(file, refs, refusal);
+      const content = await read();
+      const overLimit = reads.account((content as { length: number }).length);
+      return overLimit ? refuse(file, refs, overLimit) : content;
+    };
 
     const resolveConfig: Record<string, unknown> = {
       external: true,
       file: fileAllowed
         ? {
             read: (file: RefTarget, _callback: unknown, refs?: RefParserRefs): Promise<unknown> =>
-              ordered(async () => {
-                try {
-                  return await fileResolver.read(file);
-                } catch (error: unknown) {
-                  // `$RefParser`'s file resolver gives the I/O error's code (ENOENT, EISDIR, ...)
-                  const { ioErrorCode, message } = Object(error) as { ioErrorCode?: unknown; message?: unknown };
-                  return refuse(file, refs, {
-                    rule: 'file-error',
-                    /* c8 ignore next 4 -- defensive: an error without a code is described by its message */
-                    reason:
-                      typeof ioErrorCode === 'string'
-                        ? `the file cannot be read (${messageText(ioErrorCode, 32)})`
-                        : messageText(String(message), REF_TEXT_MAX_LENGTH),
-                  });
-                }
-              }),
+              ordered(() =>
+                withinLimits(file, refs, async () => {
+                  try {
+                    return await fileResolver.read(file);
+                  } catch (error: unknown) {
+                    // `$RefParser`'s file resolver gives the I/O error's code (ENOENT, EISDIR, ...)
+                    const { ioErrorCode, message } = Object(error) as { ioErrorCode?: unknown; message?: unknown };
+                    return refuse(file, refs, {
+                      rule: 'file-error',
+                      /* c8 ignore next 4 -- defensive: an error without a code is described by its message */
+                      reason:
+                        typeof ioErrorCode === 'string'
+                          ? `the file cannot be read (${messageText(ioErrorCode, 32)})`
+                          : messageText(String(message), REF_TEXT_MAX_LENGTH),
+                    });
+                  }
+                }),
+              ),
           }
         : false,
       refused: {
@@ -1510,27 +1600,29 @@ export class OpenAPIToolGenerator {
         // `this.options.headers` (the spec-load credentials) to third-party
         // `$ref` hosts — that would leak the spec's auth token cross-origin.
         read: (file: RefTarget, _callback: unknown, refs?: RefParserRefs): Promise<string> =>
-          ordered(async () => {
-            let response: Response;
-            try {
-              response = await safeFetch(file.url, {
-                timeoutMs: this.options.timeout,
-                followRedirects: false,
-                ssrf: refOpts,
-              });
-            } catch (error: unknown) {
-              // The guard's refusal (an address the name resolves to, a body too large, ...), a
-              // timeout or a network failure, with the reference it concerns
-              return refuse(file, refs, fetchFailure(error, this.options.timeout));
-            }
-            if (!response.ok) {
-              refuse(file, refs, {
-                rule: 'response',
-                reason: `the server answered ${response.status} ${describeValue(response.statusText, REF_TEXT_MAX_LENGTH)}`,
-              });
-            }
-            return response.text();
-          }),
+          ordered(() =>
+            withinLimits(file, refs, async () => {
+              let response: Response;
+              try {
+                response = await safeFetch(file.url, {
+                  timeoutMs: this.options.timeout,
+                  followRedirects: false,
+                  ssrf: refOpts,
+                });
+              } catch (error: unknown) {
+                // The guard's refusal (an address the name resolves to, a body too large, ...), a
+                // timeout or a network failure, with the reference it concerns
+                return refuse(file, refs, fetchFailure(error, this.options.timeout));
+              }
+              if (!response.ok) {
+                refuse(file, refs, {
+                  rule: 'response',
+                  reason: `the server answered ${response.status} ${describeValue(response.statusText, REF_TEXT_MAX_LENGTH)}`,
+                });
+              }
+              return response.text();
+            }),
+          ),
       };
     } else {
       resolveConfig['http'] = false;
@@ -1803,13 +1895,18 @@ export class OpenAPIToolGenerator {
       return;
     }
     let refParser: typeof import('@apidevtools/json-schema-ref-parser') | undefined;
-    const reads = orderedReads();
+    const limits = this.options.refResolution;
+    const reads = orderedReads({
+      maxDocuments: positiveOr(limits.maxDocuments, DEFAULT_MAX_REFERENCED_DOCUMENTS),
+      maxTotalBytes: positiveOr(limits.maxTotalBytes, DEFAULT_MAX_REFERENCED_BYTES),
+      timeoutMs: this.options.timeout,
+    });
     try {
       refParser = await import('@apidevtools/json-schema-ref-parser');
       // Its `read` is a function; the type also allows the static forms a plugin may take
       const fileResolver = refParser.FileResolver as unknown as { read(file: RefTarget): unknown };
       const refParserOptions: ParserOptions = {
-        ...this.buildRefParserOptions(fileResolver, reads.read),
+        ...this.buildRefParserOptions(fileResolver, reads),
         dereference: {
           // Where each `$ref` is replaced, for a value that must be given back as written (see
           // src/reference-sites.ts). Called for every replacement, a circular one included
@@ -1969,7 +2066,7 @@ export class OpenAPIToolGenerator {
           // stable, content-derived suffix — the (method, path) pair is unique
           // per operation, so the suffixed name is deterministic across runs.
           if (usedNames.has(tool.name)) {
-            const maxLength = resolveMaxToolNameLength(options.maxToolNameLength, DEFAULT_MAX_TOOL_NAME_LENGTH);
+            const maxLength = positiveOr(options.maxToolNameLength, DEFAULT_MAX_TOOL_NAME_LENGTH);
             // Recheck after renaming: the suffixed name can itself be taken
             // (e.g. an operationId that mimics a suffixed name, or truncated
             // hash-only names under tiny caps). Extending the seed reseeds
@@ -2891,10 +2988,9 @@ export class OpenAPIToolGenerator {
     }
 
     // Check operation ID filters
-    if (options.includeOperations && operation.operationId) {
-      if (!options.includeOperations.includes(operation.operationId)) {
-        return false;
-      }
+    if (options.includeOperations) {
+      const operationId: unknown = operation.operationId;
+      if (typeof operationId !== 'string' || !options.includeOperations.includes(operationId)) return false;
     }
 
     if (options.excludeOperations && operation.operationId) {
@@ -2960,7 +3056,7 @@ export class OpenAPIToolGenerator {
     // source — operationIds and custom toolNameGenerator output included.
     return normalizeToolName(
       rawName,
-      resolveMaxToolNameLength(options.maxToolNameLength, DEFAULT_MAX_TOOL_NAME_LENGTH),
+      positiveOr(options.maxToolNameLength, DEFAULT_MAX_TOOL_NAME_LENGTH),
       `${method} ${path}`,
     );
   }
@@ -3103,9 +3199,9 @@ export class OpenAPIToolGenerator {
             resolved.push(entry);
           } else if (Array.isArray(scopes)) {
             // Both are required together, so the scopes of both are
-            const merged = Array.isArray(seen.scopes) ? [...seen.scopes] : [];
-            for (const scope of scopes as string[]) if (!merged.includes(scope)) merged.push(scope);
-            seen.scopes = merged;
+            const merged = new Set(Array.isArray(seen.scopes) ? seen.scopes : []);
+            for (const scope of scopes as string[]) merged.add(scope);
+            seen.scopes = [...merged];
           }
           continue;
         }

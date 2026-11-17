@@ -342,11 +342,12 @@ try {
 | `protocol` | Its protocol is not in `refResolution.allowedProtocols` (a path or relative reference counts as `file`), or it is allowed but not one the network fetcher reads (only `http` and `https` are fetched) | Add the protocol, `file` for a local path (see below) |
 | `host-not-allowed` | `allowedHosts` is set and does not list its host | Add the host to `allowedHosts` |
 | `host-blocked` | Its host is in `blockedHosts` | Remove it from `blockedHosts` |
+| `too-many-documents` | The document needs more than `refResolution.maxDocuments` referenced documents (default 10,000) | Raise `maxDocuments` |
 | `internal-address` | Its host is a loopback, private, link-local or cloud-metadata name or address | `allowInternalIPs: true` (unsafe for documents you do not trust) |
 | `resolved-address` | Its name resolves to an internal address (`Host "..." resolves to blocked address 255.255.255.255`) | `allowInternalIPs: true` (unsafe) |
 | `dns-failed` | Its name could not be resolved | Fix the name |
-| `too-large` | The response exceeds 10 MiB (`Response body exceeds 10485760 bytes`) | |
-| `timeout` | No answer within `LoadOptions.timeout` (`no answer within 300 ms (LoadOptions.timeout)`) | Raise `timeout` |
+| `too-large` | The response exceeds 10 MiB (`Response body exceeds 10485760 bytes`), or the referenced documents read hold more than `refResolution.maxTotalBytes` together (default 100 MiB) | Raise `maxTotalBytes` for the second |
+| `timeout` | No answer within `LoadOptions.timeout` (`no answer within 300 ms (LoadOptions.timeout)`), or reading every referenced document takes longer than ten times it | Raise `timeout` |
 | `response` | The server answered with a failure status (`the server answered 404 "Not Found"`). A redirect is not followed for a `$ref`, so a `302` is this too | Fix the reference or the server |
 | `fetch-failed` | The fetch failed for another reason (`connect ECONNREFUSED 127.0.0.1:8080`) | |
 | `file-error` | A local file cannot be read (`the file cannot be read (ENOENT)`) | |

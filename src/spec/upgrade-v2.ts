@@ -178,11 +178,16 @@ export function readSwagger2BasePath(value: unknown): Swagger2BasePath {
       problem: `it holds ${describeValue(character[0])}, which a server URL path cannot carry (a template, whitespace, a query, a fragment or a backslash)`,
     };
   }
-  if (value.split('/').some((segment) => DOT_SEGMENT.test(segment))) {
+  if (value.split('/').some(isDotSegment)) {
     return { kind: 'unusable', problem: 'it has a "." or ".." segment, which a URL parser removes' };
   }
   const path = trimTrailingSlashes(value.startsWith('/') ? value : `/${value}`);
   return value.startsWith('/') ? { kind: 'usable', path } : { kind: 'missing-slash', path };
+}
+
+/** Whether a path segment is `.` or `..`, percent-encoded or not: URL parsers resolve it away */
+export function isDotSegment(segment: string): boolean {
+  return /^(?:\.|%2e){1,2}$/i.test(segment);
 }
 
 /**
@@ -237,9 +242,6 @@ const HOST = /^[^{}/:\\?#@\s\u0000-\u001f\u007f]+(?::[0-9]+)?$/;
  * as a variable, backslashes) and whitespace or control characters.
  */
 const BASE_PATH_UNUSABLE = /[{}?#\\\s\u0000-\u001f\u007f]/;
-
-/** A `.` or `..` path segment, percent-encoded or not (RFC 3986 section 5.2.4). */
-const DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
 
 /** Scheme and authority of an absolute URI. */
 const URI_ORIGIN = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]*)/;

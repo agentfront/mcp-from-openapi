@@ -1,6 +1,6 @@
 import type { McpOpenAPITool, ParameterLocation, ParameterMapper } from './types';
 import { RequestBuildError } from './errors';
-import { describeValue, isHttpToken, isRefusedMethod, wireMethod } from './spec';
+import { describeValue, isDotSegment, isHttpToken, isRefusedMethod, wireMethod } from './spec';
 import {
   FORM_URLENCODED,
   JSON_MEDIA_TYPE,
@@ -1365,9 +1365,6 @@ function nameClaimer(
   };
 }
 
-/** A `.` or `..` path segment, percent-encoded or not, which URL parsers resolve away */
-const DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
-
 /** Refuse a resolved path that leaves the origin, holds a dot segment, or loses a segment its template has */
 function assertPathNamesTemplateResource(template: string, path: string): void {
   if (!/^\/(?![/\\])/.test(path)) {
@@ -1380,7 +1377,7 @@ function assertPathNamesTemplateResource(template: string, path: string): void {
   pathSegments.forEach((segment, index) => {
     const lastIndex = pathSegments.length - 1;
     const emptyAllowed = index === lastIndex && templateSegments[index] === '';
-    if (DOT_SEGMENT.test(segment) || (segment === '' && index > 0 && !emptyAllowed)) {
+    if (isDotSegment(segment) || (segment === '' && index > 0 && !emptyAllowed)) {
       throw new RequestBuildError(
         `The request path ${describeValue(path)} has an empty or dot segment where its template ${describeValue(template)} names a resource`,
         { path: describeValue(path), template: describeValue(template) },

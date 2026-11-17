@@ -1488,7 +1488,25 @@ export interface RefResolutionOptions {
    * @default false
    */
   allowInternalIPs?: boolean;
+
+  /**
+   * The most referenced documents one dereference reads; past it the load fails (rule `too-many-documents`).
+   * @default 10000
+   */
+  maxDocuments?: number;
+
+  /**
+   * The most bytes all referenced documents of one dereference may hold together; past it the load fails (rule `too-large`).
+   * @default 104857600
+   */
+  maxTotalBytes?: number;
 }
+
+/** Default `RefResolutionOptions.maxDocuments` */
+export const DEFAULT_MAX_REFERENCED_DOCUMENTS = 10_000;
+
+/** Default `RefResolutionOptions.maxTotalBytes`: 100 MiB */
+export const DEFAULT_MAX_REFERENCED_BYTES = 100 * 1024 * 1024;
 
 /**
  * Options for loading OpenAPI specifications
@@ -2022,6 +2040,8 @@ export const DIAGNOSTIC_CODES = Object.freeze({
   NO_OPERATIONS: 'NO_OPERATIONS',
   /** Validator warning: an operation has no `operationId` (its tool name comes from the method and path). */
   NO_OPERATION_ID: 'NO_OPERATION_ID',
+  /** Validator warning: two operations share an `operationId`, which must be unique. */
+  DUPLICATE_OPERATION_ID: 'DUPLICATE_OPERATION_ID',
   /** Validator warning: the document defines no servers. */
   NO_SERVERS: 'NO_SERVERS',
   /** Validator warning: the document has security requirements but no security schemes. */

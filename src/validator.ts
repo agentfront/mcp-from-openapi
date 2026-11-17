@@ -19,6 +19,7 @@ import {
   diagnosticKey,
   featureNewerThanDeclared,
   getSpecProfile,
+  isDotSegment,
   isSpecObject,
   jsonPointer,
   listOperations,
@@ -155,6 +156,7 @@ class FindingList {
 
 /** What one `validate` call reads and fills. */
 interface ValidationContext {
+  /** The version the document declares. */
   version: SpecVersionInfo;
   /** The declared version's profile; the latest one when the version is not usable. */
   profile: SpecProfile;
@@ -166,8 +168,12 @@ interface ValidationContext {
   componentParameters: unknown;
   /** A local reference to one of them: `#/components/parameters/<name>` (2.0: `#/parameters/<name>`). */
   parameterRef: RegExp;
+  /** The errors found, capped. */
   errors: FindingList;
+  /** The warnings found, capped. */
   warnings: FindingList;
+  /** Each `operationId` seen so far, by its bounded key. */
+  operationIds: Set<string>;
 }
 
 /** `Swagger 2.0`, `OpenAPI 3.1`: the name of a family, for a message. */
@@ -425,6 +431,7 @@ export class Validator {
       parameterRef: swagger ? /^#\/parameters\/(.+)$/ : /^#\/components\/parameters\/(.+)$/,
       errors: new FindingList('errors'),
       warnings: new FindingList('warnings'),
+      operationIds: new Set(),
     };
     const { errors, warnings } = context;
 
@@ -653,6 +660,18 @@ export class Validator {
         path: `${basePath}/operationId`,
         code: 'NO_OPERATION_ID',
       });
+    }
+    const operationId: unknown = operation.operationId;
+    if (typeof operationId === 'string' && operationId !== '') {
+      const key = boundedKey(operationId);
+      if (context.operationIds.has(key)) {
+        warnings.push({
+          message: `Operation ${label} repeats the operationId ${describeValue(operationId)}, which must be unique; its tool gets a different name, and includeOperations matches every operation using it`,
+          path: appendPointer(pointer, 'operationId'),
+          code: 'DUPLICATE_OPERATION_ID',
+        });
+      }
+      context.operationIds.add(key);
     }
 
     // Check for responses: required in 3.0 only; never empty when present
@@ -956,7 +975,7 @@ function pathTemplateProblem(path: string): string | undefined {
   if (path.includes('\\')) return 'holds a backslash, which URL parsers read as a slash';
   const segments = path.split('/');
   if (segments.slice(1, -1).some((segment) => segment === '')) return 'has an empty segment (`//`)';
-  if (segments.some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment))) {
+  if (segments.some(isDotSegment)) {
     return 'has a `.` or `..` segment, which URL parsers resolve to another path';
   }
   if (!/^(?:[^{}]|\{[^{}]+\})*$/.test(path)) return 'has a `{` or `}` that is not part of a `{name}` template expression';

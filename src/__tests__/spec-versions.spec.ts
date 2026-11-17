@@ -974,6 +974,7 @@ describe('the spec barrel', () => {
       'MAX_CONVERSION_ENTRIES',
       'MAX_MEDIA_TYPES_PER_LIST',
       'UPGRADED_OPENAPI_VERSION',
+      'isDotSegment',
       'readSwagger2BasePath',
       'swagger2SkippedOperations',
       'upgradeSwagger2',
