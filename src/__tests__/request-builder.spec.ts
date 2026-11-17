@@ -3,6 +3,7 @@
  */
 
 import { buildHttpRequest } from '../request-builder';
+import type { BuiltHttpRequest } from '../request-builder';
 import { RequestBuildError } from '../errors';
 import { OpenAPIToolGenerator } from '../generator';
 import type { McpOpenAPITool, ParameterMapper } from '../types';
@@ -1528,7 +1529,7 @@ describe('whole-query parameters (OpenAPI 3.2 in: querystring)', () => {
       expect(before.url).toBe('https://example.com/foo?api_key=k&foo=a');
     });
 
-    it('ignores the Encoding Objects, as a form body does', () => {
+    it('applies the Encoding Objects, as a form body does (they used to be ignored: id=x&list=a&list=b)', () => {
       const tool = fooTool([
         {
           inputKey: 'q',
@@ -1542,7 +1543,9 @@ describe('whole-query parameters (OpenAPI 3.2 in: querystring)', () => {
         },
       ]);
 
-      expect(buildHttpRequest(tool, { q: { id: 'x', list: ['a', 'b'] } }).url).toBe('https://example.com/foo?id=x&list=a&list=b');
+      const built = buildHttpRequest(tool, { q: { id: 'x', list: ['a', 'b'], other: ['c', 'd'] } });
+      expect(built.url).toBe('https://example.com/foo?id=%22x%22&list=a%2Cb&other=c&other=d');
+      expect(built.query).toEqual({ id: ['"x"'], list: ['a,b'], other: ['c', 'd'] });
     });
 
     it('serializes a large object without recursion or argument spreading', () => {
@@ -1713,6 +1716,59 @@ describe('whole-query parameters (OpenAPI 3.2 in: querystring)', () => {
       );
       expect(() => buildHttpRequest(wholeQueryTool('application/json'), { q: () => 1 })).toThrow(
         "query parameter 'q' has no JSON representation; received a function",
+      );
+    });
+
+    it('turns a failure while the value is checked into a RequestBuildError', () => {
+      const call = (q: unknown) => () => buildHttpRequest(wholeQueryTool('application/json'), { q });
+      const expectBuildError = (q: unknown, message: string | RegExp) => {
+        expect(call(q)).toThrow(RequestBuildError);
+        expect(call(q)).toThrow(message);
+      };
+      // The check reads every member: a getter that throws, an Error or anything else
+      const getter = Object.defineProperty({}, 'bad', {
+        enumerable: true,
+        get: () => {
+          throw new Error('getter failed\nsecond line');
+        },
+      });
+      expectBuildError(getter, /^query parameter 'q' cannot be serialized as JSON: getter failed$/);
+      const plain = Object.defineProperty({}, 'bad', {
+        enumerable: true,
+        get: () => {
+          throw 'plain';
+        },
+      });
+      expectBuildError(plain, `query parameter 'q' cannot be serialized as JSON: "plain"`);
+      // A nested array element, and a proxy whose keys cannot be listed
+      expectBuildError([getter], /cannot be serialized as JSON: getter failed$/);
+      const proxy = new Proxy(
+        {},
+        {
+          ownKeys: () => {
+            throw new TypeError('no keys');
+          },
+        },
+      );
+      expectBuildError({ inner: proxy }, /cannot be serialized as JSON: no keys$/);
+      // A RequestBuildError thrown from the value is passed on as it is
+      const own = new RequestBuildError('from the value', {});
+      const rethrow = Object.defineProperty({}, 'bad', {
+        enumerable: true,
+        get: () => {
+          throw own;
+        },
+      });
+      let thrown: unknown;
+      try {
+        call(rethrow)();
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBe(own);
+      // A form whole query and a JSON property of a form object are checked the same way
+      expect(() => buildHttpRequest(wholeQueryTool('application/x-www-form-urlencoded'), { q: { a: getter } })).toThrow(
+        /query parameter 'a' cannot be serialized as JSON: getter failed$/,
       );
     });
 
@@ -2197,7 +2253,7 @@ describe('names the input chooses cannot take a name the tool reserves', () => {
       expect(() => buildHttpRequest(tool, { o: { api_key: 'x' } })).toThrow(/names the query parameter 'api_key'/);
     });
 
-    it('leaves alone the names the input does not choose: explode false, deepObject, arrays, the own name', () => {
+    it('lets through names no other entry uses: explode false, a deepObject name, arrays, the own name', () => {
       const call = (mapper: Partial<ParameterMapper>, o: unknown) =>
         buildHttpRequest(fooTool([{ ...explodedQuery, ...mapper }, credential('query', 'api_key')]), { o }).url;
 
@@ -2206,6 +2262,54 @@ describe('names the input chooses cannot take a name the tool reserves', () => {
       expect(call({}, ['api_key'])).toBe('https://example.com/foo?o=api_key');
       expect(call({}, { o: 1, other: 2 })).toBe('https://example.com/foo?o=1&other=2');
     });
+  });
+});
+
+describe('names a deepObject query parameter generates cannot take a name the tool reserves', () => {
+  const filter: ParameterMapper = { inputKey: 'filter', type: 'query', key: 'filter', style: 'deepObject', explode: true };
+  const credential = (key: string): ParameterMapper => ({ inputKey: 'cred', type: 'query', key, security: { scheme: 'keyScheme', type: 'apiKey' } });
+
+  it('refuses filter[a] when a sibling query parameter is literally named filter[a] (it used to send both pairs)', () => {
+    const tool = fooTool([filter, { inputKey: 'fa', type: 'query', key: 'filter[a]' }]);
+
+    for (const input of [{ filter: { a: 'x' }, fa: 'real' }, { filter: { a: 'x' } }]) {
+      const error = buildFailure(() => buildHttpRequest(tool, input));
+      expect(error.message).toBe(
+        "The input of query parameter 'filter' (input key 'filter') names the query parameter 'filter[a]', which this tool reserves for the query parameter 'filter[a]' (input key 'fa')",
+      );
+      expect(error.context).toEqual({ param: 'filter', inputKey: 'filter', location: 'query', name: 'filter[a]', reservedBy: 'fa' });
+    }
+  });
+
+  it.each([
+    ['supplied', { filter: { a: 'attacker' }, cred: 'real' }],
+    ['not supplied', { filter: { a: 'attacker' } }],
+  ])('refuses filter[a] when a query credential is named filter[a], the credential %s', (_label, input) => {
+    const error = buildFailure(() => buildHttpRequest(fooTool([filter, credential('filter[a]')]), input));
+
+    expect(error.message).toBe(
+      "The input of query parameter 'filter' (input key 'filter') names the query parameter 'filter[a]', which this tool reserves for the credential of security scheme 'keyScheme'",
+    );
+    expect(error.context).toEqual({ param: 'filter', inputKey: 'filter', location: 'query', name: 'filter[a]', reservedBy: 'cred' });
+  });
+
+  it('checks a nested name and the name of an array property too', () => {
+    expect(() => buildHttpRequest(fooTool([filter, credential('filter[a][b]')]), { filter: { a: { b: 'x' } } })).toThrow(
+      "names the query parameter 'filter[a][b]', which this tool reserves for the credential of security scheme 'keyScheme'",
+    );
+    expect(() => buildHttpRequest(fooTool([filter, credential('filter[tags]')]), { filter: { tags: ['x', 'y'] } })).toThrow(
+      "names the query parameter 'filter[tags]'",
+    );
+  });
+
+  it('leaves a request unchanged when no other entry uses the name: a different name, an empty array, another case', () => {
+    const tool = fooTool([filter, credential('filter[a]'), { inputKey: 'fb', type: 'query', key: 'filter[B]' }]);
+
+    const built = buildHttpRequest(tool, { filter: { b: 'x', a2: { a: 1 }, tags: [] }, cred: 'k', fb: 'y' });
+    expect(built.url).toBe('https://example.com/foo?filter[b]=x&filter[a2][a]=1&filter[a]=k&filter[B]=y');
+    // names compare unencoded, which is the decoded wire form: an entry named `filter%5Ba%5D` is another name
+    const encoded = fooTool([filter, credential('filter%5Ba%5D')]);
+    expect(buildHttpRequest(encoded, { filter: { a: 'x' }, cred: 'k' }).url).toBe('https://example.com/foo?filter[a]=x&filter%255Ba%255D=k');
   });
 });
 
@@ -2544,5 +2648,926 @@ describe('one media-type classification for content parameters and whole queries
         expect(buildHttpRequest(search.tool!, { q: 'x y' }).url).toBe('https://api.example.com/search?x%20y');
       }
     });
+  });
+});
+
+/**
+ * Form fields follow their Encoding Object: OpenAPI 3.0.4 and 3.2.1 "Encoding
+ * Object", "Encoding the x-www-form-urlencoded Media Type", "Encoding
+ * multipart Media Types", "Encoding By Name" (3.2.1) and Appendix C.
+ */
+describe('form fields follow their Encoding Object', () => {
+  const URLENCODED = 'application/x-www-form-urlencoded';
+  const MULTIPART = 'multipart/form-data';
+
+  /** A body field as the generator flattens it: it carries its own Encoding Object only */
+  const field = (
+    key: string,
+    contentType: string,
+    encoding?: unknown,
+    extra: Partial<ParameterMapper> = {},
+  ): ParameterMapper => ({
+    inputKey: key,
+    type: 'body',
+    key,
+    serialization: { contentType, ...(encoding !== undefined && { encoding: { [key]: encoding } as any }) },
+    ...extra,
+  });
+  const formTool = (mapper: ParameterMapper[]) => makeTool(mapper, { path: '/t' });
+  const build = (mapper: ParameterMapper[], input: Record<string, unknown>) => buildHttpRequest(formTool(mapper), input);
+  const formBody = (mapper: ParameterMapper[], input: Record<string, unknown>) => build(mapper, input).body as string;
+  const pairsOf = (text: string) => [...new URLSearchParams(text)];
+  /** A FormData body as [name, text] entries; a file as `<type>` */
+  const entriesOf = (body: unknown) => {
+    expect(body).toBeInstanceOf(FormData);
+    return [...(body as FormData).entries()].map(([name, value]) => [
+      name,
+      typeof value === 'string' ? value : `<${(value as File).type}>`,
+    ]);
+  };
+  /** The text of a multipart body the builder wrote itself, its boundary written BOUNDARY */
+  const writtenText = async (built: BuiltHttpRequest): Promise<string> => {
+    expect(built.body).toBeInstanceOf(Blob);
+    expect(built.body).not.toBeInstanceOf(FormData);
+    const boundary = /^multipart\/form-data; boundary=(mcp-from-openapi-[0-9a-f]{32})$/.exec(built.headers['content-type'])![1];
+    expect((built.body as Blob).type).toBe(`multipart/form-data; boundary=${boundary}`);
+    return (await (built.body as Blob).text()).split(boundary).join('BOUNDARY');
+  };
+  /** A multipart body read back the way a server reads it */
+  const parsed = async (built: BuiltHttpRequest) =>
+    [...(await new Response(built.body as Blob, { headers: { 'content-type': built.headers['content-type'] } }).formData()).entries()].map(
+      ([name, value]) => [name, typeof value === 'string' ? value : `<${(value as File).type}>`],
+    );
+
+  // OpenAPI 3.2.1 "Style Examples" for `color` = "blue" / ["blue", "black", "brown"] / { "R": 100, "G": 200, "B": 150 }
+  // (the 3.0.4 table agrees on every cell used here). Each row: the cell as the specification writes it, then the
+  // bytes the builder sends in a form body (WHATWG form encoding: `+` for a space, `,` written `%2C`), which decode
+  // to the same pairs. A form field with an Encoding Object is serialized like a query parameter with that
+  // style/explode (one serializer), so the query parameter gets the same pairs.
+  const VALUES = { string: 'blue', array: ['blue', 'black', 'brown'], object: { R: 100, G: 200, B: 150 } };
+  type Kind = keyof typeof VALUES;
+  const STYLE_EXAMPLES: Array<[style: string, explode: boolean | undefined, kind: Kind, spec: string, sent: string]> = [
+    ['form', false, 'string', 'color=blue', 'color=blue'],
+    ['form', false, 'array', 'color=blue,black,brown', 'color=blue%2Cblack%2Cbrown'],
+    ['form', false, 'object', 'color=R,100,G,200,B,150', 'color=R%2C100%2CG%2C200%2CB%2C150'],
+    ['form', true, 'string', 'color=blue', 'color=blue'],
+    ['form', true, 'array', 'color=blue&color=black&color=brown', 'color=blue&color=black&color=brown'],
+    ['form', true, 'object', 'R=100&G=200&B=150', 'R=100&G=200&B=150'],
+    ['form', undefined, 'array', 'color=blue&color=black&color=brown', 'color=blue&color=black&color=brown'],
+    ['spaceDelimited', false, 'array', 'color=blue%20black%20brown', 'color=blue+black+brown'],
+    ['spaceDelimited', undefined, 'array', 'color=blue%20black%20brown', 'color=blue+black+brown'],
+    ['pipeDelimited', false, 'array', 'color=blue%7Cblack%7Cbrown', 'color=blue%7Cblack%7Cbrown'],
+    ['deepObject', true, 'object', 'color%5BR%5D=100&color%5BG%5D=200&color%5BB%5D=150', 'color%5BR%5D=100&color%5BG%5D=200&color%5BB%5D=150'],
+    // 3.2.1: "when style is deepObject, this field has no effect"
+    ['deepObject', undefined, 'object', 'color%5BR%5D=100&color%5BG%5D=200&color%5BB%5D=150', 'color%5BR%5D=100&color%5BG%5D=200&color%5BB%5D=150'],
+  ];
+
+  describe('application/x-www-form-urlencoded: the Style Examples table', () => {
+    it.each(STYLE_EXAMPLES)('style %s, explode %s, %s value', (style, explode, kind, spec, sent) => {
+      const encoding = { style, ...(explode !== undefined && { explode }) };
+      const body = formBody([field('color', URLENCODED, encoding)], { color: VALUES[kind] });
+
+      expect(body).toBe(sent);
+      expect(pairsOf(body)).toEqual(pairsOf(spec));
+
+      // the same pairs as a query parameter with that style/explode
+      const query = fooTool([{ inputKey: 'color', type: 'query', key: 'color', style, ...(explode !== undefined && { explode }) }]);
+      const built = buildHttpRequest(query, { color: VALUES[kind] });
+      expect(pairsOf(built.url.split('?')[1])).toEqual(pairsOf(spec));
+    });
+
+    // KNOWN GAP, shared with query parameters (one serializer, whose output for them predates this change and is
+    // kept byte for byte): a spaceDelimited or pipeDelimited OBJECT is written comma-separated, not with the
+    // style's delimiter as the table gives it. Each row is expected to fail until the serializer is changed.
+    it.failing.each([
+      ['spaceDelimited', 'color=R%20100%20G%20200%20B%20150'],
+      ['pipeDelimited', 'color=R%7C100%7CG%7C200%7CB%7C150'],
+    ])('style %s, explode false, object value (known gap)', (style, spec) => {
+      const body = formBody([field('color', URLENCODED, { style, explode: false })], { color: VALUES.object });
+
+      expect(pairsOf(body)).toEqual(pairsOf(spec));
+    });
+
+    it('writes what a spaceDelimited or pipeDelimited object gets in the query today: comma-separated', () => {
+      expect(formBody([field('color', URLENCODED, { style: 'spaceDelimited' })], { color: VALUES.object })).toBe(
+        'color=R%2C100%2CG%2C200%2CB%2C150',
+      );
+    });
+
+    it('serializes every field with its own Encoding Object, and a field without one as it always was', () => {
+      const body = formBody(
+        [
+          field('ids', URLENCODED, { style: 'pipeDelimited', explode: false }),
+          field('tags', URLENCODED),
+          field('meta', URLENCODED, { style: 'deepObject', explode: true }),
+          field('raw', URLENCODED),
+          field('note', URLENCODED, {}),
+        ],
+        { ids: [1, 2], tags: ['a', 'b'], meta: { a: 'x y', b: true }, raw: { a: 1 }, note: 'n' },
+      );
+
+      expect(body).toBe('ids=1%7C2&tags=a&tags=b&meta%5Ba%5D=x+y&meta%5Bb%5D=true&raw=%7B%22a%22%3A1%7D&note=n');
+    });
+
+    it('leaves out a null or undefined field, with an Encoding Object as without one', () => {
+      const mapper = [field('a', URLENCODED, { style: 'deepObject' }), field('b', URLENCODED, { contentType: 'application/json' }), field('c', URLENCODED)];
+
+      expect(formBody(mapper, { a: null, b: null, c: 'x' })).toBe('c=x');
+    });
+
+    it('sends an empty array as nothing, exploded or not', () => {
+      expect(formBody([field('t', URLENCODED, { explode: false }), field('u', URLENCODED, { explode: true })], { t: [], u: [], v: 1 })).toBe('');
+    });
+
+    it('serializes a large array without recursion or argument spreading', () => {
+      const many = Array.from({ length: 200_000 }, (_, i) => i);
+
+      const joined = formBody([field('n', URLENCODED, { style: 'form', explode: false })], { n: many });
+      expect(joined.startsWith('n=0%2C1%2C2')).toBe(true);
+      expect(joined.endsWith('%2C199999')).toBe(true);
+
+      const exploded = formBody([field('n', URLENCODED, { explode: true, allowReserved: true })], { n: many });
+      expect(exploded.split('&')).toHaveLength(200_000);
+    });
+  });
+
+  describe('application/x-www-form-urlencoded: what the table leaves undefined', () => {
+    it('nests deepObject brackets for an object property and repeats the name for an array property, as in the query', () => {
+      const value = { customer: { address: { city: 'Paris', zip: '75001' } }, tags: ['a', 'b'], skip: undefined, n: 1 };
+      const body = formBody([field('filter', URLENCODED, { style: 'deepObject', explode: true })], { filter: value });
+
+      expect(pairsOf(body)).toEqual([
+        ['filter[customer][address][city]', 'Paris'],
+        ['filter[customer][address][zip]', '75001'],
+        ['filter[tags]', 'a'],
+        ['filter[tags]', 'b'],
+        ['filter[n]', '1'],
+      ]);
+      const query = buildHttpRequest(fooTool([{ inputKey: 'filter', type: 'query', key: 'filter', style: 'deepObject' }]), { filter: value });
+      expect(pairsOf(query.url.split('?')[1])).toEqual(pairsOf(body));
+    });
+
+    it('writes a deepObject array as form (exploded unless explode is false) and a primitive as one pair', () => {
+      expect(formBody([field('expand', URLENCODED, { style: 'deepObject', explode: true })], { expand: ['a', 'b'] })).toBe('expand=a&expand=b');
+      expect(formBody([field('expand', URLENCODED, { style: 'deepObject', explode: false })], { expand: ['a', 'b'] })).toBe('expand=a%2Cb');
+      expect(formBody([field('metadata', URLENCODED, { style: 'deepObject', explode: true })], { metadata: '' })).toBe('metadata=');
+    });
+
+    it('refuses an array of objects with deepObject (servers disagree on its form), at the top or nested', () => {
+      const mapper = [field('line_items', URLENCODED, { style: 'deepObject', explode: true }, { inputKey: 'lineItems' })];
+      const message =
+        "body parameter 'line_items' has style deepObject, which has no form for an array of objects: OpenAPI defines deepObject for an object with primitive properties, and servers write the items of an array differently (line_items[0][key]=value, line_items[][key]=value)";
+
+      const top = buildFailure(() => build(mapper, { lineItems: [{ price: 'p', quantity: 1 }] }));
+      expect(top.message).toBe(message);
+      expect(top.context).toEqual({ param: 'line_items', inputKey: 'lineItems', location: 'body', style: 'deepObject' });
+
+      expect(() => build(mapper, { lineItems: { list: [{ price: 'p' }] } })).toThrow(message);
+    });
+
+    it('gives the same refusal to a deepObject query parameter, which used to say only "must serialize to a primitive"', () => {
+      const tool = fooTool([{ inputKey: 'f', type: 'query', key: 'f', style: 'deepObject' }]);
+
+      const error = buildFailure(() => buildHttpRequest(tool, { f: [{ a: 1 }] }));
+      expect(error.message).toMatch(/^query parameter 'f' has style deepObject, which has no form for an array of objects/);
+      expect(error.context).toEqual({ param: 'f', location: 'query', style: 'deepObject' });
+    });
+
+    it('refuses a null or nested-array property inside a deepObject, as the query does', () => {
+      const mapper = [field('m', URLENCODED, { style: 'deepObject' })];
+
+      expect(() => build(mapper, { m: { a: null } })).toThrow("body parameter 'm' must serialize to a primitive; received null");
+      expect(() => build(mapper, { m: { a: [[1]] } })).toThrow("body parameter 'm' must serialize to a primitive; received an array");
+    });
+
+    it('keeps a nested object JSON text without an Encoding Object, and refuses it with a style other than deepObject, as the query does', () => {
+      expect(formBody([field('m', URLENCODED)], { m: { a: { b: 1 } } })).toBe('m=%7B%22a%22%3A%7B%22b%22%3A1%7D%7D');
+      expect(formBody([field('m', URLENCODED, { contentType: 'application/json' })], { m: { a: { b: 1 } } })).toBe(
+        'm=%7B%22a%22%3A%7B%22b%22%3A1%7D%7D',
+      );
+      expect(() => build([field('m', URLENCODED, { style: 'form', explode: false })], { m: { a: { b: 1 } } })).toThrow(
+        "body parameter 'm' must serialize to a primitive; received object",
+      );
+    });
+  });
+
+  describe('application/x-www-form-urlencoded: allowReserved', () => {
+    it('keeps the reserved characters a form allows, percent-encoded triples too, and encodes & = + # [ ] always', () => {
+      const value = "a/b:c?d@e!$'()*,;&=+#[] x%41%zz%";
+      const body = formBody([field('next', URLENCODED, { allowReserved: true }), field('plain', URLENCODED)], { next: value, plain: value });
+
+      expect(body).toBe(
+        "next=a/b:c?d@e!$'()*,;%26%3D%2B%23%5B%5D+x%41%25zz%25" +
+          '&plain=a%2Fb%3Ac%3Fd%40e%21%24%27%28%29*%2C%3B%26%3D%2B%23%5B%5D+x%2541%25zz%25',
+      );
+      // the value cannot add a field: two pairs, whatever it holds
+      expect(pairsOf(body).map(([name]) => name)).toEqual(['next', 'plain']);
+      expect(pairsOf(body)[0][1]).toBe("a/b:c?d@e!$'()*,;&=+#[] xA%zz%");
+    });
+
+    it('applies to every pair of the field, never to a name', () => {
+      const body = formBody([field('m', URLENCODED, { style: 'deepObject', allowReserved: true })], { m: { 'a/b': 'c/d' } });
+
+      expect(body).toBe('m%5Ba%2Fb%5D=c/d');
+    });
+
+    it('allowReserved false (explicit) is the plain form encoding with style form defaults', () => {
+      expect(formBody([field('p', URLENCODED, { allowReserved: false })], { p: ['a/b', 'c'] })).toBe('p=a%2Fb&p=c');
+    });
+
+    it('refuses a lone surrogate in a value it keeps', () => {
+      expect(() => build([field('p', URLENCODED, { allowReserved: true })], { p: 'a\ud800' })).toThrow(
+        "body parameter 'p' contains a lone surrogate (an unpaired UTF-16 code unit), which has no UTF-8 encoding",
+      );
+    });
+  });
+
+  describe('application/x-www-form-urlencoded: contentType (no style, explode or allowReserved)', () => {
+    it('writes JSON text for a JSON media type, a string quoted (the specification example)', () => {
+      // id = f81d4fae-7dec-11d0-a765-00a0c91e6bf6 serialized as application/json: id=%22f81d4fae-7dec-11d0-a765-00a0c91e6bf6%22
+      const body = formBody(
+        [field('id', URLENCODED, { contentType: 'application/json' }), field('address', URLENCODED, { contentType: 'application/json' })],
+        { id: 'f81d4fae-7dec-11d0-a765-00a0c91e6bf6', address: { zip: '99999+1234' } },
+      );
+
+      expect(body).toBe('id=%22f81d4fae-7dec-11d0-a765-00a0c91e6bf6%22&address=%7B%22zip%22%3A%2299999%2B1234%22%7D');
+    });
+
+    it('applies it to each item of an array ("Encoding By Name"), an object item included', () => {
+      expect(formBody([field('a', URLENCODED, { contentType: 'application/json' })], { a: ['x', { y: 1 }, null] })).toBe(
+        'a=%22x%22&a=%7B%22y%22%3A1%7D&a=null',
+      );
+    });
+
+    it('reads the first media type of a list, and a non-JSON one needs a primitive', () => {
+      expect(formBody([field('a', URLENCODED, { contentType: 'application/json, text/plain' })], { a: 'x' })).toBe('a=%22x%22');
+      expect(formBody([field('a', URLENCODED, { contentType: 'text/plain' })], { a: ['x', 2, true] })).toBe('a=x&a=2&a=true');
+      expect(formBody([field('icon', URLENCODED, { contentType: 'image/png, image/jpeg' })], { icon: 'iVBOR/w==' })).toBe('icon=iVBOR%2Fw%3D%3D');
+
+      const error = buildFailure(() => build([field('a', URLENCODED, { contentType: 'text/plain' }, { inputKey: 'A' })], { a: 1, A: { b: 1 } }));
+      expect(error.message).toBe("body parameter 'a' is sent as text/plain, which needs a string or another primitive; received an object");
+      expect(error.context).toEqual({ param: 'a', inputKey: 'A', location: 'body', contentType: 'text/plain' });
+    });
+
+    it('writes a nested form string for a form media type', () => {
+      expect(formBody([field('f', URLENCODED, { contentType: URLENCODED })], { f: { a: '1', b: 'x y' } })).toBe('f=a%3D1%26b%3Dx%2By');
+    });
+
+    it('defaults by the value without a contentType: JSON for an object or array item, the string form of a primitive', () => {
+      const body = formBody([field('a', URLENCODED, { headers: { 'X-Ignored': {} } })], { a: [{ b: 1 }, [2], 'c', 3] });
+
+      expect(body).toBe('a=%7B%22b%22%3A1%7D&a=%5B2%5D&a=c&a=3');
+      expect(() => build([field('a', URLENCODED, {})], { a: [null] })).toThrow("body parameter 'a' must serialize to a primitive; received null");
+    });
+
+    it('refuses what JSON cannot write, with the input key', () => {
+      const cyclic: Record<string, unknown> = {};
+      cyclic['self'] = cyclic;
+
+      const error = buildFailure(() => build([field('a', URLENCODED, { contentType: 'application/json' }, { inputKey: 'A' })], { A: cyclic }));
+      expect(error.message).toBe("body parameter 'a' cannot be serialized as JSON: it contains itself (a cycle)");
+      expect(error.context).toEqual({ param: 'a', inputKey: 'A', location: 'body' });
+      expect(() => build([field('a', URLENCODED, {})], { a: { n: 1n } })).toThrow(/body parameter 'a' cannot be serialized as JSON: /);
+      expect(() => build([field('a', URLENCODED, { contentType: 'application/json' })], { a: () => 1 })).toThrow(
+        /body parameter 'a' has no JSON representation/,
+      );
+    });
+
+    it('refuses a form string for a field that is not an object', () => {
+      const error = buildFailure(() => build([field('f', URLENCODED, { contentType: URLENCODED })], { f: 'a=1' }));
+
+      expect(error.message).toBe(`body parameter 'f' is sent as ${URLENCODED}, which needs an object; received "a=1"`);
+      expect(error.context).toEqual({ param: 'f', inputKey: 'f', location: 'body', contentType: URLENCODED });
+    });
+  });
+
+  describe('whole bodies, whole queries and content parameters', () => {
+    it('reads a whole form body\'s Encoding Objects by property name', () => {
+      const tool = formTool([
+        {
+          inputKey: 'body',
+          type: 'body',
+          key: 'body',
+          wholeBody: true,
+          serialization: { contentType: URLENCODED, encoding: { meta: { style: 'deepObject' }, list: { explode: false } } },
+        },
+      ]);
+
+      expect(buildHttpRequest(tool, { body: { meta: { a: 1 }, list: [1, 2], other: { x: 1 } } }).body).toBe(
+        'meta%5Ba%5D=1&list=1%2C2&other=%7B%22x%22%3A1%7D',
+      );
+    });
+
+    it('applies them to a form whole query, checking every name a field puts in the query', () => {
+      const credential: ParameterMapper = { inputKey: 'cred', type: 'query', key: 'api_key', security: { scheme: 'keyScheme', type: 'apiKey' } };
+      const tool = fooTool([
+        {
+          inputKey: 'q',
+          type: 'query',
+          key: 'q',
+          wholeQuery: true,
+          serialization: { contentType: URLENCODED, encoding: { f: { style: 'deepObject' }, o: { explode: true }, r: { allowReserved: true } } },
+        },
+        credential,
+      ]);
+
+      const built = buildHttpRequest(tool, { q: { f: { a: 'x' }, o: { b: 'y' }, r: 'a/b' }, cred: 'k' });
+      expect(built.url).toBe('https://example.com/foo?f%5Ba%5D=x&b=y&r=a/b&api_key=k');
+      expect(built.query).toEqual({ 'f[a]': ['x'], b: ['y'], r: ['a/b'], api_key: ['k'] });
+
+      const error = buildFailure(() => buildHttpRequest(tool, { q: { o: { api_key: 'attacker' } } }));
+      expect(error.message).toBe(
+        "The input of query parameter 'q' (input key 'q') names the query parameter 'api_key', which this tool reserves for the credential of security scheme 'keyScheme'",
+      );
+      expect(error.context).toEqual({ param: 'q', inputKey: 'q', location: 'query', name: 'api_key', reservedBy: 'cred' });
+    });
+
+    it('applies them to a form content parameter, whose names stay inside its one value', () => {
+      const tool = fooTool([
+        { inputKey: 'p', type: 'query', key: 'p', serialization: { contentType: URLENCODED, encoding: { ids: { explode: false } } } },
+      ]);
+
+      expect(buildHttpRequest(tool, { p: { ids: [1, 2], q: 'x' } }).url).toBe('https://example.com/foo?p=ids%3D1%252C2%26q%3Dx');
+    });
+
+    it('ignores the Encoding Objects of a JSON or other content parameter, however they are written', () => {
+      const tool = fooTool([{ inputKey: 'p', type: 'query', key: 'p', serialization: { contentType: 'application/json', encoding: 'junk' as any } }]);
+
+      expect(buildHttpRequest(tool, { p: { ids: [1, 2] } }).url).toBe('https://example.com/foo?p=%7B%22ids%22%3A%5B1%2C2%5D%7D');
+    });
+  });
+
+  describe('names the input chooses in a form body', () => {
+    it('refuses an exploded object property named like another body field, given or not', () => {
+      const mapper = [field('opts', URLENCODED, { style: 'form', explode: true }), field('name', URLENCODED, undefined, { inputKey: 'theName' })];
+
+      for (const input of [{ opts: { name: 'evil' } }, { opts: { name: 'evil' }, theName: 'real' }]) {
+        const error = buildFailure(() => build(mapper, input));
+        expect(error.message).toBe(
+          "The input of body parameter 'opts' (input key 'opts') names the form field 'name', which this tool reserves for the body parameter 'name' (input key 'theName')",
+        );
+        expect(error.context).toEqual({ param: 'opts', inputKey: 'opts', location: 'body', name: 'name', reservedBy: 'theName' });
+      }
+    });
+
+    it('refuses a deepObject name that is another body field', () => {
+      const mapper = [field('meta', URLENCODED, { style: 'deepObject' }), field('meta[plan]', URLENCODED)];
+
+      expect(() => build(mapper, { meta: { plan: 'pro' } })).toThrow(
+        "names the form field 'meta[plan]', which this tool reserves for the body parameter 'meta[plan]' (input key 'meta[plan]')",
+      );
+      expect(formBody(mapper, { meta: { tier: 'pro' }, 'meta[plan]': 'x' })).toBe('meta%5Btier%5D=pro&meta%5Bplan%5D=x');
+    });
+
+    it('refuses the same in a multipart body', () => {
+      const mapper = [field('opts', MULTIPART, { explode: true }), field('file', MULTIPART)];
+
+      expect(() => build(mapper, { opts: { file: 'evil' } })).toThrow("names the form field 'file', which this tool reserves for the body parameter 'file'");
+    });
+
+    it('allows the field\'s own name, names no other field has, and __proto__ as an ordinary name', () => {
+      const mapper = [field('opts', URLENCODED, { explode: true }), field('other', URLENCODED)];
+
+      expect(formBody(mapper, { opts: JSON.parse('{"opts":1,"x":2,"__proto__":3,"constructor":4}') })).toBe('opts=1&x=2&__proto__=3&constructor=4');
+    });
+
+    it('refuses a __proto__ property when a body field has that name', () => {
+      const mapper = [field('opts', URLENCODED, { explode: true }), field('__proto__', URLENCODED)];
+
+      expect(() => build(mapper, { opts: JSON.parse('{"__proto__":"x"}') })).toThrow("names the form field '__proto__'");
+    });
+
+    it('checks nothing in a whole body, where every field name is the input\'s', () => {
+      const tool = formTool([
+        { inputKey: 'b', type: 'body', key: 'b', wholeBody: true, serialization: { contentType: URLENCODED, encoding: { o: { explode: true } } } },
+      ]);
+
+      expect(buildHttpRequest(tool, { b: { o: { a: 1, b: 2 }, a: 3 } }).body).toBe('a=1&b=2&a=3');
+    });
+
+    it('reads an Encoding Object as an own property only', () => {
+      const encoding = Object.create({ toString: { style: 'deepObject' } });
+      const tool = formTool([{ inputKey: 'toString', type: 'body', key: 'toString', serialization: { contentType: URLENCODED, encoding } }]);
+
+      expect(buildHttpRequest(tool, { toString: { a: 1 } }).body).toBe('toString=%7B%22a%22%3A1%7D');
+    });
+  });
+
+  describe('hostile and huge values', () => {
+    it('refuses a cyclic deepObject value instead of recursing forever, in a body and in the query', () => {
+      const cyclic: Record<string, unknown> = { a: 1 };
+      cyclic['self'] = { back: cyclic };
+
+      const error = buildFailure(() => build([field('m', URLENCODED, { style: 'deepObject' }, { inputKey: 'M' })], { M: cyclic }));
+      expect(error.message).toBe("body parameter 'm' cannot be serialized with style deepObject: it contains itself (a cycle)");
+      expect(error.context).toEqual({ param: 'm', inputKey: 'M', location: 'body' });
+
+      const query = fooTool([{ inputKey: 'm', type: 'query', key: 'm', style: 'deepObject' }]);
+      expect(() => buildHttpRequest(query, { m: cyclic })).toThrow("query parameter 'm' cannot be serialized with style deepObject: it contains itself (a cycle)");
+    });
+
+    it('refuses a deepObject value nested far deeper than the stack allows', () => {
+      let deep: Record<string, unknown> = { leaf: 1 };
+      for (let i = 0; i < 200_000; i++) deep = { d: deep };
+
+      expect(() => build([field('m', URLENCODED, { style: 'deepObject' })], { m: deep })).toThrow(
+        "body parameter 'm' cannot be serialized with style deepObject: it nests deeper than 1000 levels",
+      );
+    });
+
+    it('refuses a lone surrogate in a deepObject key', () => {
+      expect(() => build([field('m', URLENCODED, { style: 'deepObject' })], { m: { ['k\ud800']: 1 } })).toThrow(
+        "body parameter 'm[k\ud800]' contains a lone surrogate",
+      );
+    });
+  });
+
+  describe('Encoding Objects of the wrong shape', () => {
+    const failure = (encoding: unknown, value: unknown = 'x') => buildFailure(() => build([field('f', URLENCODED, encoding, { inputKey: 'F' })], { F: value }));
+    const prefix = "body parameter 'f' (input key 'F') has an invalid Encoding Object for 'f' in serialization.encoding: ";
+
+    it.each([
+      [null, 'it must be an object; received null'],
+      [['style'], 'it must be an object; received an array'],
+      [{ style: 1 }, 'style must be a string; received 1'],
+      [{ style: null }, 'style must be a string; received null'],
+      [{ explode: 'yes' }, 'explode must be a boolean; received "yes"'],
+      [{ allowReserved: 1 }, 'allowReserved must be a boolean; received 1'],
+      [{ contentType: 1 }, 'contentType must name a media type; received 1'],
+      [{ contentType: ' , ' }, 'contentType must name a media type; received " , "'],
+      [{ contentType: '; charset=utf-8' }, 'contentType must name a media type; received "; charset=utf-8"'],
+    ])('refuses %p', (encoding, problem) => {
+      const error = failure(encoding);
+
+      expect(error.message).toBe(prefix + problem);
+      expect(error.context).toEqual({ param: 'f', inputKey: 'F', location: 'body', field: 'f' });
+    });
+
+    it('refuses an encoding map that is not an object', () => {
+      const tool = formTool([{ inputKey: 'f', type: 'body', key: 'f', serialization: { contentType: URLENCODED, encoding: [] as any } }]);
+
+      expect(() => buildHttpRequest(tool, { f: 'x' })).toThrow(prefix.replace("(input key 'F')", "(input key 'f')") + 'the encoding map must be an object; received an array');
+    });
+
+    it('refuses multipart headers that are not an object, and ignores them in a urlencoded form', () => {
+      expect(formBody([field('f', URLENCODED, { headers: 'X' })], { f: 'x' })).toBe('f=x');
+
+      const error = buildFailure(() => build([field('f', MULTIPART, { headers: 'X' }, { inputKey: 'F' })], { F: 'x' }));
+      expect(error.message).toBe(`${prefix}headers must be an object; received "X"`);
+      expect(error.context).toEqual({ param: 'f', inputKey: 'F', location: 'body', field: 'f' });
+    });
+  });
+
+  describe('multipart/form-data', () => {
+    it('keeps every field without an Encoding Object as it was: an array is ONE part of JSON text, null the text null', () => {
+      const built = build([field('tags', MULTIPART), field('meta', MULTIPART), field('n', MULTIPART), field('file', MULTIPART)], {
+        tags: ['a', 'b'],
+        meta: { a: 1 },
+        n: null,
+        file: new Uint8Array([1]),
+      });
+
+      expect(entriesOf(built.body)).toEqual([
+        ['tags', '["a","b"]'],
+        ['meta', '{"a":1}'],
+        ['n', 'null'],
+        ['file', '<>'],
+      ]);
+      expect(built.headers['content-type']).toBeUndefined();
+    });
+
+    it.each(STYLE_EXAMPLES)(
+      'sends style %s, explode %s, %s value as the pairs of the table, one part each, never percent-encoded',
+      (style, explode, kind, spec) => {
+        const built = build([field('color', MULTIPART, { style, ...(explode !== undefined && { explode }) })], { color: VALUES[kind] });
+
+        // Appendix C: names in Content-Disposition, values in the part, no `?`, `=`, `&` and no percent-encoding
+        expect(entriesOf(built.body)).toEqual(pairsOf(spec));
+        expect(built.headers['content-type']).toBeUndefined();
+      },
+    );
+
+    it('sends multi (explode) one part per item and csv (explode false) one delimited part', () => {
+      expect(entriesOf(build([field('tags', MULTIPART, { style: 'form', explode: true })], { tags: ['x', 'y'] }).body)).toEqual([
+        ['tags', 'x'],
+        ['tags', 'y'],
+      ]);
+      expect(entriesOf(build([field('tags', MULTIPART, { style: 'form', explode: false })], { tags: ['x', 'y z'] }).body)).toEqual([
+        ['tags', 'x,y z'],
+      ]);
+    });
+
+    it('sends a deepObject object one part per bracketed name (Stripe file_link_data)', () => {
+      const built = build([field('file_link_data', MULTIPART, { style: 'deepObject', explode: true })], {
+        file_link_data: { create: true, metadata: { k: 'v' } },
+      });
+
+      expect(entriesOf(built.body)).toEqual([
+        ['file_link_data[create]', 'true'],
+        ['file_link_data[metadata][k]', 'v'],
+      ]);
+    });
+
+    it('applies no percent-encoding with allowReserved, which has no effect in multipart', () => {
+      expect(entriesOf(build([field('p', MULTIPART, { allowReserved: true })], { p: 'a&b=c/d' }).body)).toEqual([['p', 'a&b=c/d']]);
+    });
+
+    it('leaves out null with an Encoding Object', () => {
+      expect(entriesOf(build([field('p', MULTIPART, {}), field('q', MULTIPART)], { p: null, q: 'x' }).body)).toEqual([['q', 'x']]);
+    });
+
+    it('writes the body itself when a part needs a header FormData cannot write: a text part\'s Content-Type or a part header', async () => {
+      const built = build(
+        [
+          field('id', MULTIPART),
+          field('meta', MULTIPART, {
+            contentType: 'application/json',
+            headers: {
+              'X-Trace': { schema: { type: 'string', const: 't-1' } },
+              'X-Free': { schema: { type: 'string' } },
+              'content-type': { schema: { const: 'x/y' } },
+            },
+          }),
+          field('tags', MULTIPART, { style: 'form', explode: true }),
+          field('file', MULTIPART, { contentType: 'image/png' }),
+        ],
+        { id: '7', meta: { a: 1 }, tags: ['x', 'y'], file: new Uint8Array([1, 2]) },
+      );
+
+      expect(await writtenText(built)).toBe(
+        '--BOUNDARY\r\nContent-Disposition: form-data; name="id"\r\n\r\n7\r\n' +
+          '--BOUNDARY\r\nContent-Disposition: form-data; name="meta"\r\nContent-Type: application/json\r\nX-Trace: t-1\r\n\r\n{"a":1}\r\n' +
+          '--BOUNDARY\r\nContent-Disposition: form-data; name="tags"\r\n\r\nx\r\n' +
+          '--BOUNDARY\r\nContent-Disposition: form-data; name="tags"\r\n\r\ny\r\n' +
+          '--BOUNDARY\r\nContent-Disposition: form-data; name="file"; filename="blob"\r\nContent-Type: image/png\r\n\r\n\u0001\u0002\r\n' +
+          '--BOUNDARY--\r\n',
+      );
+      expect(await parsed(built)).toEqual([
+        ['id', '7'],
+        ['meta', '{"a":1}'],
+        ['tags', 'x'],
+        ['tags', 'y'],
+        ['file', '<image/png>'],
+      ]);
+      expect(built.contentType).toBe('multipart/form-data');
+    });
+
+    it('writes every other part exactly as FormData does (undici), so only the extra headers differ', async () => {
+      const input: Record<string, unknown> = {
+        text: 'a\nb\r\nc\rd',
+        'we"ird\nname': 'v',
+        file: new File([new Uint8Array([9])], 'x"y\r\n.png', { type: 'image/png' }),
+        bytes: new Uint8Array([7]),
+        unnamed: new File([new Uint8Array([8])], ''),
+        blob: new Blob(['b']),
+      };
+      const plain = Object.keys(input).map((key) => field(key, MULTIPART));
+      const response = new Response(build(plain, input).body as FormData);
+      const boundary = /boundary=(.+)$/.exec(response.headers.get('content-type')!)![1];
+      const viaFormData = (await response.text()).split(boundary).join('BOUNDARY');
+
+      const own = await writtenText(build([...plain, field('extra', MULTIPART, { contentType: 'text/plain' })], { ...input, extra: 'e' }));
+      expect(own).toBe(
+        viaFormData.replace(
+          '--BOUNDARY--\r\n',
+          '--BOUNDARY\r\nContent-Disposition: form-data; name="extra"\r\nContent-Type: text/plain\r\n\r\ne\r\n--BOUNDARY--\r\n',
+        ),
+      );
+    });
+
+    it('sends each item of an array as its own part by content type ("Encoding By Name")', async () => {
+      const built = build([field('addresses', MULTIPART, { contentType: 'application/json' })], { addresses: [{ city: 'A' }, { city: 'B' }] });
+
+      expect(await parsed(built)).toEqual([
+        ['addresses', '{"city":"A"}'],
+        ['addresses', '{"city":"B"}'],
+      ]);
+      expect(await writtenText(built)).toContain('name="addresses"\r\nContent-Type: application/json\r\n\r\n{"city":"B"}\r\n');
+    });
+
+    it('names the first media type of a list, parameters kept, and none for a range (FormData then suffices)', async () => {
+      const typed = build([field('x', MULTIPART, { contentType: 'application/xml; charset=utf-8, text/plain' })], { x: '<a/>' });
+      expect(await writtenText(typed)).toContain('name="x"\r\nContent-Type: application/xml; charset=utf-8\r\n\r\n<a/>\r\n');
+
+      expect(entriesOf(build([field('words', MULTIPART, { contentType: 'text/*' })], { words: ['a', 'b'] }).body)).toEqual([
+        ['words', 'a'],
+        ['words', 'b'],
+      ]);
+    });
+
+    it('writes application/json for an object without a contentType, nothing for a primitive (text/plain is the default)', async () => {
+      const built = build([field('meta', MULTIPART, {}), field('n', MULTIPART, {})], { meta: { a: 1 }, n: 2 });
+
+      expect(await writtenText(built)).toBe(
+        '--BOUNDARY\r\nContent-Disposition: form-data; name="meta"\r\nContent-Type: application/json\r\n\r\n{"a":1}\r\n' +
+          '--BOUNDARY\r\nContent-Disposition: form-data; name="n"\r\n\r\n2\r\n--BOUNDARY--\r\n',
+      );
+      expect(entriesOf(build([field('n', MULTIPART, {})], { n: 2 }).body)).toEqual([['n', '2']]);
+    });
+
+    it('refuses an object for a media type it cannot write', () => {
+      expect(() => build([field('a', MULTIPART, { contentType: 'application/xml' })], { a: { b: 1 } })).toThrow(
+        "body parameter 'a' is sent as application/xml, which needs a string or another primitive; received an object",
+      );
+    });
+
+    it('types a file that has no type by one named media type, keeping its name; a file with a type keeps it', () => {
+      const built = build(
+        [
+          field('a', MULTIPART, { contentType: 'image/png' }),
+          field('b', MULTIPART, { contentType: 'image/png' }),
+          field('c', MULTIPART, { contentType: 'image/png, image/jpeg' }),
+          field('d', MULTIPART, { contentType: 'image/*' }),
+          field('e', MULTIPART, { style: 'form', contentType: 'image/png' }),
+          field('f', MULTIPART, { contentType: 'image/gif' }),
+          field('g', MULTIPART, { contentType: 'text/csv' }),
+        ],
+        {
+          a: new File([new Uint8Array([1])], 'a.bin', { lastModified: 5 }),
+          b: new Blob(['x'], { type: 'image/jpeg' }),
+          c: new Uint8Array([1]),
+          d: new Uint8Array([2]),
+          e: new Blob(['y']),
+          f: [new Uint8Array([3]), new Blob(['z'])],
+          g: new Blob(['q']),
+        },
+      );
+      const form = built.body as FormData;
+
+      expect(entriesOf(form)).toEqual([
+        ['a', '<image/png>'],
+        ['b', '<image/jpeg>'],
+        ['c', '<image/png>'],
+        ['d', '<>'],
+        ['e', '<>'],
+        ['f', '<image/gif>'],
+        ['f', '<image/gif>'],
+        ['g', '<text/csv>'],
+      ]);
+      expect((form.get('a') as File).name).toBe('a.bin');
+      expect((form.get('a') as File).lastModified).toBe(5);
+    });
+
+    it('sends the headers whose value the document pins, and no other', async () => {
+      const headers = {
+        'X-Const': { schema: { const: 'c' } },
+        'X-Enum': { schema: { enum: [3] } },
+        'X-Bool': { schema: { const: true } },
+        'X-Two': { schema: { enum: ['a', 'b'] } },
+        'X-Free': { schema: { type: 'string' } },
+        'X-NoSchema': { description: 'no schema' },
+        'X-BooleanSchema': { schema: true },
+        'X-Ref': { $ref: '#/components/headers/X' },
+        'X-NotObject': 'header',
+        'X-Object': { schema: { const: { a: 1 } } },
+        'X-Null': { schema: { enum: [null] } },
+        'Content-Type': { schema: { const: 'text/html' } },
+        'CONTENT-DISPOSITION': { schema: { const: 'inline' } },
+        'Content-Transfer-Encoding': { schema: { const: 'base64' } },
+      };
+
+      expect(await writtenText(build([field('p', MULTIPART, { headers })], { p: 'aGk=' }))).toBe(
+        '--BOUNDARY\r\nContent-Disposition: form-data; name="p"\r\nX-Const: c\r\nX-Enum: 3\r\nX-Bool: true\r\nContent-Transfer-Encoding: base64\r\n\r\naGk=\r\n--BOUNDARY--\r\n',
+      );
+      // a header nobody pins changes nothing: FormData, as without an Encoding Object
+      expect(entriesOf(build([field('p', MULTIPART, { headers: { 'X-Free': { schema: { type: 'string' } } } })], { p: 'x' }).body)).toEqual([['p', 'x']]);
+    });
+
+    it.each([
+      ['CR and LF in the value', { 'X-A': { schema: { const: 'v\r\nX-Injected: 1' } } }, "Header 'X-A' value contains control characters (possible header injection)", 'X-A'],
+      ['a name that is not a token', { 'X A': { schema: { const: 'v' } } }, "Invalid header name 'X A' (RFC 7230 token required)", 'X A'],
+      [
+        'a character no header can hold',
+        { 'X-A': { schema: { const: 'v€' } } },
+        "Header 'X-A' value contains U+20AC at index 1, which a header value cannot hold (only tab, space, visible ASCII and U+0080 to U+00FF)",
+        'X-A',
+      ],
+    ])('refuses a pinned part header with %s', (_label, headers, message, header) => {
+      const error = buildFailure(() => build([field('p', MULTIPART, { headers }, { inputKey: 'P' })], { P: 'x' }));
+
+      expect(error.message).toBe(message);
+      expect(error.context).toEqual({ header, param: 'p', inputKey: 'P', location: 'body', field: 'p' });
+    });
+
+    it('refuses a part Content-Type with CR or LF (a document cannot add part headers through it)', () => {
+      const encoding = { contentType: 'text/plain\r\nX-Injected: 1' };
+      const error = buildFailure(() => build([field('p', MULTIPART, encoding)], { p: 'x' }));
+
+      expect(error.message).toBe("Header 'Content-Type' value contains control characters (possible header injection)");
+      expect(error.context).toEqual({ header: 'Content-Type', param: 'p', inputKey: 'p', location: 'body', field: 'p' });
+      // not a header in a urlencoded form: only how the value is written
+      expect(formBody([field('p', URLENCODED, encoding)], { p: 'x' })).toBe('p=x');
+    });
+
+    it('replaces a spec-mapped Content-Type header with its own, boundary included', () => {
+      const built = build([{ inputKey: 'ct', type: 'header', key: 'Content-Type' }, field('m', MULTIPART, { contentType: 'application/json' })], {
+        ct: 'multipart/form-data',
+        m: { a: 1 },
+      });
+
+      expect(Object.keys(built.headers)).toEqual(['Content-Type']);
+      expect(built.headers['Content-Type']).toBe((built.body as Blob).type);
+      expect(built.headers['Content-Type']).toMatch(/^multipart\/form-data; boundary=mcp-from-openapi-[0-9a-f]{32}$/);
+    });
+
+    it('reads a whole multipart body\'s Encoding Objects by property name', async () => {
+      const tool = formTool([
+        {
+          inputKey: 'body',
+          type: 'body',
+          key: 'body',
+          wholeBody: true,
+          serialization: { contentType: MULTIPART, encoding: { meta: { contentType: 'application/json' }, tags: { explode: true } } },
+        },
+      ]);
+      const built = buildHttpRequest(tool, { body: { meta: { a: 1 }, tags: ['x', 'y'], other: ['z'] } });
+
+      expect(await parsed(built)).toEqual([
+        ['meta', '{"a":1}'],
+        ['tags', 'x'],
+        ['tags', 'y'],
+        ['other', '["z"]'],
+      ]);
+    });
+
+    it('refuses a cyclic object part with a RequestBuildError, with or without an Encoding Object (a TypeError before)', () => {
+      const cyclic: Record<string, unknown> = {};
+      cyclic['self'] = cyclic;
+
+      expect(() => build([field('m', MULTIPART)], { m: cyclic })).toThrow("body parameter 'm' cannot be serialized as JSON: it contains itself (a cycle)");
+      expect(() => build([field('m', URLENCODED)], { m: cyclic })).toThrow("body parameter 'm' cannot be serialized as JSON: it contains itself (a cycle)");
+      expect(() => build([field('m', MULTIPART, {})], { m: cyclic })).toThrow(RequestBuildError);
+    });
+  });
+});
+
+/**
+ * allowReserved never lets a value change the structure of the query string or
+ * the URL (OpenAPI 3.2.1 Parameter Object `allowReserved`, "URL
+ * Percent-Encoding", Appendices C and E). One definition of what it keeps raw
+ * serves a query value and a form value.
+ */
+describe('allowReserved keeps only what cannot change the query string or the URL', () => {
+  const credential: ParameterMapper = { inputKey: 'cred', type: 'query', key: 'api_key', security: { scheme: 'keyScheme', type: 'apiKey' } };
+  const queryUrl = (allowReserved: boolean | undefined, p: unknown) =>
+    buildHttpRequest(fooTool([{ inputKey: 'p', type: 'query', key: 'p', ...(allowReserved !== undefined && { allowReserved }) }]), { p }).url;
+  const formBodyOf = (allowReserved: boolean, p: unknown) =>
+    buildHttpRequest(
+      makeTool(
+        [
+          {
+            inputKey: 'p',
+            type: 'body',
+            key: 'p',
+            serialization: { contentType: 'application/x-www-form-urlencoded', encoding: { p: { allowReserved } } },
+          },
+        ],
+        { path: '/t' },
+      ),
+      { p },
+    ).body as string;
+  const wholeQueryUrl = (p: unknown) =>
+    buildHttpRequest(
+      fooTool([
+        {
+          inputKey: 'q',
+          type: 'query',
+          key: 'q',
+          wholeQuery: true,
+          serialization: { contentType: 'application/x-www-form-urlencoded', encoding: { p: { allowReserved: true } } },
+        },
+      ]),
+      { q: { p } },
+    ).url;
+  /** What a call gives: the request's url, headers and cookies, or the error message */
+  const outcome = (call: () => BuiltHttpRequest) => {
+    try {
+      const built = call();
+      return { url: built.url, headers: built.headers, cookies: built.cookies };
+    } catch (error) {
+      return { error: (error as Error).message };
+    }
+  };
+
+  // Each character inside a value `a<char>b`: how a query value and a form value with allowReserved write it.
+  // Kept raw: the reserved characters the destination gives no meaning (`:/?@!$'()*,;`) and a percent-encoded
+  // triple. Always encoded: `&` `=` (pair delimiters), `+` (a space), `#` (a fragment), `[` `]` (not allowed in a
+  // query), a `%` that starts no triple, and everything that is not reserved. A space is `%20` in the query and `+`
+  // in a form (each encoder's own writing; both decode to a space), `~` is unreserved for RFC 3986 and encoded by the
+  // WHATWG form encoder.
+  const CHARACTERS: Array<[label: string, char: string, query: string, form: string]> = [
+    ['ampersand', '&', '%26', '%26'],
+    ['equals sign', '=', '%3D', '%3D'],
+    ['plus sign', '+', '%2B', '%2B'],
+    ['hash', '#', '%23', '%23'],
+    ['left bracket', '[', '%5B', '%5B'],
+    ['right bracket', ']', '%5D', '%5D'],
+    ['lone percent sign', '%', '%25', '%25'],
+    ['percent sign before non-hex', '%zz', '%25zz', '%25zz'],
+    ['percent-encoded triple', '%41', '%41', '%41'],
+    ['percent-encoded ampersand', '%26', '%26', '%26'],
+    ['question mark', '?', '?', '?'],
+    ['slash', '/', '/', '/'],
+    ['colon', ':', ':', ':'],
+    ['at sign', '@', '@', '@'],
+    ['exclamation mark', '!', '!', '!'],
+    ['dollar sign', '$', '$', '$'],
+    ['apostrophe', "'", "'", "'"],
+    ['left parenthesis', '(', '(', '('],
+    ['right parenthesis', ')', ')', ')'],
+    ['asterisk', '*', '*', '*'],
+    ['comma', ',', ',', ','],
+    ['semicolon', ';', ';', ';'],
+    ['space', ' ', '%20', '+'],
+    ['tilde', '~', '~', '%7E'],
+    ['double quote', '"', '%22', '%22'],
+    ['pipe', '|', '%7C', '%7C'],
+    ['backslash', '\\', '%5C', '%5C'],
+    ['non-ASCII', 'é', '%C3%A9', '%C3%A9'],
+  ];
+
+  describe.each(CHARACTERS)('%s (%s)', (_label, char, query, form) => {
+    const value = `a${char}b`;
+
+    it('in a query value with allowReserved', () => {
+      expect(queryUrl(true, value)).toBe(`https://example.com/foo?p=a${query}b`);
+      expect(new URL(queryUrl(true, value)).searchParams.getAll('p')).toEqual([char === '+' ? 'a+b' : decodeURIComponent(`a${query}b`)]);
+    });
+
+    it('in a form body field and a form whole query with allowReserved', () => {
+      expect(formBodyOf(true, value)).toBe(`p=a${form}b`);
+      expect(wholeQueryUrl(value)).toBe(`https://example.com/foo?p=a${form}b`);
+    });
+
+    it('in a path, a header, a cookie and a content parameter, where allowReserved changes nothing', () => {
+      for (const type of ['path', 'header', 'cookie'] as const) {
+        const sent = (allowReserved: boolean) =>
+          outcome(() =>
+            buildHttpRequest(
+              makeTool([{ inputKey: 'p', type, key: type === 'header' ? 'X-P' : 'p', required: true, allowReserved }], {
+                path: type === 'path' ? '/t/{p}' : '/t',
+              }),
+              { p: value },
+            ),
+          );
+        expect(sent(true)).toEqual(sent(false));
+      }
+      const content = (allowReserved: boolean) =>
+        outcome(() =>
+          buildHttpRequest(fooTool([{ inputKey: 'p', type: 'query', key: 'p', allowReserved, serialization: { contentType: 'text/plain' } }]), { p: value }),
+        );
+      expect(content(true)).toEqual(content(false));
+    });
+  });
+
+  it('keeps a path value percent-encoded whatever allowReserved says: / ? # and % never reach the path raw', () => {
+    const tool = makeTool([{ inputKey: 'id', type: 'path', key: 'id', required: true, allowReserved: true }], { path: '/files/{id}' });
+
+    expect(buildHttpRequest(tool, { id: 'a/b?c#d%e%41' }).url).toBe('https://api.example.com/files/a%2Fb%3Fc%23d%25e%2541');
+  });
+
+  it('cannot add a pair named like a query credential: x&api_key=attacker (it used to send two api_key pairs)', () => {
+    const tool = fooTool([{ inputKey: 'next', type: 'query', key: 'next', allowReserved: true }, credential]);
+
+    const built = buildHttpRequest(tool, { next: 'x&api_key=attacker', cred: 'real' });
+    expect(built.url).toBe('https://example.com/foo?next=x%26api_key%3Dattacker&api_key=real');
+    expect(new URL(built.url).searchParams.getAll('api_key')).toEqual(['real']);
+    expect(new URL(built.url).searchParams.get('next')).toBe('x&api_key=attacker');
+    expect(built.query).toEqual({ next: ['x&api_key=attacker'], api_key: ['real'] });
+
+    const absent = buildHttpRequest(tool, { next: 'x&api_key=attacker' });
+    expect(new URL(absent.url).searchParams.has('api_key')).toBe(false);
+  });
+
+  it('cannot cut the query with a fragment: a#b (it used to send ?p=a#b, which drops #b and every later pair)', () => {
+    const tool = fooTool([{ inputKey: 'p', type: 'query', key: 'p', allowReserved: true }, { inputKey: 'q', type: 'query', key: 'q' }]);
+
+    const built = buildHttpRequest(tool, { p: 'a#b', q: 'after' });
+    expect(built.url).toBe('https://example.com/foo?p=a%23b&q=after');
+    expect(new URL(built.url).hash).toBe('');
+    expect([...new URL(built.url).searchParams]).toEqual([
+      ['p', 'a#b'],
+      ['q', 'after'],
+    ]);
+  });
+
+  it('applies the same rule to every value of an array, an exploded object and a deepObject in the query', () => {
+    const tool = (mapper: Partial<ParameterMapper>) => fooTool([{ inputKey: 'p', type: 'query', key: 'p', allowReserved: true, ...mapper }]);
+
+    expect(buildHttpRequest(tool({ explode: false }), { p: ['a&b', 'c/d'] }).url).toBe('https://example.com/foo?p=a%26b,c/d');
+    expect(buildHttpRequest(tool({}), { p: ['a=b', 'c#d'] }).url).toBe('https://example.com/foo?p=a%3Db&p=c%23d');
+    expect(buildHttpRequest(tool({ style: 'deepObject' }), { p: { k: 'v&w=x' } }).url).toBe('https://example.com/foo?p[k]=v%26w%3Dx');
+  });
+
+  it('is one definition: a query value and a form value keep the same reserved characters', () => {
+    const printable = Array.from({ length: 0x7f - 0x20 }, (_, i) => String.fromCharCode(0x20 + i)).join('');
+    /** The characters an encoded value holds raw, letters and digits aside */
+    const raw = (encoded: string) => [...new Set(encoded.replace(/%[0-9A-F]{2}/g, '').replace(/[A-Za-z0-9]/g, ''))].sort().join('');
+    const sorted = (chars: string) => [...chars].sort().join('');
+
+    // the reserved characters both keep, plus what each encoder never encodes: `-._~` (RFC 3986 unreserved) in the
+    // query, `-._` and `+` for a space in a form
+    expect(raw(queryUrl(true, printable).split('?p=')[1])).toBe(sorted(":/?@!$'()*,;" + '-._~'));
+    expect(raw(formBodyOf(true, printable).slice('p='.length))).toBe(sorted(":/?@!$'()*,;" + '-._+'));
   });
 });

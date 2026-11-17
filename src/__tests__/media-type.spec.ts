@@ -2,7 +2,7 @@
  * The one classification of a media type shared by generation
  * (`ParameterResolver`) and request assembly (`buildHttpRequest`).
  */
-import { FORM_URLENCODED, JSON_MEDIA_TYPE, classifyMediaType, mediaTypeEssence } from '../media-type';
+import { FORM_URLENCODED, JSON_MEDIA_TYPE, classifyMediaType, isMediaRange, mediaTypeEssence, mediaTypeList } from '../media-type';
 
 describe('mediaTypeEssence', () => {
   it('drops the parameters, the surrounding space and the case', () => {
@@ -74,5 +74,37 @@ describe('JSON_MEDIA_TYPE', () => {
   it('keeps no state between tests', () => {
     expect(JSON_MEDIA_TYPE.global).toBe(false);
     expect(JSON_MEDIA_TYPE.sticky).toBe(false);
+  });
+});
+
+describe('mediaTypeList (an Encoding Object contentType)', () => {
+  it.each([
+    ['image/png', ['image/png']],
+    ['image/png, image/jpeg', ['image/png', 'image/jpeg']],
+    ['image/png,image/jpeg ,  image/*', ['image/png', 'image/jpeg', 'image/*']],
+    ['application/xml; charset=utf-8, text/plain', ['application/xml; charset=utf-8', 'text/plain']],
+    ['text/plain; x="a,b", text/csv', ['text/plain; x="a,b"', 'text/csv']],
+    ['text/plain; x="a\\",b", text/csv', ['text/plain; x="a\\",b"', 'text/csv']],
+    [' , ,image/png,', ['image/png']],
+    ['', []],
+    ['  ', []],
+  ])('reads %j as %j', (contentType, expected) => {
+    expect(mediaTypeList(contentType)).toEqual(expected);
+  });
+});
+
+describe('isMediaRange', () => {
+  it.each([
+    ['image/*', true],
+    ['*/*', true],
+    ['*/*; q=0.5', true],
+    ['image', true],
+    ['image/', true],
+    ['', true],
+    ['image/png', false],
+    ['Application/JSON; charset=utf-8', false],
+    ['application/vnd.api+json', false],
+  ])('reads %j as a range: %s', (mediaType, expected) => {
+    expect(isMediaRange(mediaType)).toBe(expected);
   });
 });

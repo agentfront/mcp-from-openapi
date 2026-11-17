@@ -65,3 +65,39 @@ export function classifyMediaType(mediaType: unknown): MediaTypeClass {
   if (JSON_MEDIA_TYPE.test(essence)) return 'json';
   return essence === FORM_URLENCODED ? 'form' : 'other';
 }
+
+/**
+ * The media types of an Encoding Object's `contentType`, in order: a
+ * comma-separated list of media types and media ranges (OpenAPI 3.2
+ * "Encoding Object": `media-range *( "," OWS media-range )`), such as
+ * `image/png, image/jpeg`. Each element is trimmed and empty elements are
+ * dropped; a comma inside a quoted parameter value (`text/plain; x="a,b"`)
+ * does not split. Never throws.
+ */
+export function mediaTypeList(contentType: string): string[] {
+  const list: string[] = [];
+  let start = 0;
+  let quoted = false;
+  for (let index = 0; index < contentType.length; index++) {
+    const char = contentType[index];
+    if (quoted && char === '\\') index++; // a quoted-pair: the next character is literal
+    else if (char === '"') quoted = !quoted;
+    else if (char === ',' && !quoted) {
+      list.push(contentType.slice(start, index));
+      start = index + 1;
+    }
+  }
+  list.push(contentType.slice(start));
+  return list.map((element) => element.trim()).filter((element) => element !== '');
+}
+
+/**
+ * Whether a media type is a range rather than one media type: its type or
+ * subtype is `*` (`image/*`, `*\/*`), or it has no subtype at all. A range
+ * says which media types are acceptable, so it cannot be the `Content-Type`
+ * of a part.
+ */
+export function isMediaRange(mediaType: string): boolean {
+  const [type, subtype] = mediaTypeEssence(mediaType).split('/', 2);
+  return type === '*' || subtype === undefined || subtype === '' || subtype === '*';
+}
