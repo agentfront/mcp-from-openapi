@@ -1,4 +1,3 @@
-import * as yaml from 'yaml';
 // NOTE: `node:path` / `node:fs` are imported LAZILY inside `fromFile` (the only
 // consumer) so this module stays importable on V8-isolate runtimes (Cloudflare
 // Workers / Deno), where those builtins (and the `node:process` they pull) are
@@ -114,7 +113,8 @@ import {
   retrievalUriOf,
   type DocumentBase,
 } from './base-uri';
-import { copyJsonValue, type CopyBudget } from './json-copy';
+import { assertBoundedExpansion, copyJsonValue, type CopyBudget } from './json-copy';
+import { parseYamlText } from './yaml-document';
 import { copyReferenceSites, recordReferenceSite } from './reference-sites';
 import { classifyMediaType } from './media-type';
 
@@ -1121,7 +1121,7 @@ export class OpenAPIToolGenerator {
 
       let document: OpenAPIDocument;
       if (contentType.includes('yaml') || contentType.includes('yml') || url.match(/\.ya?ml$/i)) {
-        document = yaml.parse(text);
+        document = parseYamlText(text) as OpenAPIDocument;
       } else {
         document = JSON.parse(text);
       }
@@ -1160,7 +1160,7 @@ export class OpenAPIToolGenerator {
 
       let document: OpenAPIDocument;
       if (ext === '.yaml' || ext === '.yml') {
-        document = yaml.parse(content);
+        document = parseYamlText(content) as OpenAPIDocument;
       } else if (ext === '.json') {
         document = JSON.parse(content);
       } else {
@@ -1168,7 +1168,7 @@ export class OpenAPIToolGenerator {
         try {
           document = JSON.parse(content);
         } catch {
-          document = yaml.parse(content);
+          document = parseYamlText(content) as OpenAPIDocument;
         }
       }
 
@@ -1191,7 +1191,7 @@ export class OpenAPIToolGenerator {
    */
   static async fromYAML(yamlString: string, options: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
     try {
-      const document = yaml.parse(yamlString);
+      const document = parseYamlText(yamlString) as OpenAPIDocument;
       return new OpenAPIToolGenerator(document, options);
     } catch (error: unknown) {
       // An overlay or `documentUri` problem is not a YAML one
@@ -1216,6 +1216,7 @@ export class OpenAPIToolGenerator {
   static async fromJSON(json: object, options: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
     let document: OpenAPIDocument;
     try {
+      assertBoundedExpansion(json);
       document = JSON.parse(JSON.stringify(json));
     } catch (error: unknown) {
       // JSON throws an Error for each: a RangeError for the call stack (or a text too long), a TypeError, ...

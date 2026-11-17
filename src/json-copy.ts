@@ -1,4 +1,4 @@
-import { SchemaError } from './errors';
+import { ParseError, SchemaError } from './errors';
 import { referenceAt } from './reference-sites';
 
 /**
@@ -67,6 +67,54 @@ export interface CopyOptions {
  * call stack at a few thousand levels.
  */
 export const MAX_VALUE_DEPTH = 1000;
+
+/** Values a document may repeat through shared objects or YAML aliases, beyond the ones it holds */
+export const MAX_REPEATED_VALUES = 500_000;
+
+interface ExpansionFrame {
+  node: object;
+  children: unknown[];
+  next: number;
+  size: number;
+}
+
+/** Refuse a value whose shared objects a JSON copy would repeat more than `MAX_REPEATED_VALUES` times; cycles are left to the copy */
+export function assertBoundedExpansion(root: unknown): void {
+  if (root === null || typeof root !== 'object') return;
+  const sizes = new Map<object, number>();
+  const onPath = new Set<object>([root]);
+  const frames: ExpansionFrame[] = [{ node: root, children: Object.values(root), next: 0, size: 1 }];
+  let repeated = 0;
+  while (frames.length > 0) {
+    const frame = frames[frames.length - 1];
+    if (frame.next < frame.children.length) {
+      const child = frame.children[frame.next++];
+      if (child === null || typeof child !== 'object') {
+        frame.size++;
+        continue;
+      }
+      const knownSize = sizes.get(child);
+      if (knownSize !== undefined) {
+        repeated += knownSize;
+        frame.size += knownSize;
+        if (repeated > MAX_REPEATED_VALUES) {
+          throw new ParseError(
+            `The document repeats shared values (YAML aliases or shared objects) that expand to more than ${MAX_REPEATED_VALUES} values when copied`,
+            { maxRepeatedValues: MAX_REPEATED_VALUES },
+          );
+        }
+      } else if (!onPath.has(child)) {
+        onPath.add(child);
+        frames.push({ node: child, children: Object.values(child), next: 0, size: 1 });
+      }
+      continue;
+    }
+    frames.pop();
+    onPath.delete(frame.node);
+    sizes.set(frame.node, frame.size);
+    if (frames.length > 0) frames[frames.length - 1].size += frame.size;
+  }
+}
 
 /** A container being copied: its keys (`null` for an array), their values, and the copy. */
 interface CopyFrame {

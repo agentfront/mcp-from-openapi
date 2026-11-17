@@ -77,6 +77,8 @@ try {
 
 `fromJSON(json)` copies the object as JSON, and input that cannot be copied (it contains itself, holds a `BigInt`, or is nested too deeply for `JSON.stringify`) is a `ParseError` too: `Failed to read the JSON document: <why>`, with the original error in `context.originalError`.
 
+Two limits protect every loader from documents that are small as text but enormous once copied. A YAML document may use at most 2,000 aliases (`*name`): resolving each one scans the document, so many of them cost quadratic time. And a document whose shared values (YAML aliases, or objects reused in what you pass to `fromJSON`) would make its copy repeat more than 500,000 values is refused: `The document repeats shared values (YAML aliases or shared objects) that expand to more than 500000 values when copied`. From `fromYAML` and `fromJSON` this is a `ParseError`, from `fromURL` and `fromFile` a `LoadError`, from `fromArazzo` an `ArazzoError`. A document that reuses a few objects many times stays well below the limit; pass a document you built with heavy reuse through `structuredClone` first if it is ever refused.
+
 Also thrown when an OpenAPI document fails validation (when `validate: true`). Validation runs at the first `generateTools()` or `generateTool()`, not in the factories. The message is `Invalid OpenAPI document: <first error>`, followed by `(and N more; see the error's context.errors)` when there is more than one. The first error can quote the document, so the message cuts it at 512 characters and writes control and bidirectional characters as `\uXXXX`; `context.errors` holds every `ValidationErrorDetail` as the validator produced it (at most 1,000 of each kind, then one `DIAGNOSTICS_TRUNCATED` entry):
 
 ```typescript

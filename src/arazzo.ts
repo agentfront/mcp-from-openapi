@@ -32,7 +32,8 @@ import {
   type SpecDiagnostic,
 } from './spec';
 import { fragmentPointerTokens } from './base-uri';
-import * as yaml from 'yaml';
+import { assertBoundedExpansion } from './json-copy';
+import { parseYamlText } from './yaml-document';
 import type {
   GenerateOptions,
   HTTPMethod,
@@ -166,6 +167,7 @@ function err(message: string, path: string, extra?: Record<string, unknown>): ne
  */
 function toPlainJson(value: unknown): unknown {
   try {
+    assertBoundedExpansion(value);
     return JSON.parse(JSON.stringify(value));
   } catch (error: unknown) {
     /* c8 ignore next -- JSON.stringify only throws Error instances */
@@ -180,7 +182,7 @@ function parseArazzoInput(input: ArazzoDocument | string): ArazzoDocument {
   if (typeof input === 'string') {
     let parsed: unknown;
     try {
-      parsed = yaml.parse(input);
+      parsed = parseYamlText(input);
     } catch (error: unknown) {
       /* c8 ignore next -- yaml only throws Error instances */
       const message = error instanceof Error ? error.message : String(error);
