@@ -1,0 +1,421 @@
+# The Lending Library API of ../swagger-2.0.yaml split over several files: this is the root.
+# The shared parameters (parameters.yaml), responses (responses.yaml) and definitions (definitions/*.yaml) are siblings,
+# reached through relative `$ref`s (a file, or a file and a JSON pointer). See ../README.md, "The equivalence API".
+swagger: "2.0"
+info:
+  title: Lending Library
+  version: 1.0.0
+  description: A small lending library. Books are catalogued, borrowed by members and exported for reports.
+host: library.example.com
+basePath: /api/v1
+schemes:
+  - https
+  - http
+consumes:
+  - application/json
+produces:
+  - application/json
+tags:
+  - name: books
+    description: The catalogue
+  - name: categories
+    description: How the catalogue is organised
+  - name: loans
+    description: Books lent to members
+  - name: reports
+    description: Exports for the librarians
+securityDefinitions:
+  basicAuth:
+    type: basic
+    description: The credentials of the librarian desk
+  apiKeyHeader:
+    type: apiKey
+    in: header
+    name: X-API-Key
+    description: A key sent in a header
+  apiKeyQuery:
+    type: apiKey
+    in: query
+    name: api_key
+    description: A key sent in the query string
+  oauthMember:
+    type: oauth2
+    flow: accessCode
+    authorizationUrl: https://auth.example.com/oauth/authorize
+    tokenUrl: https://auth.example.com/oauth/token
+    description: A member signs in and grants access
+    scopes:
+      read:loans: Read the loans of a member
+      write:books: Add and change books
+  oauthService:
+    type: oauth2
+    flow: application
+    tokenUrl: https://auth.example.com/oauth/token
+    description: A back-office service signs in with its own credentials
+    scopes:
+      admin: Remove books
+      reports: Export reports
+security:
+  - apiKeyHeader: []
+paths:
+  /books:
+    get:
+      operationId: listBooks
+      summary: List books
+      description: Lists the books of the catalogue, filtered by genre, availability and tag.
+      tags:
+        - books
+      parameters:
+        - $ref: parameters.yaml#/Limit
+        - $ref: parameters.yaml#/Offset
+        - $ref: parameters.yaml#/RequestId
+        - name: genres
+          in: query
+          description: Genres to include, comma separated
+          type: array
+          items:
+            type: string
+          collectionFormat: csv
+        - name: statuses
+          in: query
+          description: Availability states to include, separated by pipes
+          type: array
+          items:
+            type: string
+            enum:
+              - available
+              - borrowed
+              - lost
+          collectionFormat: pipes
+        - name: tags
+          in: query
+          description: Tags to include, one query parameter per value
+          type: array
+          items:
+            type: string
+          collectionFormat: multi
+      security:
+        - apiKeyHeader: []
+        - apiKeyQuery: []
+      responses:
+        "200":
+          description: A page of books
+          headers:
+            X-Total-Count:
+              type: integer
+              format: int32
+              description: Number of books that match the filters
+            X-Rate-Limit-Remaining:
+              type: integer
+              description: Requests left in the current window
+          schema:
+            type: array
+            items:
+              $ref: definitions/Book.yaml
+          examples:
+            application/json:
+              - kind: Book
+                title: The Left Hand of Darkness
+                id: 1
+                isbn: 978-0441478125
+                authors:
+                  - Ursula K. Le Guin
+                status: available
+        "401":
+          $ref: responses.yaml#/Unauthorized
+        default:
+          $ref: responses.yaml#/Unexpected
+    post:
+      operationId: createBook
+      summary: Add a book
+      description: Adds a book to the catalogue.
+      tags:
+        - books
+      parameters:
+        - name: book
+          in: body
+          description: The book to add
+          required: true
+          schema:
+            $ref: definitions/NewBook.yaml
+      security:
+        - oauthMember:
+            - write:books
+      responses:
+        "201":
+          description: The book was added
+          headers:
+            Location:
+              type: string
+              format: uri
+              description: Address of the new book
+          schema:
+            $ref: definitions/Book.yaml
+        "400":
+          description: The book is not valid
+          schema:
+            $ref: definitions/Error.yaml
+        "401":
+          $ref: responses.yaml#/Unauthorized
+        default:
+          $ref: responses.yaml#/Unexpected
+  /books/{bookId}:
+    parameters:
+      - $ref: parameters.yaml#/BookId
+    get:
+      operationId: getBook
+      summary: Get a book
+      description: Reads one book. No credentials are needed.
+      tags:
+        - books
+      parameters:
+        - $ref: parameters.yaml#/RequestId
+      security: []
+      responses:
+        "200":
+          description: The book
+          schema:
+            $ref: definitions/Book.yaml
+          examples:
+            application/json:
+              kind: Book
+              title: The Dispossessed
+              id: 2
+              isbn: 978-0061054884
+              authors:
+                - Ursula K. Le Guin
+              status: borrowed
+        "404":
+          $ref: responses.yaml#/NotFound
+        default:
+          $ref: responses.yaml#/Unexpected
+    patch:
+      operationId: patchBook
+      summary: Change a book
+      description: Applies a JSON merge patch to a book.
+      tags:
+        - books
+      consumes:
+        - application/merge-patch+json
+      parameters:
+        - name: patch
+          in: body
+          description: The members to change
+          required: true
+          schema:
+            $ref: definitions/BookPatch.yaml
+      responses:
+        "200":
+          description: The book after the change
+          schema:
+            $ref: definitions/Book.yaml
+        "401":
+          $ref: responses.yaml#/Unauthorized
+        "404":
+          $ref: responses.yaml#/NotFound
+        default:
+          $ref: responses.yaml#/Unexpected
+    delete:
+      operationId: deleteBook
+      summary: Remove a book
+      description: Removes a book from the catalogue.
+      tags:
+        - books
+      security:
+        - oauthService:
+            - admin
+      responses:
+        "204":
+          description: The book was removed
+        "401":
+          $ref: responses.yaml#/Unauthorized
+        "404":
+          $ref: responses.yaml#/NotFound
+        default:
+          $ref: responses.yaml#/Unexpected
+  /books/{bookId}/cover:
+    parameters:
+      - $ref: parameters.yaml#/BookId
+    post:
+      operationId: uploadBookCover
+      summary: Upload the cover of a book
+      description: Stores the cover image of a book.
+      tags:
+        - books
+      consumes:
+        - multipart/form-data
+      parameters:
+        - name: cover
+          in: formData
+          description: The cover image, PNG or JPEG
+          required: true
+          type: file
+        - name: caption
+          in: formData
+          description: A caption shown under the cover
+          type: string
+          maxLength: 120
+      security:
+        - oauthMember:
+            - write:books
+      responses:
+        "200":
+          description: The cover was stored
+          schema:
+            type: object
+            required:
+              - url
+            properties:
+              url:
+                type: string
+                format: uri
+              bytes:
+                type: integer
+                format: int64
+        "401":
+          $ref: responses.yaml#/Unauthorized
+        "404":
+          $ref: responses.yaml#/NotFound
+        default:
+          $ref: responses.yaml#/Unexpected
+  /categories:
+    get:
+      operationId: listCategories
+      summary: List the categories
+      description: Lists the top-level categories, each with the categories under it.
+      tags:
+        - categories
+      responses:
+        "200":
+          description: The category tree
+          schema:
+            type: array
+            items:
+              $ref: definitions/Category.yaml
+        default:
+          $ref: responses.yaml#/Unexpected
+  /loans:
+    post:
+      operationId: createLoan
+      summary: Lend a book
+      description: Lends a book to a member, as a form submitted from the desk.
+      tags:
+        - loans
+      consumes:
+        - application/x-www-form-urlencoded
+      parameters:
+        - name: bookId
+          in: formData
+          description: The book to lend
+          required: true
+          type: integer
+          format: int64
+        - name: memberId
+          in: formData
+          description: The member who borrows it
+          required: true
+          type: integer
+          format: int64
+        - name: dueDate
+          in: formData
+          description: The day it is due back
+          type: string
+          format: date
+      security:
+        - basicAuth: []
+      responses:
+        "201":
+          description: The loan was recorded
+          schema:
+            $ref: definitions/Loan.yaml
+        "400":
+          description: The loan is not valid
+          schema:
+            $ref: definitions/Error.yaml
+        "401":
+          $ref: responses.yaml#/Unauthorized
+        default:
+          $ref: responses.yaml#/Unexpected
+  /members/{memberId}/loans:
+    parameters:
+      - name: memberId
+        in: path
+        description: Identifier of the member
+        required: true
+        type: integer
+        format: int64
+    get:
+      operationId: listMemberLoans
+      summary: List the loans of a member
+      description: Lists what a member has borrowed, newest first.
+      tags:
+        - loans
+      parameters:
+        - name: status
+          in: query
+          description: Only the loans in this state
+          type: string
+          enum:
+            - active
+            - returned
+            - overdue
+          default: active
+        - $ref: parameters.yaml#/Limit
+        - $ref: parameters.yaml#/Offset
+      security:
+        - oauthMember:
+            - read:loans
+      responses:
+        "200":
+          description: A page of loans
+          headers:
+            X-Total-Count:
+              type: integer
+              format: int32
+              description: Number of loans that match the filter
+          schema:
+            type: array
+            items:
+              $ref: definitions/Loan.yaml
+          examples:
+            application/json:
+              - id: 17
+                bookId: 2
+                memberId: 5
+                dueDate: 2026-12-01
+                status: active
+        "401":
+          $ref: responses.yaml#/Unauthorized
+        "404":
+          $ref: responses.yaml#/NotFound
+        default:
+          $ref: responses.yaml#/Unexpected
+  /exports/books:
+    get:
+      operationId: exportBooks
+      summary: Export the catalogue
+      description: Exports the whole catalogue as CSV, one book per line.
+      tags:
+        - reports
+      produces:
+        - text/csv
+      security:
+        - oauthService:
+            - reports
+      responses:
+        "200":
+          description: The catalogue as CSV
+          headers:
+            Content-Disposition:
+              type: string
+              description: The suggested file name
+          schema:
+            type: string
+          examples:
+            text/csv: |
+              id,title,isbn,status
+              1,The Left Hand of Darkness,978-0441478125,available
+        "401":
+          description: The credentials are missing or invalid
+        default:
+          description: Unexpected error

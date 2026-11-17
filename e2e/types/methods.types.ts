@@ -1,8 +1,8 @@
 /**
  * How consumers read HTTP methods, declared OpenAPI versions and diagnostics:
  * the nine standard methods plus any `additionalOperations` token, the
- * `3.0.x` / `3.1.x` / `3.2.x` version strings, and what the generator reports
- * about a document. All of it must keep compiling; the matching rejections are
+ * `3.0.x` / `3.1.x` / `3.2.x` version strings, the Swagger 2.0 family, and what
+ * the generator reports about a document. All of it must keep compiling; the matching rejections are
  * in `rejections.types.ts` and the type-level facts in `shapes.types.ts`.
  * Compiled by `yarn typecheck`, never executed (see README.md).
  */
@@ -10,6 +10,7 @@ import {
   DIAGNOSTIC_CODES,
   MAX_DIAGNOSTICS,
   OpenAPIToolGenerator as Generator,
+  SUPPORTED_SPEC_VERSIONS,
   ParseError,
   detectSpecVersion,
   fromArazzo,
@@ -34,6 +35,7 @@ import type {
   OperationList,
   SpecDiagnostic,
   SpecFamily,
+  SpecVersionField,
   SpecVersionInfo,
   SpecVersionStatus,
   StandardMethod,
@@ -341,4 +343,54 @@ export function readSpecVersion(): string {
   const diagnostics: SpecDiagnostic[] = info.diagnostics;
   const version = `${major ?? ''}.${minor ?? ''}`;
   return `${status} ${family ?? 'unprocessable'} ${version} ${String(declared)} ${diagnostics.length}`;
+}
+
+// ---------------------------------------------------------------------------
+// Swagger 2.0: a supported family of its own, declared by `swagger`
+// ---------------------------------------------------------------------------
+
+/**
+ * A Swagger 2.0 document is `supported` like any other: family `2.0`, read from the `swagger` member (a string, or the
+ * number an unquoted `2.0` is in YAML), where the others are read from `openapi`. It no longer has a status of its own.
+ */
+export const swaggerInfo: SpecVersionInfo = detectSpecVersion({ swagger: '2.0', info: { title: 'Pets' }, paths: {} });
+export const yamlSwaggerInfo: SpecVersionInfo = detectSpecVersion({ swagger: 2, paths: {} });
+
+export function isSwagger(info: SpecVersionInfo): boolean {
+  const family: SpecFamily | undefined = info.family;
+  const field: SpecVersionField | undefined = info.field;
+  return info.status === 'supported' && family === '2.0' && field === 'swagger';
+}
+
+/** The five statuses: a switch over them with no `default` is exhaustive, and `swagger-2.0` is not one. */
+export function describeStatus(info: SpecVersionInfo): string {
+  const status: SpecVersionStatus = info.status;
+  switch (status) {
+    case 'supported':
+      return `${info.field ?? 'openapi'} ${info.family ?? ''}`;
+    case 'newer-minor':
+      return 'processed with the latest profile';
+    case 'unsupported':
+    case 'malformed':
+    case 'missing':
+      return `not processed: ${status}`;
+    default: {
+      const unreachable: never = status;
+      return unreachable;
+    }
+  }
+}
+
+/** The families, oldest first; the supported versions are named for messages, `2.0` and then `3.0.x` ... */
+export const knownFamilies: SpecFamily[] = ['2.0', '3.0', '3.1', '3.2'];
+export const supportedVersions: readonly string[] = SUPPORTED_SPEC_VERSIONS;
+
+/** A 2.0 document reads its operations with the layout of its version, like any other. */
+export const swaggerLayout: OperationLayout = resolveOperationLayout(swaggerInfo);
+
+/** A Swagger 2.0 document object is accepted by every factory that takes a parsed document. */
+export async function loadSwagger2(): Promise<OpenAPIToolGenerator> {
+  const document = { swagger: '2.0', info: { title: 'Pets', version: '1' }, host: 'pets.example.com', paths: {} };
+  await Generator.fromYAML("swagger: '2.0'\ninfo: { title: Pets, version: '1' }\npaths: {}");
+  return Generator.fromJSON(document);
 }

@@ -3,10 +3,11 @@
  * schema and response access. All of it must keep compiling. Compiled by
  * `yarn typecheck`, never executed (see README.md).
  */
-import { isReferenceObject } from 'mcp-from-openapi';
+import { isReferenceObject, toJsonSchema } from 'mcp-from-openapi';
 import type {
   ExampleObject,
   HTTPMethod,
+  JsonSchema,
   NamingStrategy,
   OpenAPIDocument,
   OperationObject,
@@ -273,4 +274,28 @@ export function readFreeFormValues(
   example: ExampleObject,
 ): unknown[] {
   return [schema.example?.name, schema.default.length, parameter.example?.id, example.value?.name];
+}
+
+// ---------------------------------------------------------------------------
+// Converting a schema: a boolean schema (OpenAPI 3.1 and later) converts too
+// ---------------------------------------------------------------------------
+
+declare const eitherSchema: SchemaOrBoolean;
+declare const referenceSchema: ReferenceObject;
+
+/** `true` accepts anything and `false` nothing: both convert to a JSON Schema object, as any schema does. */
+export const trueConverted: JsonSchema = toJsonSchema(true);
+export const falseConverted: JsonSchema = toJsonSchema(false);
+export const eitherConverted: JsonSchema = toJsonSchema(eitherSchema);
+export const objectConverted: JsonSchema = toJsonSchema({ type: 'string' } satisfies SchemaObject);
+export const referenceConverted: JsonSchema = toJsonSchema(referenceSchema);
+
+/** A schema read from a document in any form is converted without a check on its form first. */
+export function convertEach(schemas: SchemaOrBoolean[]): JsonSchema[] {
+  return schemas.map((schema) => toJsonSchema(schema));
+}
+
+/** The result is always an object, so its keywords are read with no narrowing (`not` is a keyword, never the result). */
+export function negationOf(schema: SchemaOrBoolean): JsonSchema | boolean | undefined {
+  return toJsonSchema(schema).not;
 }

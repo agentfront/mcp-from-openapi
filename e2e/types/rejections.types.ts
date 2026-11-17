@@ -37,12 +37,16 @@ import type {
   ReferenceObject,
   RequestBodyObject,
   ResponseHints,
+  ResponseStatusRange,
   ResponseStreamInfo,
   SchemaObject,
   SchemaOrBoolean,
   SerializationInfo,
   ServerInfo,
   ServerObject,
+  SpecFamily,
+  SpecVersionInfo,
+  SpecVersionStatus,
   StandardMethod,
   ToolMetadata,
   ValidationResult,
@@ -435,8 +439,16 @@ export const numericContentType: SerializationInfo = { contentType: 42 };
 // @ts-expect-error `itemSchema` is required: a stream without the schema of its items is not described
 export const streamWithoutItems: ResponseStreamInfo = { statusCode: 200, contentType: 'application/jsonl' };
 
-// @ts-expect-error `statusCode` is a number (0 for `default`), not the text a document writes
+// @ts-expect-error `statusCode` is a number (0 for `default`) or a range such as `'2XX'`, not the text of a code a document writes
 export const stringStatusStream: ResponseStreamInfo = { statusCode: '200', contentType: 'application/jsonl', itemSchema: {} };
+
+// @ts-expect-error `statusCode` is a range key of `1XX` to `5XX`, none of which is `6XX`
+export const sixthRangeStream: ResponseStreamInfo = { statusCode: '6XX', contentType: 'application/jsonl', itemSchema: {} };
+
+export function streamStatusIsNotAlwaysANumber(stream: ResponseStreamInfo): number {
+  // @ts-expect-error `statusCode` is `number | ResponseStatusRange`: narrow it with `typeof` before using it as a number
+  return stream.statusCode;
+}
 
 // @ts-expect-error `contentType` is a string: it names the media type, it is not a flag
 export const flagContentTypeStream: ResponseStreamInfo = { statusCode: 200, contentType: true, itemSchema: {} };
@@ -490,3 +502,67 @@ export function validationCodeIsOptional(result: ValidationResult): string {
 
 // @ts-expect-error `loadOptions` is shared by every source and has no `documentUri`: load a source with its own and pass the generator
 export const arazzoSharedDocumentUri: FromArazzoOptions = { sources: {}, loadOptions: { documentUri: 'https://example.com/openapi.yaml' } };
+
+// ---------------------------------------------------------------------------
+// Response status ranges: the five classes, upper-cased, listed apart from the codes
+// ---------------------------------------------------------------------------
+
+// @ts-expect-error there is no `6XX` response range: the classes are `1XX` to `5XX`
+export const sixthRange: ResponseStatusRange = '6XX';
+
+// @ts-expect-error a range is upper-cased as the output gives it, whatever case the document writes
+export const lowerCaseRange: ResponseStatusRange = '2xx';
+
+// @ts-expect-error a range is a class digit and `XX`, not a code with one wildcard
+export const partialRange: ResponseStatusRange = '20X';
+
+// @ts-expect-error a plain string is not a range: the type is the five literals
+export const anyStringRange: ResponseStatusRange = 'success' as string;
+
+// @ts-expect-error `responseStatusRanges` holds ranges, not the codes of `responseStatusCodes`
+toolMetadata.responseStatusRanges = [200];
+
+// @ts-expect-error `responseStatusRanges` is a list, not one range
+toolMetadata.responseStatusRanges = '2XX';
+
+// @ts-expect-error a range is not a number: `responseStatusCodes` holds codes (0 for `default`), the ranges are listed apart
+toolMetadata.responseStatusCodes = ['2XX'];
+
+export function misspeltRange(): boolean {
+  // @ts-expect-error `includes` takes a `ResponseStatusRange`, and `6XX` is not one
+  return toolMetadata.responseStatusRanges?.includes('6XX') ?? false;
+}
+
+// @ts-expect-error a tool names its ranges `responseStatusRanges`, not `responseRanges`
+export const misreadRanges = toolMetadata.responseRanges;
+
+// ---------------------------------------------------------------------------
+// The declared version: Swagger 2.0 is a supported family, not a status of its own
+// ---------------------------------------------------------------------------
+
+export function swagger2IsNoLongerAStatus(info: SpecVersionInfo): boolean {
+  // @ts-expect-error `swagger-2.0` was the status of a recognised but unsupported document: it is `supported` (family `2.0`) now
+  return info.status === 'swagger-2.0';
+}
+
+// @ts-expect-error `swagger-2.0` is not a status, as a value either
+export const oldStatus: SpecVersionStatus = 'swagger-2.0';
+
+// @ts-expect-error there is no `2.1` family: Swagger ended at `2.0`
+export const swaggerOnePointOne: SpecFamily = '2.1';
+
+// @ts-expect-error a family is a `major.minor` string, not the number YAML reads `2.0` as
+export const numericFamily: SpecFamily = 2;
+
+// ---------------------------------------------------------------------------
+// toJsonSchema: a boolean schema converts, anything else that is not an object does not
+// ---------------------------------------------------------------------------
+
+// @ts-expect-error a number is not a schema
+toJsonSchema(1);
+
+// @ts-expect-error `null` is not a schema
+toJsonSchema(null);
+
+// @ts-expect-error the result is a JSON Schema object, never the boolean it was given
+export const booleanResult: boolean = toJsonSchema(false);

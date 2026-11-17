@@ -1,0 +1,609 @@
+# One API in five spellings (see ../README.md, "The equivalence API"): this file is the Swagger 2.0 form in a single
+# file; swagger-2.0-split/ is the same API over several files; openapi-3.0.yaml, openapi-3.1.yaml and openapi-3.2.yaml
+# are what a correct conversion of it produces, written by hand from the specifications.
+swagger: '2.0'
+info:
+  title: Lending Library
+  version: 1.0.0
+  description: A small lending library. Books are catalogued, borrowed by members and exported for reports.
+host: library.example.com
+basePath: /api/v1
+schemes:
+  - https
+  - http
+consumes:
+  - application/json
+produces:
+  - application/json
+tags:
+  - name: books
+    description: The catalogue
+  - name: categories
+    description: How the catalogue is organised
+  - name: loans
+    description: Books lent to members
+  - name: reports
+    description: Exports for the librarians
+securityDefinitions:
+  basicAuth:
+    type: basic
+    description: The credentials of the librarian desk
+  apiKeyHeader:
+    type: apiKey
+    in: header
+    name: X-API-Key
+    description: A key sent in a header
+  apiKeyQuery:
+    type: apiKey
+    in: query
+    name: api_key
+    description: A key sent in the query string
+  oauthMember:
+    type: oauth2
+    flow: accessCode
+    authorizationUrl: https://auth.example.com/oauth/authorize
+    tokenUrl: https://auth.example.com/oauth/token
+    description: A member signs in and grants access
+    scopes:
+      read:loans: Read the loans of a member
+      write:books: Add and change books
+  oauthService:
+    type: oauth2
+    flow: application
+    tokenUrl: https://auth.example.com/oauth/token
+    description: A back-office service signs in with its own credentials
+    scopes:
+      admin: Remove books
+      reports: Export reports
+security:
+  - apiKeyHeader: []
+parameters:
+  BookId:
+    name: bookId
+    in: path
+    description: Identifier of the book
+    required: true
+    type: integer
+    format: int64
+  Limit:
+    name: limit
+    in: query
+    description: Maximum number of results to return
+    type: integer
+    format: int32
+    minimum: 1
+    maximum: 100
+    default: 20
+  Offset:
+    name: offset
+    in: query
+    description: Number of results to skip
+    type: integer
+    format: int32
+    minimum: 0
+    default: 0
+  RequestId:
+    name: X-Request-Id
+    in: header
+    description: Correlation identifier, echoed in the logs
+    type: string
+    format: uuid
+responses:
+  NotFound:
+    description: The resource does not exist
+    schema:
+      $ref: '#/definitions/Error'
+  Unauthorized:
+    description: The credentials are missing or invalid
+    headers:
+      WWW-Authenticate:
+        type: string
+        description: The authentication scheme to retry with
+    schema:
+      $ref: '#/definitions/Error'
+  Unexpected:
+    description: Unexpected error
+    schema:
+      $ref: '#/definitions/Error'
+paths:
+  /books:
+    get:
+      operationId: listBooks
+      summary: List books
+      description: Lists the books of the catalogue, filtered by genre, availability and tag.
+      tags:
+        - books
+      parameters:
+        - $ref: '#/parameters/Limit'
+        - $ref: '#/parameters/Offset'
+        - $ref: '#/parameters/RequestId'
+        - name: genres
+          in: query
+          description: Genres to include, comma separated
+          type: array
+          items:
+            type: string
+          collectionFormat: csv
+        - name: statuses
+          in: query
+          description: Availability states to include, separated by pipes
+          type: array
+          items:
+            type: string
+            enum:
+              - available
+              - borrowed
+              - lost
+          collectionFormat: pipes
+        - name: tags
+          in: query
+          description: Tags to include, one query parameter per value
+          type: array
+          items:
+            type: string
+          collectionFormat: multi
+      security:
+        - apiKeyHeader: []
+        - apiKeyQuery: []
+      responses:
+        '200':
+          description: A page of books
+          headers:
+            X-Total-Count:
+              type: integer
+              format: int32
+              description: Number of books that match the filters
+            X-Rate-Limit-Remaining:
+              type: integer
+              description: Requests left in the current window
+          schema:
+            type: array
+            items:
+              $ref: '#/definitions/Book'
+          examples:
+            application/json:
+              - kind: Book
+                title: The Left Hand of Darkness
+                id: 1
+                isbn: '978-0441478125'
+                authors:
+                  - Ursula K. Le Guin
+                status: available
+        '401':
+          $ref: '#/responses/Unauthorized'
+        default:
+          $ref: '#/responses/Unexpected'
+    post:
+      operationId: createBook
+      summary: Add a book
+      description: Adds a book to the catalogue.
+      tags:
+        - books
+      parameters:
+        - name: book
+          in: body
+          description: The book to add
+          required: true
+          schema:
+            $ref: '#/definitions/NewBook'
+      security:
+        - oauthMember:
+            - write:books
+      responses:
+        '201':
+          description: The book was added
+          headers:
+            Location:
+              type: string
+              format: uri
+              description: Address of the new book
+          schema:
+            $ref: '#/definitions/Book'
+        '400':
+          description: The book is not valid
+          schema:
+            $ref: '#/definitions/Error'
+        '401':
+          $ref: '#/responses/Unauthorized'
+        default:
+          $ref: '#/responses/Unexpected'
+  /books/{bookId}:
+    parameters:
+      - $ref: '#/parameters/BookId'
+    get:
+      operationId: getBook
+      summary: Get a book
+      description: Reads one book. No credentials are needed.
+      tags:
+        - books
+      parameters:
+        - $ref: '#/parameters/RequestId'
+      security: []
+      responses:
+        '200':
+          description: The book
+          schema:
+            $ref: '#/definitions/Book'
+          examples:
+            application/json:
+              kind: Book
+              title: The Dispossessed
+              id: 2
+              isbn: '978-0061054884'
+              authors:
+                - Ursula K. Le Guin
+              status: borrowed
+        '404':
+          $ref: '#/responses/NotFound'
+        default:
+          $ref: '#/responses/Unexpected'
+    patch:
+      operationId: patchBook
+      summary: Change a book
+      description: Applies a JSON merge patch to a book.
+      tags:
+        - books
+      consumes:
+        - application/merge-patch+json
+      parameters:
+        - name: patch
+          in: body
+          description: The members to change
+          required: true
+          schema:
+            $ref: '#/definitions/BookPatch'
+      responses:
+        '200':
+          description: The book after the change
+          schema:
+            $ref: '#/definitions/Book'
+        '401':
+          $ref: '#/responses/Unauthorized'
+        '404':
+          $ref: '#/responses/NotFound'
+        default:
+          $ref: '#/responses/Unexpected'
+    delete:
+      operationId: deleteBook
+      summary: Remove a book
+      description: Removes a book from the catalogue.
+      tags:
+        - books
+      security:
+        - oauthService:
+            - admin
+      responses:
+        '204':
+          description: The book was removed
+        '401':
+          $ref: '#/responses/Unauthorized'
+        '404':
+          $ref: '#/responses/NotFound'
+        default:
+          $ref: '#/responses/Unexpected'
+  /books/{bookId}/cover:
+    parameters:
+      - $ref: '#/parameters/BookId'
+    post:
+      operationId: uploadBookCover
+      summary: Upload the cover of a book
+      description: Stores the cover image of a book.
+      tags:
+        - books
+      consumes:
+        - multipart/form-data
+      parameters:
+        - name: cover
+          in: formData
+          description: The cover image, PNG or JPEG
+          required: true
+          type: file
+        - name: caption
+          in: formData
+          description: A caption shown under the cover
+          type: string
+          maxLength: 120
+      security:
+        - oauthMember:
+            - write:books
+      responses:
+        '200':
+          description: The cover was stored
+          schema:
+            type: object
+            required:
+              - url
+            properties:
+              url:
+                type: string
+                format: uri
+              bytes:
+                type: integer
+                format: int64
+        '401':
+          $ref: '#/responses/Unauthorized'
+        '404':
+          $ref: '#/responses/NotFound'
+        default:
+          $ref: '#/responses/Unexpected'
+  /categories:
+    get:
+      operationId: listCategories
+      summary: List the categories
+      description: Lists the top-level categories, each with the categories under it.
+      tags:
+        - categories
+      responses:
+        '200':
+          description: The category tree
+          schema:
+            type: array
+            items:
+              $ref: '#/definitions/Category'
+        default:
+          $ref: '#/responses/Unexpected'
+  /loans:
+    post:
+      operationId: createLoan
+      summary: Lend a book
+      description: Lends a book to a member, as a form submitted from the desk.
+      tags:
+        - loans
+      consumes:
+        - application/x-www-form-urlencoded
+      parameters:
+        - name: bookId
+          in: formData
+          description: The book to lend
+          required: true
+          type: integer
+          format: int64
+        - name: memberId
+          in: formData
+          description: The member who borrows it
+          required: true
+          type: integer
+          format: int64
+        - name: dueDate
+          in: formData
+          description: The day it is due back
+          type: string
+          format: date
+      security:
+        - basicAuth: []
+      responses:
+        '201':
+          description: The loan was recorded
+          schema:
+            $ref: '#/definitions/Loan'
+        '400':
+          description: The loan is not valid
+          schema:
+            $ref: '#/definitions/Error'
+        '401':
+          $ref: '#/responses/Unauthorized'
+        default:
+          $ref: '#/responses/Unexpected'
+  /members/{memberId}/loans:
+    parameters:
+      - name: memberId
+        in: path
+        description: Identifier of the member
+        required: true
+        type: integer
+        format: int64
+    get:
+      operationId: listMemberLoans
+      summary: List the loans of a member
+      description: Lists what a member has borrowed, newest first.
+      tags:
+        - loans
+      parameters:
+        - name: status
+          in: query
+          description: Only the loans in this state
+          type: string
+          enum:
+            - active
+            - returned
+            - overdue
+          default: active
+        - $ref: '#/parameters/Limit'
+        - $ref: '#/parameters/Offset'
+      security:
+        - oauthMember:
+            - read:loans
+      responses:
+        '200':
+          description: A page of loans
+          headers:
+            X-Total-Count:
+              type: integer
+              format: int32
+              description: Number of loans that match the filter
+          schema:
+            type: array
+            items:
+              $ref: '#/definitions/Loan'
+          examples:
+            application/json:
+              - id: 17
+                bookId: 2
+                memberId: 5
+                dueDate: '2026-12-01'
+                status: active
+        '401':
+          $ref: '#/responses/Unauthorized'
+        '404':
+          $ref: '#/responses/NotFound'
+        default:
+          $ref: '#/responses/Unexpected'
+  /exports/books:
+    get:
+      operationId: exportBooks
+      summary: Export the catalogue
+      description: Exports the whole catalogue as CSV, one book per line.
+      tags:
+        - reports
+      produces:
+        - text/csv
+      security:
+        - oauthService:
+            - reports
+      responses:
+        '200':
+          description: The catalogue as CSV
+          headers:
+            Content-Disposition:
+              type: string
+              description: The suggested file name
+          schema:
+            type: string
+          examples:
+            text/csv: |
+              id,title,isbn,status
+              1,The Left Hand of Darkness,978-0441478125,available
+        '401':
+          description: The credentials are missing or invalid
+        default:
+          description: Unexpected error
+definitions:
+  BookStatus:
+    type: string
+    description: Whether the book can be borrowed
+    enum:
+      - available
+      - borrowed
+      - lost
+  CatalogItem:
+    type: object
+    description: Anything the library holds. The kind names the subtype.
+    discriminator: kind
+    required:
+      - kind
+      - title
+    properties:
+      kind:
+        type: string
+        description: Name of the subtype, Book or Audiobook
+      title:
+        type: string
+        description: Title of the item
+  Book:
+    description: A printed book
+    allOf:
+      - $ref: '#/definitions/CatalogItem'
+      - type: object
+        required:
+          - id
+          - isbn
+          - status
+        properties:
+          id:
+            type: integer
+            format: int64
+            readOnly: true
+          isbn:
+            type: string
+            pattern: ^[0-9-]{10,17}$
+          authors:
+            type: array
+            items:
+              type: string
+          status:
+            $ref: '#/definitions/BookStatus'
+  Audiobook:
+    description: A recording of a book
+    allOf:
+      - $ref: '#/definitions/CatalogItem'
+      - type: object
+        required:
+          - narrator
+        properties:
+          narrator:
+            type: string
+          durationSeconds:
+            type: integer
+            format: int32
+  NewBook:
+    type: object
+    description: The members needed to catalogue a book
+    required:
+      - title
+      - isbn
+    properties:
+      title:
+        type: string
+      isbn:
+        type: string
+        pattern: ^[0-9-]{10,17}$
+      authors:
+        type: array
+        items:
+          type: string
+  BookPatch:
+    type: object
+    description: A JSON merge patch for a book
+    properties:
+      title:
+        type: string
+      authors:
+        type: array
+        items:
+          type: string
+      status:
+        $ref: '#/definitions/BookStatus'
+  Category:
+    type: object
+    description: A category and the categories under it
+    required:
+      - id
+      - name
+    properties:
+      id:
+        type: integer
+        format: int64
+      name:
+        type: string
+      children:
+        type: array
+        items:
+          $ref: '#/definitions/Category'
+  Loan:
+    type: object
+    description: A book lent to a member
+    required:
+      - id
+      - bookId
+      - memberId
+      - status
+    properties:
+      id:
+        type: integer
+        format: int64
+      bookId:
+        type: integer
+        format: int64
+      memberId:
+        type: integer
+        format: int64
+      dueDate:
+        type: string
+        format: date
+      status:
+        type: string
+        enum:
+          - active
+          - returned
+          - overdue
+  Error:
+    type: object
+    required:
+      - code
+      - message
+    properties:
+      code:
+        type: integer
+        format: int32
+      message:
+        type: string

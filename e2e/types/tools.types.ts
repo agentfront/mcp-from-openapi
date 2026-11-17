@@ -15,6 +15,7 @@ import type {
   ParameterLocation,
   ParameterMapper,
   ResponseHints,
+  ResponseStatusRange,
   ResponseStreamInfo,
   SerializationInfo,
   ServerInfo,
@@ -146,6 +147,10 @@ export const streamInfo: ResponseStreamInfo = {
 /** `default` is 0, and a Server-Sent Events stream is described like any other. */
 export const defaultStream: ResponseStreamInfo = { statusCode: 0, contentType: 'text/event-stream', itemSchema: {} };
 
+/** A response range key (`2XX`) is not a number: the stream's status is the range, upper-cased as the output gives it. */
+export const rangeStream: ResponseStreamInfo = { statusCode: '2XX', contentType: 'application/jsonl', itemSchema: {} };
+export const everyRange: ResponseStatusRange[] = ['1XX', '2XX', '3XX', '4XX', '5XX'];
+
 export const streamingHints: ResponseHints = { streaming: true };
 export const noHints: ResponseHints = {};
 
@@ -153,11 +158,38 @@ export function describeStream(candidate: McpOpenAPITool): string {
   const stream: ResponseStreamInfo | undefined = candidate.metadata.responseStream;
   const streaming: boolean | undefined = candidate.metadata.responseHints?.streaming;
   if (stream === undefined) return `buffered ${streaming ?? false}`;
-  const status: number = stream.statusCode;
+  // a code, or a range: narrow before using either as what it is
+  const status: number | ResponseStatusRange = stream.statusCode;
+  const label = typeof status === 'number' ? (status === 0 ? 'default' : `code ${status}`) : `range ${status}`;
   const mediaType: string = stream.contentType;
   const items: JsonSchema = stream.itemSchema;
   const events = mediaType === 'text/event-stream';
-  return `${status} ${mediaType} ${events} ${JSON.stringify(items)}`;
+  return `${label} ${mediaType} ${events} ${JSON.stringify(items)}`;
+}
+
+/** A stream is a success when its status is a 2xx code or the `2XX` range. */
+export function streamSucceeds(stream: ResponseStreamInfo): boolean {
+  if (typeof stream.statusCode === 'number') return stream.statusCode >= 200 && stream.statusCode < 300;
+  const range: ResponseStatusRange = stream.statusCode;
+  return range === '2XX';
+}
+
+// ---------------------------------------------------------------------------
+// ToolMetadata.responseStatusCodes and responseStatusRanges: the statuses of the output schema
+// ---------------------------------------------------------------------------
+
+/** Explicit codes are numbers (0 for `default`); a range goes in the other list. Each is absent when empty. */
+export function describeStatuses(candidate: McpOpenAPITool): string {
+  const codes: number[] = candidate.metadata.responseStatusCodes ?? [];
+  const ranges: ResponseStatusRange[] = candidate.metadata.responseStatusRanges ?? [];
+  const first: ResponseStatusRange | undefined = ranges[0];
+  const successful = ranges.includes('2XX') || codes.some((code) => code >= 200 && code < 300);
+  return `${codes.join(',')} ${ranges.join(',')} ${first ?? 'none'} ${successful}`;
+}
+
+/** A tool typed with metadata of the consumer's own keeps both lists. */
+export function rangesOfExtendedTool(extended: McpOpenAPITool<ToolMetadata & { adapter: string }>): number {
+  return (extended.metadata.responseStatusRanges ?? []).length + (extended.metadata.responseStatusCodes ?? []).length;
 }
 
 /** A tool typed with metadata of the consumer's own keeps the stream. */

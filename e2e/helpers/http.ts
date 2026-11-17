@@ -13,6 +13,10 @@
  * is refused with an error. To send a credential with such a tool, place it
  * through buildHttpRequest instead (input under the security mapper entry's
  * `inputKey`), which refuses it the same way, or use a header or cookie scheme.
+ *
+ * Every cookie of `security.cookies` is joined to the `Cookie` header `built`
+ * already has, whether or not a mapper entry names it: pass `security` for
+ * them, or place them through buildHttpRequest, not both (a name would be sent twice).
  */
 import type { BuiltHttpRequest, ResolvedSecurity } from '../../src';
 

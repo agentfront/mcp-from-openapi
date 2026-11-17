@@ -5,7 +5,11 @@
  * e2e/fixtures/oas/sources.json) and is registered with Ajv by its `$id`, so
  * nothing is ever fetched.
  *
- * - 3.0 is one JSON Schema draft-04 document (`ajv-draft-04`).
+ * - 2.0 (Swagger) and 3.0 are each one JSON Schema draft-04 document
+ *   (`ajv-draft-04`). The 2.0 schema also `$ref`s fifteen pointers into the
+ *   draft-04 meta-schema by URL (`http://json-schema.org/draft-04/schema#/
+ *   properties/title`, ...), so the pinned meta-schema is registered by its
+ *   `id` and nothing is fetched.
  * - 3.1 and 3.2 are validated through `schema-base.json`, the entry point the
  *   OAI test suite uses (it wraps `schema.json` and also validates Schema
  *   Objects against the OAS dialect), on `Ajv2020` with the pinned JSON Schema
@@ -13,23 +17,44 @@
  *
  * Ajv options, and why each is needed:
  *
- * - `meta: false` (3.1/3.2): Ajv2020 pre-registers its own copy of the
- *   2020-12 meta-schema under `https://json-schema.org/draft/2020-12/schema`,
- *   which differs from the official file (it adds a `$vocabulary` member to
- *   `meta/core`) and would collide with the pinned one registered here.
- * - `validateSchema: false` (3.1/3.2): the schemas are not validated against a
- *   meta-schema as they are added (the meta-schemas are themselves among them
- *   and are not registered yet when the first one is added).
+ * - `meta: false` (2.0, 3.1, 3.2): Ajv pre-registers its own copy of the
+ *   meta-schema (2020-12 for Ajv2020, under
+ *   `https://json-schema.org/draft/2020-12/schema`; draft-04 for Ajv04, under
+ *   `http://json-schema.org/draft-04/schema`), which differs from the official
+ *   file (2020-12: it adds a `$vocabulary` member to `meta/core`; draft-04: it
+ *   adds `format: uri` to `id` and `$schema` and leaves the `format` property
+ *   out, and the 2.0 schema `$ref`s `#/properties/pattern`, `title`, ... of it)
+ *   and would collide with the pinned one registered here.
+ * - `validateSchema: false` (2.0, 3.1, 3.2): the schemas are not validated
+ *   against a meta-schema as they are added (the meta-schemas are themselves
+ *   among them and are not registered yet when the first one is added). The
+ *   parity story validates the pinned 2.0 schema against the pinned draft-04
+ *   meta-schema afterwards, with `validateSchema`.
  * - `strictTypes: false`: the official schemas use `properties`,
  *   `patternProperties` and `required` without a sibling `type: object`.
  * - `allowMatchingProperties: true` (3.1/3.2): the Components Object lists
  *   properties (`schemas`, `responses`, ...) that its own `patternProperties`
  *   pattern also matches.
- * - `strictSchema: true` stays on, so an unknown keyword in an official schema
- *   fails loudly instead of being ignored. `strictTuples` is on as well.
+ * - `strictSchema: true` stays on for 3.0, 3.1 and 3.2, so an unknown keyword
+ *   in an official schema fails loudly instead of being ignored.
+ *   `strictTuples` is on as well.
+ * - `strictSchema: 'log'` for 2.0, not `true` and not `false`: the official 2.0
+ *   schema writes `additionalItems` next to an `items` that is not an array (in
+ *   `vendorExtension` and `parametersList`), and Ajv's strict mode refuses it
+ *   with `"additionalItems" is ignored when "items" is not an array of
+ *   schemas`, although the keyword does nothing there. `false` would also
+ *   silence an unknown keyword or format in a future iteration, so the
+ *   messages Ajv logs are collected and compilation throws on any but that one
+ *   (`rejectUntoleratedWarnings`). The count of messages (about thirty today)
+ *   depends on how often Ajv inlines the two definitions, so only the message
+ *   is tolerated, never a number of them.
  * - `validateFormats: false`: `format` is an annotation in the OAS dialect
  *   (the `format-annotation` vocabulary), so it asserts nothing. This also
- *   keeps `ajv-formats` out of the dependencies for the draft-04 schema.
+ *   keeps `ajv-formats` out of the dependencies for the draft-04 schemas, which
+ *   name `uri`, `email` (2.0) and `regex` (the draft-04 `pattern`) formats Ajv
+ *   does not know without it: Ajv throws on an unknown format while
+ *   `strictSchema` is not `false`. The cost is that a `contact.email` or a
+ *   `url` is not checked for its format, in 2.0 and 3.0.
  * - `allErrors: true`: reports every violation, not only the first.
  *
  * One transformation is not an option. Ajv resolves `$dynamicRef` against the
@@ -52,7 +77,14 @@ import Ajv2020 from 'ajv/dist/2020';
 import Ajv04 from 'ajv-draft-04';
 import { loadFixture, loadJsonFixture } from './fixtures';
 
+/** The OpenAPI versions (the keys of the stories' per-version tables). */
 export type OasVersion = '3.0' | '3.1' | '3.2';
+
+/**
+ * A version with a pinned official schema: Swagger 2.0 and the OpenAPI
+ * versions. Swagger 2.0 is not an OpenAPI version, so it is not in `OasVersion`.
+ */
+export type SchemaVersion = '2.0' | OasVersion;
 
 export interface OasValidation {
   valid: boolean;
@@ -66,6 +98,7 @@ interface Manifest {
 
 const MAX_ERRORS = 100;
 const JSON_SCHEMA_DIR = 'schemas/json-schema-2020-12/';
+const DRAFT_04_DIR = 'schemas/json-schema-draft-04/';
 const META_ANCHOR = 'meta';
 
 /** Reads a JSON file listed in the manifest (path relative to `e2e/fixtures/oas/`). */
@@ -96,7 +129,72 @@ export function bindDynamicMeta(node: unknown, target: string, seen: { refs: num
   return out;
 }
 
-function createValidator(version: OasVersion): ValidateFunction {
+/** The one strict-mode complaint the official 2.0 schema deserves (see the options above). */
+const TOLERATED_SWAGGER_WARNING = 'strict mode: "additionalItems" is ignored when "items" is not an array of schemas';
+
+/** Throws unless every message Ajv logged while compiling the 2.0 schema is the tolerated one. */
+export function rejectUntoleratedWarnings(warnings: readonly string[]): void {
+  const others = [...new Set(warnings.filter((warning) => warning !== TOLERATED_SWAGGER_WARNING))];
+  if (others.length > 0) {
+    throw new Error(
+      `the official 2.0 schema compiles with strict-mode complaints beyond the tolerated one: ${others.join('; ')}`,
+    );
+  }
+}
+
+/** An Ajv holding the pinned draft-04 meta-schema, the strict-mode messages it logs, and the pinned 2.0 schema. */
+interface Swagger2Ajv {
+  ajv: Ajv04;
+  /** The messages Ajv has logged so far. */
+  warnings: string[];
+  schema: Record<string, unknown>;
+  metaSchema: Record<string, unknown>;
+}
+
+function swagger2Ajv(): Swagger2Ajv {
+  const warnings: string[] = [];
+  const ajv = new Ajv04({
+    allErrors: true,
+    meta: false,
+    validateSchema: false,
+    strictSchema: 'log',
+    strictTypes: false,
+    strictTuples: true,
+    validateFormats: false,
+    logger: {
+      log: () => undefined,
+      warn: (message: unknown) => warnings.push(String(message)),
+      error: (message: unknown) => warnings.push(`error: ${String(message)}`),
+    },
+  });
+  const manifest = loadJsonFixture<Manifest>('oas/sources.json');
+  const draft04 = manifest.sources.filter((entry) => entry.path.startsWith(DRAFT_04_DIR));
+  if (draft04.length !== 1) throw new Error(`expected one pinned draft-04 meta-schema, found ${draft04.length}`);
+  const metaSchema = loadOasJson(draft04[0]!.path);
+  ajv.addSchema(metaSchema);
+  return { ajv, warnings, schema: loadOasJson('schemas/2.0/schema.json'), metaSchema };
+}
+
+function createSwagger2Validator(): ValidateFunction {
+  const { ajv, warnings, schema } = swagger2Ajv();
+  const validate = ajv.compile(schema);
+  rejectUntoleratedWarnings(warnings);
+  return validate;
+}
+
+/**
+ * Whether the pinned 2.0 schema and the pinned draft-04 meta-schema are valid
+ * draft-04 schemas, each checked against the pinned meta-schema (what
+ * `validateSchema: false` skips while they are added): a check that the
+ * meta-schema registered under its `id` is the one the 2.0 schema refers to.
+ */
+export function swagger2SchemasAreDraft04(): { schema: boolean; metaSchema: boolean } {
+  const { ajv, schema, metaSchema } = swagger2Ajv();
+  return { schema: ajv.validateSchema(schema) as boolean, metaSchema: ajv.validateSchema(metaSchema) as boolean };
+}
+
+function createValidator(version: SchemaVersion): ValidateFunction {
+  if (version === '2.0') return createSwagger2Validator();
   if (version === '3.0') {
     const ajv = new Ajv04({
       allErrors: true,
@@ -134,15 +232,15 @@ function createValidator(version: OasVersion): ValidateFunction {
   return ajv.getSchema(baseId) as ValidateFunction;
 }
 
-const validators = new Map<OasVersion, ValidateFunction>();
+const validators = new Map<SchemaVersion, ValidateFunction>();
 
 const describeError = (error: ErrorObject): string => {
   const detail = Object.values(error.params as Record<string, unknown>).filter((value) => typeof value === 'string');
   return `${error.instancePath || '/'}: ${error.message}${detail.length > 0 ? ` (${detail.join(', ')})` : ''}`;
 };
 
-/** Validates `document` against the official schema for `version`. */
-export function validateOasDocument(version: OasVersion, document: unknown): OasValidation {
+/** Validates `document` against the official schema for `version` (Swagger 2.0 included). */
+export function validateOasDocument(version: SchemaVersion, document: unknown): OasValidation {
   let validate = validators.get(version);
   if (!validate) {
     validate = createValidator(version);

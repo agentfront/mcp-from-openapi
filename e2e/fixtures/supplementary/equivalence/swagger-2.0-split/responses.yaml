@@ -1,0 +1,17 @@
+# The shared responses of swagger.yaml: each top-level key is one Response Object, reached as `responses.yaml#/<Key>`.
+NotFound:
+  description: The resource does not exist
+  schema:
+    $ref: definitions/Error.yaml
+Unauthorized:
+  description: The credentials are missing or invalid
+  headers:
+    WWW-Authenticate:
+      type: string
+      description: The authentication scheme to retry with
+  schema:
+    $ref: definitions/Error.yaml
+Unexpected:
+  description: Unexpected error
+  schema:
+    $ref: definitions/Error.yaml

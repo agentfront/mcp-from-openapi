@@ -1,13 +1,13 @@
 # Quickstart: OpenAPI spec → running MCP server
 
-The flagship journey in ~70 lines: turn an OpenAPI document into MCP tools, register them on the official `@modelcontextprotocol/sdk` server, and proxy every tool call to the real API with credentials resolved from the spec's security schemes.
+The flagship journey in ~120 lines: turn an OpenAPI document into MCP tools, register them on the official `@modelcontextprotocol/sdk` server, and proxy every tool call to the real API with credentials resolved from the spec's security schemes.
 
 ## What it demonstrates
 
 - `OpenAPIToolGenerator.fromJSON` → `generateTools` with `preferredStatusCodes` (single-object output schemas are what MCP structured content wants)
 - `toSdkTool` — the generated tool dropped straight into the SDK's `tools/list` shape
 - `SecurityResolver` + `createSecurityContext` — spec security schemes turned into concrete credentials
-- `buildHttpRequest` — the mapper applied with full OpenAPI parameter serialization; the resolved credentials are passed to it as input (under each security mapper entry's `inputKey`) so it places them in the header, query string or cookie, instead of the example editing the URL
+- `buildHttpRequest` — the mapper applied with full OpenAPI parameter serialization; the resolved credentials are passed to it as input (under each security mapper entry's `inputKey`) so it places them in the header, query string or cookie, instead of the example editing the URL. A cookie the context supplies that no security scheme names (`auth: { cookies: { session: '...' } }`) is not a mapper entry: the example joins it to the `Cookie` header `buildHttpRequest` built (never to the URL), after checking its name and value
 - The structured-content contract: `structuredContent` only on success; error payloads stay in `content` with `isError: true`
 
 ## Run it
@@ -16,7 +16,7 @@ The flagship journey in ~70 lines: turn an OpenAPI document into MCP tools, regi
 yarn build && yarn test:e2e   # runs example.e2e.ts among the rest
 ```
 
-The test ([example.e2e.ts](./example.e2e.ts)) spins up a local API, connects a real MCP `Client` over `InMemoryTransport`, calls the generated tool, and asserts the request that arrived on the wire — path templating, the `X-API-Key` header and an `api_key` query credential included.
+The test ([example.e2e.ts](./example.e2e.ts)) spins up a local API, connects a real MCP `Client` over `InMemoryTransport`, calls the generated tool, and asserts the request that arrived on the wire — path templating, the `X-API-Key` header, an `api_key` query credential and the context cookies (alone and next to a cookie scheme's own) included.
 
 ## Use it in your project
 

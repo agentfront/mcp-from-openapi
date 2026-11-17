@@ -14,6 +14,8 @@ import type {
   HTTPMethod,
   JsonSchema,
   LoadOptions,
+  MAX_CONVERSION_ENTRIES,
+  MAX_MEDIA_TYPES_PER_LIST,
   MediaTypeObject,
   OAS30,
   OAS31,
@@ -28,6 +30,7 @@ import type {
   ReferenceObject,
   ResponseHints,
   ResponseObject,
+  ResponseStatusRange,
   ResponseStreamInfo,
   SchemaObject,
   SchemaOrBoolean,
@@ -35,14 +38,19 @@ import type {
   ServerInfo,
   SpecDiagnostic,
   SpecFamily,
+  SpecVersionField,
   SpecVersionInfo,
   SpecVersionStatus,
   StandardMethod,
   ToolMetadata,
+  UpgradeSwagger2Options,
+  UpgradeSwagger2Result,
   ValidationErrorDetail,
   ValidationResult,
   buildHttpRequest,
   resolveOperationLayout,
+  toJsonSchema,
+  upgradeSwagger2,
 } from 'mcp-from-openapi';
 
 type Expect<T extends true> = T;
@@ -341,8 +349,12 @@ export type MethodTypes = [
   Expect<Equal<GenerateOptions['excludeMethods'], HTTPMethod[] | undefined>>,
 ];
 
-/** Any `3.0.x`, `3.1.x` and `3.2.x` string, and no other. */
+/**
+ * Any `3.0.x`, `3.1.x` and `3.2.x` string, and no other: `OpenAPIVersion` is what an `openapi` member holds, so the
+ * `swagger` value of a Swagger 2.0 document is not one. The families, which also name that 2.0, are four.
+ */
 export type VersionTypes = [
+  Expect<Not<Extends<'2.0', OpenAPIVersion>>>,
   Expect<Equal<OpenAPIVersion, `3.0.${string}` | `3.1.${string}` | `3.2.${string}`>>,
   Expect<Extends<'3.0.4', OpenAPIVersion>>,
   Expect<Extends<'3.1.2', OpenAPIVersion>>,
@@ -350,13 +362,21 @@ export type VersionTypes = [
   Expect<Extends<'3.0.0' | '3.0.1' | '3.0.2' | '3.0.3' | '3.1.0', OpenAPIVersion>>,
   Expect<Not<Extends<'3.3.0', OpenAPIVersion>>>,
   Expect<Not<Extends<string, OpenAPIVersion>>>,
-  Expect<Equal<SpecFamily, '3.0' | '3.1' | '3.2'>>,
+  Expect<Equal<SpecFamily, '2.0' | '3.0' | '3.1' | '3.2'>>,
+  // the version member a family is declared by: `swagger` for 2.0, `openapi` for the others
+  Expect<Equal<SpecVersionField, 'openapi' | 'swagger'>>,
 ];
 
-/** A diagnostic always has a severity, a code and a message; the pointer is optional. */
+/**
+ * A diagnostic always has a severity, a code and a message; the pointer is optional, and so is `document`, which says
+ * which document of a Swagger 2.0 document the pointer is into (`source`: the 2.0 document as written; `converted`: the
+ * OpenAPI 3.0 one generation reads) and is never set for a document of another version, or on an entry without a `path`.
+ */
 export type DiagnosticShape = [
   Expect<Equal<RequiredKeys<SpecDiagnostic>, 'severity' | 'code' | 'message'>>,
-  Expect<Equal<OptionalKeys<SpecDiagnostic>, 'path'>>,
+  Expect<Equal<OptionalKeys<SpecDiagnostic>, 'path' | 'document'>>,
+  Expect<Equal<SpecDiagnostic['document'], 'source' | 'converted' | undefined>>,
+  Expect<Equal<NonNullable<SpecDiagnostic['document']>, 'source' | 'converted'>>,
   Expect<Equal<SpecDiagnostic['severity'], 'warning' | 'info'>>,
   Expect<Equal<SpecDiagnostic['code'], string>>,
   Expect<Equal<SpecDiagnostic['message'], string>>,
@@ -370,15 +390,16 @@ export type SpecVersionShape = [
   Expect<Equal<OptionalKeys<SpecVersionInfo>, 'field' | 'declared' | 'major' | 'minor' | 'family'>>,
   Expect<Equal<SpecVersionInfo['status'], SpecVersionStatus>>,
   Expect<Equal<SpecVersionInfo['family'], SpecFamily | undefined>>,
+  Expect<Equal<SpecVersionInfo['field'], SpecVersionField | undefined>>,
   Expect<Equal<SpecVersionInfo['major'], number | undefined>>,
   Expect<Equal<SpecVersionInfo['minor'], number | undefined>>,
   Expect<Equal<SpecVersionInfo['diagnostics'], SpecDiagnostic[]>>,
   // the declared value is whatever the document holds, so it must be narrowed before use
   Expect<Equal<SpecVersionInfo['declared'], unknown>>,
   Expect<Equal<ReturnType<OpenAPIToolGenerator['getSpecVersion']>, SpecVersionInfo>>,
-  Expect<
-    Equal<SpecVersionStatus, 'supported' | 'newer-minor' | 'swagger-2.0' | 'unsupported' | 'malformed' | 'missing'>
-  >,
+  // Swagger 2.0 is `supported` (family `2.0`, field `swagger`), no longer a status of its own
+  Expect<Equal<SpecVersionStatus, 'supported' | 'newer-minor' | 'unsupported' | 'malformed' | 'missing'>>,
+  Expect<Not<Extends<'swagger-2.0', SpecVersionStatus>>>,
 ];
 
 /**
@@ -437,6 +458,71 @@ export type DiagnosticCodes = [
   Expect<Extends<'BASE_URI_TOO_LONG' | 'UNREADABLE_REFERENCE', DiagnosticCode>>,
   Expect<Equal<(typeof DIAGNOSTIC_CODES)['BASE_URI_TOO_LONG'], 'BASE_URI_TOO_LONG'>>,
   Expect<Equal<(typeof DIAGNOSTIC_CODES)['UNREADABLE_REFERENCE'], 'UNREADABLE_REFERENCE'>>,
+];
+
+/**
+ * The Swagger 2.0 conversion's codes, all and only: a code added, renamed or removed is a choice made here. Beside them the
+ * generator has the codes of what it finds about a 2.0 document the way it does about any other (a parameter name that is
+ * no string, a required input that accepts nothing) and the one validation error of a 2.0 document loaded with
+ * `dereference: false`.
+ */
+export type SwaggerCodes = [
+  Expect<
+    Equal<
+      Extract<DiagnosticCode, `SWAGGER_${string}`>,
+      | 'SWAGGER_VERSION_NOT_2_0'
+      | 'SWAGGER_INVALID_VALUE'
+      | 'SWAGGER_UNKNOWN_FIELD'
+      | 'SWAGGER_NOT_CONVERTED'
+      | 'SWAGGER_UNRESOLVED_REFERENCE'
+      | 'SWAGGER_RELATIVE_SERVER_URL'
+      | 'SWAGGER_ASSUMED_SCHEME'
+      | 'SWAGGER_ASSUMED_MEDIA_TYPE'
+      | 'SWAGGER_FORM_MEDIA_TYPE_ADDED'
+      | 'SWAGGER_MULTIPLE_BODY_PARAMETERS'
+      | 'SWAGGER_BODY_AND_FORM_DATA'
+      | 'SWAGGER_DUPLICATE_FORM_DATA_PARAMETER'
+      | 'SWAGGER_UNSUPPORTED_COLLECTION_FORMAT'
+      | 'SWAGGER_FILE_OUTSIDE_FORM_DATA'
+      | 'SWAGGER_UNSUPPORTED_SECURITY_SCHEME'
+      | 'SWAGGER_MEDIA_TYPE_LIMIT'
+      | 'SWAGGER_CONVERSION_TOO_LARGE'
+    >
+  >,
+  Expect<Equal<(typeof DIAGNOSTIC_CODES)['SWAGGER_MEDIA_TYPE_LIMIT'], 'SWAGGER_MEDIA_TYPE_LIMIT'>>,
+  Expect<Equal<(typeof DIAGNOSTIC_CODES)['SWAGGER_CONVERSION_TOO_LARGE'], 'SWAGGER_CONVERSION_TOO_LARGE'>>,
+  Expect<
+    Extends<
+      'PARAMETER_NAME_NOT_STRING' | 'INVALID_PARAMETER_NAME' | 'REQUIRED_INPUT_ACCEPTS_NOTHING' | 'DEREFERENCE_REQUIRED',
+      DiagnosticCode
+    >
+  >,
+  Expect<Equal<(typeof DIAGNOSTIC_CODES)['PARAMETER_NAME_NOT_STRING'], 'PARAMETER_NAME_NOT_STRING'>>,
+  Expect<Equal<(typeof DIAGNOSTIC_CODES)['INVALID_PARAMETER_NAME'], 'INVALID_PARAMETER_NAME'>>,
+  Expect<Equal<(typeof DIAGNOSTIC_CODES)['REQUIRED_INPUT_ACCEPTS_NOTHING'], 'REQUIRED_INPUT_ACCEPTS_NOTHING'>>,
+];
+
+/**
+ * `upgradeSwagger2` takes any value and an optional, nullable bag of options (the URI the document was retrieved from, the
+ * most entries the conversion may create), and returns the converted document, what it could not carry over, where each
+ * converted parameter was in the source list, and `tooLarge` only when the conversion was abandoned (always `true` then,
+ * never `false`). The two bounds are numbers a caller can read; they are literal types, so a change is a change of type.
+ */
+export type UpgradeSwagger2Shape = [
+  Expect<Equal<RequiredKeys<UpgradeSwagger2Options>, never>>,
+  Expect<Equal<OptionalKeys<UpgradeSwagger2Options>, 'documentUri' | 'maxEntries'>>,
+  Expect<Equal<UpgradeSwagger2Options['documentUri'], string | undefined>>,
+  Expect<Equal<UpgradeSwagger2Options['maxEntries'], number | undefined>>,
+  Expect<Equal<RequiredKeys<UpgradeSwagger2Result>, 'document' | 'diagnostics' | 'parameterIndexes'>>,
+  Expect<Equal<OptionalKeys<UpgradeSwagger2Result>, 'tooLarge'>>,
+  Expect<Equal<UpgradeSwagger2Result['document'], OAS30.OpenAPIObject>>,
+  Expect<Equal<UpgradeSwagger2Result['diagnostics'], SpecDiagnostic[]>>,
+  Expect<Equal<UpgradeSwagger2Result['parameterIndexes'], WeakMap<object, readonly number[]>>>,
+  Expect<Equal<UpgradeSwagger2Result['tooLarge'], true | undefined>>,
+  Expect<Equal<Parameters<typeof upgradeSwagger2>, [document: unknown, options?: UpgradeSwagger2Options | null]>>,
+  Expect<Equal<ReturnType<typeof upgradeSwagger2>, UpgradeSwagger2Result>>,
+  Expect<Equal<typeof MAX_MEDIA_TYPES_PER_LIST, 32>>,
+  Expect<Equal<typeof MAX_CONVERSION_ENTRIES, 1000000>>,
 ];
 
 /**
@@ -517,7 +603,10 @@ export type SerializationShape = [
 export type ResponseStreamShape = [
   Expect<Equal<RequiredKeys<ResponseStreamInfo>, 'statusCode' | 'contentType' | 'itemSchema'>>,
   Expect<Equal<OptionalKeys<ResponseStreamInfo>, never>>,
-  Expect<Equal<ResponseStreamInfo['statusCode'], number>>,
+  // the code (200), 0 for `default`, or a range key upper-cased (`'2XX'`)
+  Expect<Equal<ResponseStreamInfo['statusCode'], number | ResponseStatusRange>>,
+  Expect<Extends<number, ResponseStreamInfo['statusCode']>>,
+  Expect<Extends<'2XX', ResponseStreamInfo['statusCode']>>,
   Expect<Equal<ResponseStreamInfo['contentType'], string>>,
   Expect<Equal<ResponseStreamInfo['itemSchema'], JsonSchema>>,
   // present only on a tool whose response streams
@@ -546,4 +635,31 @@ export type BuiltRequestShape = [
   Expect<Equal<BuiltHttpRequest['queryString'], string | undefined>>,
   Expect<Equal<BuiltHttpRequest['query'], Record<string, string[]>>>,
   Expect<Equal<ReturnType<typeof buildHttpRequest>, BuiltHttpRequest>>,
+];
+
+/**
+ * A response range key (`2XX`) is not a number, so it has a type of its own: the five classes, upper-cased. A tool lists
+ * the explicit codes of its output in `responseStatusCodes` (a number each, 0 for `default`) and its ranges apart, in
+ * `responseStatusRanges`, which a tool without a range leaves out.
+ */
+export type ResponseStatusRanges = [
+  Expect<Equal<ResponseStatusRange, '1XX' | '2XX' | '3XX' | '4XX' | '5XX'>>,
+  Expect<Extends<ResponseStatusRange, string>>,
+  Expect<Not<Extends<string, ResponseStatusRange>>>,
+  Expect<Not<Extends<'2xx', ResponseStatusRange>>>,
+  Expect<Extends<'responseStatusCodes' | 'responseStatusRanges', OptionalKeys<ToolMetadata>>>,
+  Expect<Equal<ToolMetadata['responseStatusCodes'], number[] | undefined>>,
+  Expect<Equal<ToolMetadata['responseStatusRanges'], ResponseStatusRange[] | undefined>>,
+];
+
+/**
+ * `toJsonSchema` converts any object (a Schema or Reference Object of any version, or a schema the caller built) and a
+ * boolean schema (`true` accepts anything, `false` nothing: OpenAPI 3.1 and later), and always returns a JSON Schema
+ * object, never the boolean.
+ */
+export type SchemaConversion = [
+  Expect<Equal<Parameters<typeof toJsonSchema>[0], object | boolean>>,
+  Expect<Equal<ReturnType<typeof toJsonSchema>, JsonSchema>>,
+  Expect<Extends<SchemaOrBoolean, Parameters<typeof toJsonSchema>[0]>>,
+  Expect<Not<Extends<boolean, JsonSchema>>>,
 ];

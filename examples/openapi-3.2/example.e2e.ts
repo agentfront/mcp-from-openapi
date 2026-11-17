@@ -32,7 +32,11 @@ describe('example: openapi-3.2', () => {
   beforeAll(async () => {
     baseUrl = await loopback.listen();
   });
-  afterAll(() => loopback.close());
+  afterAll(async () => {
+    // A test that failed before releasing the gate leaves a response open, and close() waits for it
+    releaseSecondEvent();
+    await loopback.close();
+  });
   beforeEach(() => loopback.reset());
 
   it('generates a tool for each 3.2 shape', async () => {
@@ -126,6 +130,35 @@ describe('example: openapi-3.2', () => {
     const wire = loopback.requests.at(-1)!;
     expect(wire.method).toBe('GET');
     expect(wire.headers.accept).toBe('text/event-stream');
+  });
+
+  it('yields only the events a stream dispatches, and reads their fields as the SSE rules do', async () => {
+    const { tools } = await loadTools(filesApi('3.2.0'));
+    const blocks = [
+      ': keepalive', // a comment
+      'retry: 3000', // no data: sets the reconnection time, dispatches nothing
+      'id: 9', // no data
+      'event: created', // no data: not an event, whatever its other fields
+      'event: created\ndata: {"name":"a.txt"}\nid: 1\nretry: 3000', // retry is an integer
+      'event: deleted\ndata', // a field name with no colon has an empty value, so data is ''
+      'event: deleted\ndata: line one\ndata: line two\nretry: soon\nunknown: ignored', // data joins with LF; a retry that is not digits is ignored
+    ];
+    const serve: LoopbackHandler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(blocks.map((block) => `${block}\n\n`).join(''));
+    };
+    const other = createLoopbackServer(() => serve);
+    try {
+      const items: EventItem[] = [];
+      for await (const item of streamItems(tools.get('watchFiles')!, await other.listen())) items.push(item);
+      expect(items).toEqual([
+        { event: 'created', data: '{"name":"a.txt"}', id: '1', retry: 3000 },
+        { event: 'deleted', data: '' },
+        { event: 'deleted', data: 'line one\nline two' },
+      ]);
+    } finally {
+      await other.close();
+    }
   });
 
   it('rejects an item that does not match the itemSchema', async () => {

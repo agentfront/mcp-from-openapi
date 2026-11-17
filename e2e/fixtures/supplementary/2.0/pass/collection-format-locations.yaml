@@ -1,0 +1,55 @@
+# What `collectionFormat` becomes by where the array is and whether the format is written:
+#   query, ssv      -> style spaceDelimited, explode false
+#   query, omitted  -> csv, so style form, explode false (the 3.x default for a query array is explode true, not csv)
+#   header, csv     -> style simple
+#   path, omitted   -> csv, so style simple
+swagger: '2.0'
+info:
+  title: Shelf
+  version: 1.0.0
+host: shelf.example.com
+schemes:
+  - https
+produces:
+  - application/json
+paths:
+  /shelves/{shelfIds}/items:
+    get:
+      operationId: listShelfItems
+      summary: List the items on shelves
+      parameters:
+        - name: shelfIds
+          in: path
+          description: Shelves, comma separated (no collectionFormat written)
+          required: true
+          type: array
+          items:
+            type: integer
+            format: int64
+        - name: words
+          in: query
+          description: Words to match, separated by spaces
+          type: array
+          items:
+            type: string
+          collectionFormat: ssv
+        - name: labels
+          in: query
+          description: Labels to match (no collectionFormat written)
+          type: array
+          items:
+            type: string
+        - name: X-Colours
+          in: header
+          description: Colours to match, comma separated
+          type: array
+          items:
+            type: string
+          collectionFormat: csv
+      responses:
+        '200':
+          description: The items
+          schema:
+            type: array
+            items:
+              type: string

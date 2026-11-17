@@ -1,0 +1,13 @@
+type: object
+description: Anything the library holds. The kind names the subtype.
+discriminator: kind
+required:
+  - kind
+  - title
+properties:
+  kind:
+    type: string
+    description: Name of the subtype, Book or Audiobook
+  title:
+    type: string
+    description: Title of the item

@@ -129,22 +129,29 @@ export async function callTool(tool: McpOpenAPITool, input: Record<string, unkno
   return { status: response.status, body: await response.text() };
 }
 
-/** One server-sent event: the fields the stream carries, as strings. */
-export type EventItem = Record<string, string>;
+/** One server-sent event as OpenAPI 3.2 models it: `retry` is an integer, the other fields are strings. */
+export type EventItem = Record<string, string | number>;
 
-const EVENT_FIELDS = new Set(['event', 'data', 'id', 'retry']);
-
-/** Parse one `field: value` block. Comment lines (`:keepalive`) and unknown fields are ignored, as the SSE rules say. */
-function parseEvent(block: string): EventItem {
+/**
+ * Parse one block of lines the way the HTML `text/event-stream` rules do, or
+ * return `undefined` when the block dispatches no event: a block with no `data`
+ * line only updates the connection (`retry:`, `id:`), and a comment (`:keepalive`)
+ * or unknown field is ignored. A field name with no colon has an empty value,
+ * so `data` alone is an event whose data is `''`; a `retry` that is not all
+ * digits is ignored.
+ */
+function parseEvent(block: string): EventItem | undefined {
   const item: EventItem = {};
   for (const line of block.split('\n')) {
+    if (line.startsWith(':')) continue;
     const colon = line.indexOf(':');
-    const field = colon > 0 ? line.slice(0, colon) : '';
-    if (!EVENT_FIELDS.has(field)) continue;
-    const value = line.slice(colon + 1).replace(/^ /, '');
-    item[field] = Object.hasOwn(item, field) && field === 'data' ? `${item[field]}\n${value}` : value;
+    const field = colon === -1 ? line : line.slice(0, colon);
+    const value = colon === -1 ? '' : line.slice(colon + 1).replace(/^ /, '');
+    if (field === 'data') item[field] = Object.hasOwn(item, field) ? `${item[field]}\n${value}` : value;
+    else if (field === 'event' || field === 'id') item[field] = value;
+    else if (field === 'retry' && /^\d+$/.test(value)) item[field] = Number(value);
   }
-  return item;
+  return Object.hasOwn(item, 'data') ? item : undefined;
 }
 
 /**
@@ -176,7 +183,7 @@ export async function* streamItems(tool: McpOpenAPITool, baseUrl: string): Async
     for (let end = buffer.indexOf('\n\n'); end !== -1; end = buffer.indexOf('\n\n')) {
       const item = parseEvent(buffer.slice(0, end));
       buffer = buffer.slice(end + 2);
-      if (Object.keys(item).length === 0) continue; // a comment-only block
+      if (item === undefined) continue; // a comment or a block with no data: not an event
       if (!validate(item)) throw new Error(`Event does not match itemSchema: ${ajv.errorsText(validate.errors)}`);
       yield item;
     }

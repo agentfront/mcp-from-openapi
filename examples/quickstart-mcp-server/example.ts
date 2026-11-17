@@ -13,7 +13,7 @@ import {
   createSecurityContext,
   toSdkTool,
 } from 'mcp-from-openapi';
-import type { McpOpenAPITool, OpenAPIDocument, SecurityContext } from 'mcp-from-openapi';
+import type { BuiltHttpRequest, McpOpenAPITool, OpenAPIDocument, SecurityContext } from 'mcp-from-openapi';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 
@@ -24,6 +24,23 @@ export interface QuickstartOptions {
   apiBaseUrl: string;
   /** Credentials for the spec's security schemes, e.g. { apiKey: '...' } */
   auth?: Partial<SecurityContext>;
+}
+
+/**
+ * Cookies the security context supplies that no mapper entry names (a session
+ * cookie), which buildHttpRequest therefore did not place: join them to the
+ * `Cookie` header it built, never to the URL. A name or value that is not
+ * valid RFC 6265 (a `;` would forge a second cookie) is refused.
+ */
+function headersWithContextCookies(built: BuiltHttpRequest, cookies: Record<string, string>): Record<string, string> {
+  const extra = Object.entries(cookies).filter(([name]) => !Object.hasOwn(built.cookies, name));
+  for (const [name, value] of extra) {
+    if (!/^[\w!#$%&'*+\-.^`|~]+$/.test(name) || !/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*$/.test(value)) {
+      throw new Error(`Cookie '${name}' cannot be sent: not a valid RFC 6265 cookie name and value`);
+    }
+  }
+  const pairs = [built.headers['Cookie'], ...extra.map(([name, value]) => `${name}=${value}`)].filter(Boolean);
+  return pairs.length > 0 ? { ...built.headers, Cookie: pairs.join('; ') } : built.headers;
 }
 
 export async function createMcpServer(options: QuickstartOptions): Promise<{ server: Server; tools: McpOpenAPITool[] }> {
@@ -60,6 +77,8 @@ export async function createMcpServer(options: QuickstartOptions): Promise<{ ser
     // append them to the URL yourself: url.searchParams.append rewrites the
     // whole query, and corrupts one that is not name=value pairs. An
     // unresolved credential is `undefined`, overriding the model's arguments.
+    // Only mapper entries are placed: context cookies with no entry are added
+    // to the Cookie header afterwards (headersWithContextCookies).
     const security = await resolver.resolve(tool.mapper, securityContext);
     const where: Record<string, Record<string, string> | undefined> = {
       header: security.headers,
@@ -73,7 +92,9 @@ export async function createMcpServer(options: QuickstartOptions): Promise<{ ser
       baseUrl: options.apiBaseUrl,
     });
 
-    const response = await fetch(built.url, { method: built.method, headers: built.headers, body: built.body as never });
+    const headers = headersWithContextCookies(built, security.cookies);
+
+    const response = await fetch(built.url, { method: built.method, headers, body: built.body as never });
 
     // Read the body ONCE and tolerate empty/text/HTML responses — real APIs
     // return 204s and error pages, and a JSON parse crash here would surface

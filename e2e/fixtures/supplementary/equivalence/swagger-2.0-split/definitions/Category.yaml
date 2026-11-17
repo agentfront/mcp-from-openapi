@@ -1,0 +1,15 @@
+type: object
+description: A category and the categories under it
+required:
+  - id
+  - name
+properties:
+  id:
+    type: integer
+    format: int64
+  name:
+    type: string
+  children:
+    type: array
+    items:
+      $ref: Category.yaml

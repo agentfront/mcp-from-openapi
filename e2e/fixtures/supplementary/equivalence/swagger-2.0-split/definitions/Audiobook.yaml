@@ -1,0 +1,12 @@
+description: A recording of a book
+allOf:
+  - $ref: CatalogItem.yaml
+  - type: object
+    required:
+      - narrator
+    properties:
+      narrator:
+        type: string
+      durationSeconds:
+        type: integer
+        format: int32

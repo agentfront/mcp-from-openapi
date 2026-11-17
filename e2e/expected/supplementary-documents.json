@@ -1,5 +1,91 @@
 {
   "tools": {
+    "2.0": {
+      "collection-format-locations": [
+        [
+          "listShelfItems",
+          "get",
+          "/shelves/{shelfIds}/items",
+          true,
+          {
+            "arrays": {
+              "path:shelfIds": "simple/false",
+              "query:words": "spaceDelimited/false",
+              "query:labels": "form/false",
+              "header:X-Colours": "simple/false"
+            }
+          }
+        ]
+      ],
+      "collection-format-tsv": [
+        [
+          "listRows",
+          "get",
+          "/rows",
+          true,
+          {"arrays": {"query:columns": "form/false", "header:X-Sheet-Ids": "simple/false"}}
+        ]
+      ],
+      "file-response": [["downloadReport", "get", "/reports/{reportId}/download", true]],
+      "file-upload-consumes": [
+        [
+          "uploadAvatar",
+          "post",
+          "/avatars",
+          false,
+          {"body": {"offered": ["multipart/form-data"], "sent": "multipart/form-data", "binary": ["avatar"]}}
+        ],
+        [
+          "uploadScan",
+          "post",
+          "/scans",
+          false,
+          {"body": {"offered": ["multipart/form-data"], "sent": "multipart/form-data", "binary": ["scan"]}}
+        ]
+      ],
+      "global-body-two-consumes": [
+        [
+          "registerPet",
+          "post",
+          "/pets",
+          false,
+          {"body": {"offered": ["application/json"], "sent": "application/json"}}
+        ],
+        [
+          "importPet",
+          "post",
+          "/pets/import",
+          false,
+          {"body": {"offered": ["application/xml"], "sent": "application/xml"}}
+        ]
+      ],
+      "global-response-produces-override": [
+        ["getRecord", "get", "/records/{recordId}", true],
+        ["exportRecord", "get", "/records/{recordId}/export", true]
+      ],
+      "no-host": [
+        ["listNotes", "get", "/notes", true],
+        [
+          "createNote",
+          "post",
+          "/notes",
+          false,
+          {"body": {"offered": ["application/json"], "sent": "application/json"}}
+        ]
+      ],
+      "two-schemes": [["getNow", "get", "/now", true]],
+      "websocket-schemes": [["getQuote", "get", "/quotes/{symbol}", true]],
+      "x-nullable": [
+        ["getProfile", "get", "/profiles/{profileId}", true],
+        [
+          "replaceProfile",
+          "put",
+          "/profiles/{profileId}",
+          false,
+          {"body": {"offered": ["application/json"], "sent": "application/json"}}
+        ]
+      ]
+    },
     "3.0": {
       "parameter-content": [
         [
@@ -150,7 +236,32 @@
       ]
     }
   },
+  "servers": {
+    "2.0": {
+      "body-and-form-data": ["https://mixed.example.com"],
+      "collection-format-locations": ["https://shelf.example.com"],
+      "collection-format-tsv": ["https://sheets.example.com"],
+      "file-response": ["https://reports.example.com"],
+      "file-upload-consumes": ["https://uploads.example.com"],
+      "global-body-two-consumes": ["https://intake.example.com/api"],
+      "global-response-produces-override": ["https://archive.example.com"],
+      "no-host": ["/v2"],
+      "path-parameter-not-required": ["https://lookup.example.com"],
+      "two-schemes": ["https://clock.example.com:8443/time", "http://clock.example.com:8443/time"],
+      "websocket-schemes": ["https://quotes.example.com/stream"],
+      "x-nullable": ["https://profiles.example.com"]
+    }
+  },
   "diagnostics": {
+    "2.0": {
+      "collection-format-tsv": [
+        "SWAGGER_UNSUPPORTED_COLLECTION_FORMAT at /paths/~1rows/get/parameters/0/collectionFormat",
+        "SWAGGER_UNSUPPORTED_COLLECTION_FORMAT at /paths/~1rows/get/parameters/1/collectionFormat"
+      ],
+      "file-upload-consumes": ["SWAGGER_FORM_MEDIA_TYPE_ADDED at /paths/~1scans/post"],
+      "no-host": ["SWAGGER_RELATIVE_SERVER_URL at /host"],
+      "websocket-schemes": ["SWAGGER_NOT_CONVERTED at /schemes"]
+    },
     "3.2": {
       "cookie-json-content": ["COOKIE_CONTENT_NOT_SENDABLE at /paths/~1visitor/get/parameters/0"],
       "security-query-credential": ["QUERYSTRING_WITH_QUERY_CREDENTIAL at /paths/~1v1~1search-json/get/parameters/0"],
@@ -167,6 +278,17 @@
     }
   },
   "inputTypes": {
+    "2.0": {
+      "x-nullable": {
+        "replaceProfile": {
+          "name": "string",
+          "nickname": ["string", "null"],
+          "birthYear": ["integer", "null"],
+          "address": ["object", "null"],
+          "aliases": ["array", "null"]
+        }
+      }
+    },
     "3.2": {
       "self-uri": {"getPet": {"petId": "integer", "expand": "string"}},
       "parameter-content": {
@@ -213,6 +335,40 @@
     }
   },
   "invalid": {
+    "2.0": {
+      "body-and-form-data": {
+        "officialSchema": "accepts",
+        "validator": {
+          "valid": false,
+          "findings": ["error SWAGGER_BODY_AND_FORM_DATA at /paths/~1submissions/post/parameters"]
+        },
+        "tools": [
+          [
+            "submit",
+            "post",
+            "/submissions",
+            false,
+            {
+              "body": {
+                "offered": ["application/json", "application/x-www-form-urlencoded"],
+                "sent": "application/json"
+              }
+            }
+          ]
+        ],
+        "diagnostics": ["SWAGGER_BODY_AND_FORM_DATA at /paths/~1submissions/post/parameters"],
+        "inputTypes": {"submit": {"text": "string", "author": null, "lang": null}}
+      },
+      "path-parameter-not-required": {
+        "validator": {
+          "valid": false,
+          "findings": ["error PATH_PARAMETER_NOT_REQUIRED at /paths//things/{thingId}/get/parameters/0/required"]
+        },
+        "tools": [["getThing", "get", "/things/{thingId}", true]],
+        "diagnostics": ["SWAGGER_INVALID_VALUE at /paths/~1things~1{thingId}/get/parameters/0/required"],
+        "inputTypes": {"getThing": {"thingId": "string"}}
+      }
+    },
     "3.1": {
       "self": {
         "validator": {"valid": true, "findings": ["warning FEATURE_NEWER_THAN_DECLARED_VERSION at /$self"]},

@@ -5,7 +5,7 @@
  * SecurityResolver supplies credentials.
  */
 import { OpenAPIToolGenerator, SecurityResolver, buildHttpRequest, createSecurityContext } from 'mcp-from-openapi';
-import type { McpOpenAPITool, OpenAPIDocument, SecurityContext } from 'mcp-from-openapi';
+import type { BuiltHttpRequest, McpOpenAPITool, OpenAPIDocument, SecurityContext } from 'mcp-from-openapi';
 
 export interface CallToolOptions {
   apiBaseUrl: string;
@@ -17,6 +17,23 @@ export async function loadTools(spec: OpenAPIDocument): Promise<Map<string, McpO
   const generator = await OpenAPIToolGenerator.fromJSON(spec);
   const tools = await generator.generateTools();
   return new Map(tools.map((tool) => [tool.name, tool]));
+}
+
+/**
+ * Cookies the security context supplies that no mapper entry names (a session
+ * cookie), which buildHttpRequest therefore did not place: join them to the
+ * `Cookie` header it built, never to the URL. A name or value that is not
+ * valid RFC 6265 (a `;` would forge a second cookie) is refused.
+ */
+function headersWithContextCookies(built: BuiltHttpRequest, cookies: Record<string, string>): Record<string, string> {
+  const extra = Object.entries(cookies).filter(([name]) => !Object.hasOwn(built.cookies, name));
+  for (const [name, value] of extra) {
+    if (!/^[\w!#$%&'*+\-.^`|~]+$/.test(name) || !/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*$/.test(value)) {
+      throw new Error(`Cookie '${name}' cannot be sent: not a valid RFC 6265 cookie name and value`);
+    }
+  }
+  const pairs = [built.headers['Cookie'], ...extra.map(([name, value]) => `${name}=${value}`)].filter(Boolean);
+  return pairs.length > 0 ? { ...built.headers, Cookie: pairs.join('; ') } : built.headers;
 }
 
 /**
@@ -37,7 +54,8 @@ export async function callTool(
   // url.searchParams.append rewrites the whole query and corrupts one that is
   // not name=value pairs (an `in: querystring` JSON value). An unresolved
   // credential is `undefined`, which also overrides what the model's own
-  // arguments hold under that key.
+  // arguments hold under that key. Only mapper entries are placed: context
+  // cookies with no entry are added to the Cookie header afterwards.
   const where: Record<string, Record<string, string> | undefined> = {
     header: security.headers,
     query: security.query,
@@ -53,7 +71,7 @@ export async function callTool(
 
   const response = await fetch(built.url, {
     method: built.method,
-    headers: built.headers,
+    headers: headersWithContextCookies(built, security.cookies),
     body: built.body as never,
   });
   return { status: response.status, body: await response.json().catch(() => undefined) };

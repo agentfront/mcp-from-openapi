@@ -9,8 +9,13 @@ import { callTool, loadTools } from './example';
 const spec: any = {
   openapi: '3.0.0',
   info: { title: 'Search API', version: '1.0.0' },
-  components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer' } } },
+  components: {
+    securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer' }, cookieAuth: { type: 'apiKey', in: 'cookie', name: 'sid' } },
+  },
   paths: {
+    '/profile': {
+      get: { operationId: 'profile', security: [{ cookieAuth: [] }], responses: { '200': { description: 'OK' } } },
+    },
     '/search': {
       get: {
         operationId: 'search',
@@ -36,11 +41,15 @@ describe('example: http-requests', () => {
     res.end(JSON.stringify({ total: 2 }));
   };
   const loopback = createLoopbackServer(() => handler);
+  let apiBaseUrl: string;
 
+  beforeAll(async () => {
+    apiBaseUrl = await loopback.listen();
+  });
   afterAll(() => loopback.close());
+  beforeEach(() => loopback.reset());
 
   it('serializes styled parameters and credentials onto the wire', async () => {
-    const apiBaseUrl = await loopback.listen();
     const tools = await loadTools(spec);
     const search = tools.get('search')!;
 
@@ -55,6 +64,38 @@ describe('example: http-requests', () => {
     expect(params.get('filter[status]')).toBe('active'); // deepObject
     expect(params.get('ids')).toBe('1|2|3'); // pipeDelimited
     expect(captured.headers.authorization).toBe('Bearer jwt-token');
+  });
+
+  describe('cookies from the security context', () => {
+    it('sends a context cookie that no mapper entry names, without touching the query', async () => {
+      const search = (await loadTools(spec)).get('search')!;
+
+      await callTool(search, { ids: [1, 2] }, { apiBaseUrl, auth: { jwt: 'jwt-token', cookies: { session: 's1', locale: 'en' } } });
+
+      const captured = loopback.requests.at(-1)!;
+      expect(captured.url).toBe('/search?ids=1%7C2');
+      expect(captured.headers.authorization).toBe('Bearer jwt-token');
+      expect(captured.headers.cookie).toBe('session=s1; locale=en');
+    });
+
+    it('joins a context cookie to the one a cookie scheme places, and sends a name both give once', async () => {
+      const profile = (await loadTools(spec)).get('profile')!;
+
+      await callTool(profile, {}, { apiBaseUrl, auth: { apiKeys: { sid: 'k1' }, cookies: { session: 's1' } } });
+      expect(loopback.requests.at(-1)!.headers.cookie).toBe('sid=k1; session=s1');
+
+      await callTool(profile, {}, { apiBaseUrl, auth: { apiKeys: { sid: 'k1' }, cookies: { sid: 'from-context', session: 's1' } } });
+      expect(loopback.requests.at(-1)!.headers.cookie).toBe('sid=from-context; session=s1');
+    });
+
+    it('refuses a context cookie that would forge another, and sends nothing', async () => {
+      const search = (await loadTools(spec)).get('search')!;
+
+      await expect(callTool(search, {}, { apiBaseUrl, auth: { cookies: { session: 's1; admin=1' } } })).rejects.toThrow(
+        /Cookie 'session' cannot be sent/,
+      );
+      expect(loopback.requests).toHaveLength(0);
+    });
   });
 });
 
@@ -138,6 +179,16 @@ describe('example: http-requests, query credentials', () => {
     expect(loopback.requests.at(-1)!.url).toBe('/json?%7B%22a%22%3A1%7D');
   });
 
+  it('sends a context cookie next to a JSON query string without touching it', async () => {
+    const json = (await loadTools(spec)).get('byJson')!;
+
+    await callTool(json, { q: { a: 1 } }, { apiBaseUrl, auth: { cookies: { session: 's1' } } });
+
+    const captured = loopback.requests.at(-1)!;
+    expect(captured.url).toBe('/json?%7B%22a%22%3A1%7D');
+    expect(captured.headers.cookie).toBe('session=s1');
+  });
+
   it('shows why the query is not rewritten through URL.searchParams', async () => {
     const tools = await loadTools(spec);
     const built = buildHttpRequest(tools.get('byJson')!, { q: { a: 1 } }, { baseUrl: apiBaseUrl });
@@ -169,6 +220,13 @@ describe('e2e helper: sendBuiltRequest, query credentials', () => {
           operationId: 'byPlain',
           security: [{ keyAuth: [] }],
           parameters: [{ name: 'path', in: 'query', allowReserved: true, schema: { type: 'string' } }],
+          responses: { '200': { description: 'OK' } },
+        },
+      },
+      '/prefs': {
+        get: {
+          operationId: 'prefs',
+          parameters: [{ name: 'locale', in: 'cookie', schema: { type: 'string' } }],
           responses: { '200': { description: 'OK' } },
         },
       },
@@ -205,5 +263,23 @@ describe('e2e helper: sendBuiltRequest, query credentials', () => {
     // Without a query credential the same request is sent as built
     await sendBuiltRequest(json);
     expect(loopback.requests.at(-1)!.url).toBe('/json?%7B%22a%22%3A1%7D');
+  });
+
+  it('sends the context cookies, joined to the cookie parameter of the tool and never to the query', async () => {
+    const tools = await loadTools(spec);
+    const context = createSecurityContext({ apiKeys: { api_key: 'k 1' }, cookies: { session: 's1' } });
+
+    const plain = tools.get('byPlain')!;
+    const security = await new SecurityResolver().resolve(plain.mapper, context);
+    await sendBuiltRequest(buildHttpRequest(plain, { path: 'a/b' }, { baseUrl }), security);
+    expect(loopback.requests.at(-1)!.url).toBe('/plain?path=a/b&api_key=k%201');
+    expect(loopback.requests.at(-1)!.headers.cookie).toBe('session=s1');
+
+    // A tool with no security scheme still gets the context cookies, after its own cookie parameter
+    const prefs = tools.get('prefs')!;
+    const prefsSecurity = await new SecurityResolver().resolve(prefs.mapper, context);
+    await sendBuiltRequest(buildHttpRequest(prefs, { locale: 'en' }, { baseUrl }), prefsSecurity);
+    expect(loopback.requests.at(-1)!.url).toBe('/prefs');
+    expect(loopback.requests.at(-1)!.headers.cookie).toBe('locale=en; session=s1');
   });
 });

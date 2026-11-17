@@ -19,7 +19,7 @@ paths:
           content:
             text/event-stream:
               itemSchema:
-                $ref: '#/components/schemas/PriceTick'
+                $ref: '#/components/schemas/PriceEvent'
             application/jsonl:
               itemSchema:
                 $ref: '#/components/schemas/PriceTick'
@@ -36,7 +36,7 @@ paths:
                 $ref: '#/components/schemas/PriceTick'
             text/event-stream:
               itemSchema:
-                $ref: '#/components/schemas/PriceTick'
+                $ref: '#/components/schemas/PriceEvent'
             application/json:
               schema:
                 type: array
@@ -58,6 +58,23 @@ paths:
                 $ref: '#/components/schemas/PriceTick'
 components:
   schemas:
+    # An item of `text/event-stream` is one parsed event, whose `data` field carries the JSON text of a tick
+    PriceEvent:
+      type: object
+      required: [data]
+      properties:
+        event:
+          type: string
+        id:
+          type: string
+        retry:
+          type: integer
+          minimum: 0
+        data:
+          type: string
+          contentMediaType: application/json
+          contentSchema:
+            $ref: '#/components/schemas/PriceTick'
     PriceTick:
       type: object
       required: [symbol, price]

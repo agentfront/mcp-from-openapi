@@ -13,7 +13,16 @@
  * `KindResolver` can say what kind of value each field holds. Spec-extension
  * patterns (`^x-`) are not fields. A field counts as required only when every
  * instance needs it: required in one branch of `anyOf`/`oneOf`/`if` is
- * conditional, unless every branch requires it.
+ * conditional, unless every branch requires it (the Swagger 2.0 Parameter
+ * Object is a `oneOf` of a body parameter and a `oneOf` of four others; only
+ * `name` and `in` hold in every branch of both).
+ *
+ * Both sides read only keywords they know (`READ_KEYWORDS`, `UNREAD_KEYWORDS`):
+ * a schema node with any other keyword makes the reader throw, so a schema
+ * iteration that adds a keyword cannot be misread by ignoring it. Alternatives
+ * are read per alternative: a type that stands for several definitions
+ * (`KindResolver.kindOfAlternatives`) holds the union of the kinds each
+ * definition states for a field.
  *
  * Type side. `SpecTypeReader` loads the spec types with the real TypeScript
  * compiler (through the `src/spec` boundary project's compiler options) and
@@ -219,6 +228,89 @@ function walkSubschemas(
 const isExtensionPattern = (pattern: string): boolean => pattern.startsWith('^x-');
 
 /**
+ * Keywords the readers apply in place or read for the kind of a value:
+ * `collect` follows the applicators and `required`, `KindResolver` reads
+ * `type`, `items`, `enum`, `const` and the combinators.
+ */
+const READ_KEYWORDS: ReadonlySet<string> = new Set([
+  '$ref',
+  '$dynamicRef',
+  '$recursiveRef',
+  'allOf',
+  'anyOf',
+  'oneOf',
+  'if',
+  'then',
+  'else',
+  'properties',
+  'patternProperties',
+  'additionalProperties',
+  'unevaluatedProperties',
+  'dependencies',
+  'dependentSchemas',
+  'required',
+  'type',
+  'items',
+  'enum',
+  'const',
+]);
+
+/**
+ * Keywords the readers deliberately do not read: they name or describe a
+ * schema, or restrict an instance without adding a field or stating a kind
+ * (a `not` that forbids an object with no field but extensions, a bound, a
+ * `pattern`, the `additionalItems` that does nothing next to an `items` that
+ * is not an array). Anything in neither set fails the read.
+ */
+const UNREAD_KEYWORDS: ReadonlySet<string> = new Set([
+  '$schema',
+  '$id',
+  'id',
+  '$comment',
+  '$vocabulary',
+  '$dynamicAnchor',
+  '$defs',
+  'definitions',
+  'title',
+  'description',
+  'default',
+  'deprecated',
+  'readOnly',
+  'writeOnly',
+  'examples',
+  'format',
+  'not',
+  'contains',
+  'minContains',
+  'maxContains',
+  'propertyNames',
+  'additionalItems',
+  'multipleOf',
+  'maximum',
+  'exclusiveMaximum',
+  'minimum',
+  'exclusiveMinimum',
+  'maxLength',
+  'minLength',
+  'pattern',
+  'maxItems',
+  'minItems',
+  'uniqueItems',
+  'maxProperties',
+  'minProperties',
+]);
+
+/** Throws on a keyword in neither list: the readers cannot tell what it adds or constrains. */
+function assertKnownKeywords(location: string, node: SchemaObjectNode): void {
+  const unknown = Object.keys(node).filter((keyword) => !READ_KEYWORDS.has(keyword) && !UNREAD_KEYWORDS.has(keyword));
+  if (unknown.length > 0) {
+    throw new Error(
+      `${location}: keyword(s) the readers do not know: ${unknown.join(', ')} (read them in oas-schema.ts, or list them in UNREAD_KEYWORDS if they add no field and state no kind)`,
+    );
+  }
+}
+
+/**
  * The exact names an anchored pattern matches, when it matches only literal
  * names: `^\$ref$` (the 3.0 Reference Object's only field) or
  * `^(?:schemas|responses)$`. Anything else is a real pattern: `undefined`.
@@ -310,6 +402,7 @@ function collect(
   if (stack.includes(location)) {
     throw new Error(`in-place applicator cycle: ${[...stack, location].join(' -> ')}`);
   }
+  assertKnownKeywords(location, node);
   const path = [...stack, location];
   const sub = (keyword: string, child: unknown): ObjectFields =>
     collect(registry, resource, child, `${pointer}/${keyword}`, path);
@@ -451,23 +544,47 @@ export class KindResolver {
    * kind the value is `free`. Definitions stating different kinds are skipped.
    */
   kindOf(locations: readonly string[]): SchemaKind | SkippedKind {
-    const stated: Array<{ location: string; atoms: Atoms }> = [];
-    for (const location of locations) {
-      const located = this.registry.locate(location);
-      const result = this.atomsAt(located, []);
-      if (result === 'neutral') continue;
-      if ('skip' in result) return { skip: `${location}: ${result.skip}` };
-      stated.push({ location, atoms: result });
-    }
-    if (stated.length === 0) return { kind: 'free', refs: [] };
-    const kinds = new Set(stated.map((entry) => formatKind(entry.atoms.atoms)));
-    if (kinds.size > 1) {
-      const each = stated.map((entry) => `${formatKind(entry.atoms.atoms)} (${entry.location})`);
-      return { skip: `its definitions state different kinds: ${each.join(', ')}` };
-    }
+    return this.kindOfAlternatives([locations]);
+  }
+
+  /**
+   * The kind of a value that must match the schemas of ONE of several
+   * `alternatives` (the definitions behind one type: a Swagger 2.0 Schema
+   * Object is a `schema` or a `fileSchema`), each given as the locations of the
+   * schemas one alternative applies to the field (as `kindOf`). It is the union
+   * of the kinds the alternatives state; an alternative that states none
+   * accepts anything, so the union is `free`; one that cannot be read skips the
+   * field.
+   */
+  kindOfAlternatives(alternatives: ReadonlyArray<readonly string[]>): SchemaKind | SkippedKind {
+    const atoms = new Set<string>();
     const refs = new Map<string, string>();
-    stated.forEach((entry) => entry.atoms.refs.forEach((type, definition) => refs.set(definition, type)));
-    return { kind: [...kinds][0]!, refs: [...refs].map(([definition, type]) => ({ definition, type })) };
+    for (const locations of alternatives) {
+      const stated: Array<{ location: string; atoms: Atoms }> = [];
+      for (const location of locations) {
+        const located = this.registry.locate(location);
+        const result = this.atomsAt(located, []);
+        if (result === 'neutral') continue;
+        if ('skip' in result) return { skip: `${location}: ${result.skip}` };
+        stated.push({ location, atoms: result });
+      }
+      if (stated.length === 0) {
+        atoms.add('free');
+        continue;
+      }
+      const kinds = new Set(stated.map((entry) => formatKind(entry.atoms.atoms)));
+      if (kinds.size > 1) {
+        const each = stated.map((entry) => `${formatKind(entry.atoms.atoms)} (${entry.location})`);
+        return { skip: `its definitions state different kinds: ${each.join(', ')}` };
+      }
+      stated.forEach((entry) => {
+        entry.atoms.atoms.forEach((atom) => atoms.add(atom));
+        entry.atoms.refs.forEach((type, definition) => refs.set(definition, type));
+      });
+    }
+    // No alternative defines the field: nothing states a kind.
+    if (atoms.size === 0) return { kind: 'free', refs: [] };
+    return { kind: formatKind(atoms), refs: [...refs].map(([definition, type]) => ({ definition, type })) };
   }
 
   /** Atoms for one schema, `neutral` when it states no kind. */
@@ -477,6 +594,7 @@ export class KindResolver {
     if (node === false) return { atoms: new Set(), refs: new Map() };
     if (!isObject(node)) return { skip: 'not a schema' };
     if (stack.includes(location)) return { skip: `recursive definition (${[...stack, location].join(' -> ')})` };
+    assertKnownKeywords(location, node);
     const path = [...stack, location];
     if (typeof node['$ref'] !== 'string') return this.ownAtoms(located, node, path);
 
@@ -525,7 +643,11 @@ export class KindResolver {
     }
     for (const keyword of ['anyOf', 'oneOf']) {
       const members = node[keyword];
-      if (Array.isArray(members)) return unionAtoms(members.map((_, i) => sub(`${keyword}/${i}`)), true);
+      if (Array.isArray(members))
+        return unionAtoms(
+          members.map((_, i) => sub(`${keyword}/${i}`)),
+          true,
+        );
     }
     if ('if' in node) {
       if (!('then' in node && 'else' in node)) return { skip: 'a conditional value (if without both then and else)' };
@@ -533,7 +655,26 @@ export class KindResolver {
     }
     if (Array.isArray(node['enum'])) return { atoms: new Set(node['enum'].map(atomOfValue)), refs: new Map() };
     if ('const' in node) return single(atomOfValue(node['const']));
-    if ('allOf' in node) return { skip: 'an allOf value' };
+    if (Array.isArray(node['allOf'])) {
+      // Every member applies, so those that state a kind must state the same one
+      // (`allOf: [{ $ref: '#/definitions/positiveInteger' }, { default: 0 }]`, or
+      // a single `$ref` wrapped to carry a `description`).
+      const stated: Atoms[] = [];
+      for (let i = 0; i < node['allOf'].length; i++) {
+        const member = this.atomsAt(this.registry.locate(`${located.location}/allOf/${i}`), path);
+        if (member === 'neutral') continue;
+        if ('skip' in member) return member;
+        stated.push(member);
+      }
+      if (stated.length === 0) return 'neutral';
+      const kinds = new Set(stated.map((member) => formatKind(member.atoms)));
+      if (kinds.size > 1) return { skip: `its allOf members state different kinds: ${[...kinds].join(', ')}` };
+      return {
+        atoms: stated[0]!.atoms,
+        refs: new Map(stated.flatMap((member) => [...member.refs])),
+      };
+    }
+    if ('allOf' in node) return { skip: 'an allOf that is not an array' };
     return 'neutral';
   }
 
@@ -590,8 +731,7 @@ function objectAtoms(node: SchemaObjectNode, sub: (suffix: string) => Atoms | Sk
 
 /** Whether a schema allows the boolean schema form (`type` includes `boolean`). */
 const allowsBooleanForm = (node: unknown): boolean =>
-  isObject(node) &&
-  (node['type'] === 'boolean' || (Array.isArray(node['type']) && node['type'].includes('boolean')));
+  isObject(node) && (node['type'] === 'boolean' || (Array.isArray(node['type']) && node['type'].includes('boolean')));
 
 /**
  * `$dynamicAnchor` name to the type it binds to, from the mapped definitions
@@ -874,46 +1014,63 @@ export class SpecTypeReader {
 export interface ModuleReference {
   /** How it refers: `import`, `export`, `import()` type, `reference types`, ... */
   form: string;
+  /**
+   * The module named, when {@link constant}; otherwise the source text of the
+   * expression that names it (`name` in `import(name)`).
+   */
   specifier: string;
+  /**
+   * Whether the specifier is a constant string: a string literal or a template
+   * literal without substitutions. A reference that is not constant (`import(x)`,
+   * a template literal with substitutions) cannot be proven to stay inside a
+   * boundary.
+   */
+  constant: boolean;
   line: number;
 }
 
 /**
  * Every module a TypeScript source file refers to: import and export
  * declarations, `import x = require()`, `import()` types and calls, `require()`
- * calls, `declare module '...'` blocks and triple-slash references.
+ * calls, `declare module '...'` blocks and triple-slash references. A
+ * specifier written as a template literal without substitutions names its
+ * module like a string literal does; one the file computes (`import(x)`, a
+ * template with substitutions) is listed with `constant: false`, so a boundary
+ * check can fail on it instead of missing it.
  */
 export function moduleSpecifiers(fileName: string, text: string): ModuleReference[] {
   const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true);
   const found: ModuleReference[] = [];
-  const add = (form: string, specifier: string, position: number): void => {
-    found.push({ form, specifier, line: source.getLineAndCharacterOfPosition(position).line + 1 });
+  const add = (form: string, specifier: string, constant: boolean, position: number): void => {
+    found.push({ form, specifier, constant, line: source.getLineAndCharacterOfPosition(position).line + 1 });
+  };
+  /** The module an expression names: a constant string, or the expression's own text. */
+  const addExpression = (form: string, expression: ts.Node | undefined, position: number): void => {
+    if (expression && ts.isStringLiteralLike(expression)) add(form, expression.text, true, position);
+    else add(form, expression ? expression.getText(source) : '', false, position);
   };
   const visit = (node: ts.Node): void => {
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
-      if (ts.isStringLiteral(node.moduleSpecifier)) {
-        add(ts.isImportDeclaration(node) ? 'import' : 'export', node.moduleSpecifier.text, node.getStart());
-      }
+      addExpression(ts.isImportDeclaration(node) ? 'import' : 'export', node.moduleSpecifier, node.getStart());
     } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
-      const expression = node.moduleReference.expression;
-      if (ts.isStringLiteral(expression)) add('import = require()', expression.text, node.getStart());
+      addExpression('import = require()', node.moduleReference.expression, node.getStart());
     } else if (ts.isImportTypeNode(node)) {
       const argument = node.argument;
-      if (ts.isLiteralTypeNode(argument) && ts.isStringLiteral(argument.literal)) {
-        add('import() type', argument.literal.text, node.getStart());
-      }
-    } else if (ts.isCallExpression(node) && node.arguments.length > 0 && ts.isStringLiteral(node.arguments[0]!)) {
+      const literal =
+        ts.isLiteralTypeNode(argument) && ts.isStringLiteralLike(argument.literal) ? argument.literal : argument;
+      addExpression('import() type', literal, node.getStart());
+    } else if (ts.isCallExpression(node)) {
       const isImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
       const isRequire = ts.isIdentifier(node.expression) && node.expression.text === 'require';
-      if (isImport || isRequire) add(isImport ? 'import()' : 'require()', node.arguments[0].text, node.getStart());
-    } else if (ts.isModuleDeclaration(node) && ts.isStringLiteral(node.name)) {
-      add('declare module', node.name.text, node.getStart());
+      if (isImport || isRequire) addExpression(isImport ? 'import()' : 'require()', node.arguments[0], node.getStart());
+    } else if (ts.isModuleDeclaration(node) && ts.isStringLiteralLike(node.name)) {
+      add('declare module', node.name.text, true, node.getStart());
     }
     ts.forEachChild(node, visit);
   };
   visit(source);
-  source.referencedFiles.forEach((ref) => add('reference path', ref.fileName, ref.pos));
-  source.typeReferenceDirectives.forEach((ref) => add('reference types', ref.fileName, ref.pos));
-  source.libReferenceDirectives.forEach((ref) => add('reference lib', ref.fileName, ref.pos));
+  source.referencedFiles.forEach((ref) => add('reference path', ref.fileName, true, ref.pos));
+  source.typeReferenceDirectives.forEach((ref) => add('reference types', ref.fileName, true, ref.pos));
+  source.libReferenceDirectives.forEach((ref) => add('reference lib', ref.fileName, true, ref.pos));
   return found;
 }

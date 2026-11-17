@@ -1,5 +1,72 @@
 {
   "tools": {
+    "2.0": {
+      "api-with-examples": [
+        ["listVersionsv2", "get", "/", true],
+        ["getVersionDetailsv2", "get", "/v2", true]
+      ],
+      "petstore": [
+        ["listPets", "get", "/pets", true],
+        ["createPets", "post", "/pets", false],
+        ["showPetById", "get", "/pets/{petId}", true]
+      ],
+      "petstore-expanded": [
+        ["findPets", "get", "/pets", true, {"arrays": {"query:tags": "form/false"}}],
+        [
+          "addPet",
+          "post",
+          "/pets",
+          false,
+          {"body": {"offered": ["application/json"], "sent": "application/json"}}
+        ],
+        ["find_pet_by_id", "get", "/pets/{id}", true],
+        ["deletePet", "delete", "/pets/{id}", false]
+      ],
+      "petstore-minimal": [["get_pets", "get", "/pets", true]],
+      "petstore-separate": [
+        ["findPets", "get", "/pets", true, {"arrays": {"query:tags": "form/false"}}],
+        [
+          "addPet",
+          "post",
+          "/pets",
+          false,
+          {"body": {"offered": ["application/json"], "sent": "application/json"}}
+        ],
+        ["find_pet_by_id", "get", "/pets/{id}", true],
+        ["deletePet", "delete", "/pets/{id}", false]
+      ],
+      "petstore-simple": [
+        ["findPets", "get", "/pets", true, {"arrays": {"query:tags": "form/false"}}],
+        [
+          "addPet",
+          "post",
+          "/pets",
+          false,
+          {"body": {"offered": ["application/json"], "sent": "application/json"}}
+        ],
+        ["findPetById", "get", "/pets/{id}", true],
+        ["deletePet", "delete", "/pets/{id}", false]
+      ],
+      "petstore-with-external-docs": [
+        ["findPets", "get", "/pets", true, {"arrays": {"query:tags": "form/false"}}],
+        [
+          "addPet",
+          "post",
+          "/pets",
+          false,
+          {"body": {"offered": ["application/json"], "sent": "application/json"}}
+        ],
+        ["findPetById", "get", "/pets/{id}", true],
+        ["deletePet", "delete", "/pets/{id}", false]
+      ],
+      "uber": [
+        ["get_estimates_price", "get", "/estimates/price", true],
+        ["get_estimates_time", "get", "/estimates/time", true],
+        ["get_history", "get", "/history", true],
+        ["get_me", "get", "/me", true],
+        ["get_products", "get", "/products", true, {"security": ["apikey:apiKey"]}]
+      ]
+    },
     "3.0": {
       "api-with-examples": [
         ["listVersionsv2", "get", "/", true],
@@ -80,6 +147,23 @@
       "path_no_response": [["get", "get", "/", true]],
       "paths-object-example": [["get_pets", "get", "/pets", true]],
       "request-body-examples": [["put_something", "put", "/something", false]]
+    }
+  },
+  "servers": {
+    "2.0": {
+      "api-with-examples": ["/"],
+      "petstore": ["http://petstore.swagger.io/v1"],
+      "petstore-expanded": ["http://petstore.swagger.io/api"],
+      "petstore-minimal": ["http://petstore.swagger.io/api"],
+      "petstore-separate": ["http://petstore.swagger.io/api"],
+      "petstore-simple": ["http://petstore.swagger.io/api"],
+      "petstore-with-external-docs": ["http://petstore.swagger.io/api"],
+      "uber": ["https://api.uber.com/v1"]
+    }
+  },
+  "diagnostics": {
+    "2.0": {
+      "api-with-examples": ["SWAGGER_RELATIVE_SERVER_URL at /host"]
     }
   }
 }

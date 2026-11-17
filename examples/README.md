@@ -18,6 +18,7 @@ yarn build && yarn test:e2e
 | [typed-tools](https://github.com/agentfront/mcp-from-openapi/tree/main/examples/typed-tools) | Code-execution surfaces: `dottedNaming` namespaces + `emitTypeSignatures` TypeScript contracts |
 | [arazzo-workflow](https://github.com/agentfront/mcp-from-openapi/tree/main/examples/arazzo-workflow) | Multi-step workflows: an Arazzo document consolidated into one tool, executed step-by-step from its IR |
 | [openapi-3.2](https://github.com/agentfront/mcp-from-openapi/tree/main/examples/openapi-3.2) | OpenAPI 3.2: the `QUERY` method, custom methods (`LINK`), an `in: querystring` parameter and an `itemSchema` event stream, sent and consumed over real HTTP, plus what a 3.1 declaration ignores |
+| [swagger-2.0](https://github.com/agentfront/mcp-from-openapi/tree/main/examples/swagger-2.0) | Swagger 2.0: an `in: body` JSON body, `formData` as a form and as a multipart `type: file` upload, `collectionFormat` (`csv`, `multi`), an API key from `securityDefinitions` and `host`/`basePath`/`schemes` as the server, sent over real HTTP, plus `getDiagnostics()` and the standalone `upgradeSwagger2` |
 
 ## Layout
 
