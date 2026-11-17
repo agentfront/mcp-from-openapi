@@ -91,7 +91,6 @@ export function analyzeDoc(doc, file, { read } = {}) {
   const is32 = v.startsWith('3.2');
   const methods = is2 ? ['get', 'put', 'post', 'delete', 'options', 'head', 'patch'] : BASE_METHODS;
   const dir = file ? path.dirname(file) : process.cwd();
-  const fileCache = new Map();
   let unresolvedPathRefs = 0;
   const unresolved = [];
 

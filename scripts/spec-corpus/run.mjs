@@ -169,7 +169,7 @@ function compareOps(st, keys, warnedSet) {
   const unexplained = [];
   const diagByOp = new Map();
   const diagByPath = new Map();
-  for (const [code, severity, p] of keys.diagnostics ?? []) {
+  for (const [code, , p] of keys.diagnostics ?? []) {
     const o = opFromPointer(p);
     if (o && !/\/(parameters|servers|security)(\/|$)/.test(p.split('/').slice(3).map((x) => '/' + x).join('')) && p.split('/').length >= 4 && !p.split('/')[3].startsWith('parameters')) { const l = diagByOp.get(o) ?? new Set(); l.add(code); diagByOp.set(o, l); }
     else { const pp = pathFromPointer(p); if (pp !== null) { const l = diagByPath.get(pp) ?? new Set(); l.add(code); diagByPath.set(pp, l); } }
@@ -220,9 +220,6 @@ async function runSpec(spec) {
 // ------------------------------------------------------------------ report
 const pct = (a, b) => (b ? `${((a / b) * 100).toFixed(1)}%` : 'n/a');
 const sec = (ms) => `${(ms / 1000).toFixed(1)}s`;
-function primary(e) { // the attempt the summary table reports: first that produced tools; else default
-  return e.attempts.find((a) => a.label === 'default' && a.ok) || e.attempts.find((a) => a.ok && a.label.startsWith('local-refs') && !a.label.includes('validate')) || e.attempts.find((a) => a.ok) || e.attempts[0];
-}
 function reason(er) {
   if (!er) return '?';
   const m = String(er.message || '');
