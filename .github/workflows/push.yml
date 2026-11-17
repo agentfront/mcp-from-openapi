@@ -42,6 +42,9 @@ jobs:
       - name: Build
         run: yarn build
 
+      - name: Type-check (src, e2e, examples, type tests)
+        run: yarn typecheck
+
       - name: Test with coverage
         run: yarn test:coverage --coverageReporters=text --coverageReporters=json-summary
 
@@ -68,3 +71,25 @@ jobs:
             echo "> Coverage data not available — the test step may have failed before generating coverage." >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
+
+  public-types:
+    name: "Public type compatibility"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node + Yarn (Node 24.x)
+        uses: ./.github/actions/setup-node-yarn
+        with:
+          node-version: 24.x
+
+      - name: Build
+        run: yarn build
+
+      # Fails when an exported type differs from the baseline release recorded in
+      # scripts/public-types-allowlist.json and the difference has no allowlist entry.
+      - name: Public types match the baseline release (differences must be allowlisted with a reason)
+        run: node scripts/diff-public-types.mjs

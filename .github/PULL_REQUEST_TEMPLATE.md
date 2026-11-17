@@ -6,7 +6,7 @@
 
 - [ ] `yarn test` passes
 - [ ] `yarn test:coverage` passes (100% statements/branches/functions/lines — the threshold is enforced)
-- [ ] `npx tsc -p tsconfig.lib.json --noEmit` is clean
+- [ ] `yarn typecheck` is clean
 - [ ] New options/exports are documented in `docs/` (configuration + api-reference)
 
 ## Notes for reviewers

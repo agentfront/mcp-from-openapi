@@ -3,37 +3,11 @@
  * from real specs compiles under the real TypeScript compiler with zero
  * diagnostics — the invalid-TS bug class as a permanent regression test.
  */
-import * as ts from 'typescript';
 import { OpenAPIToolGenerator } from '../src';
 import type { McpOpenAPITool, OpenAPIDocument } from '../src';
 import { loadFixture, loadJsonFixture } from './helpers/fixtures';
+import { compileVirtual } from './helpers/tsc';
 import * as yaml from 'yaml';
-
-/** Compile virtual source text; return flattened diagnostics (empty = valid). */
-function compileVirtual(fileName: string, source: string): string[] {
-  const options: ts.CompilerOptions = {
-    noEmit: true,
-    strict: true,
-    skipLibCheck: true,
-    lib: ['lib.es2022.d.ts'],
-    types: [],
-  };
-  const host = ts.createCompilerHost(options);
-  const readFile = host.readFile.bind(host);
-  const fileExists = host.fileExists.bind(host);
-  const getSourceFile = host.getSourceFile.bind(host);
-  host.readFile = (name) => (name === fileName ? source : readFile(name));
-  host.fileExists = (name) => name === fileName || fileExists(name);
-  host.getSourceFile = (name, languageVersion, ...rest) =>
-    name === fileName
-      ? ts.createSourceFile(name, source, languageVersion, true)
-      : getSourceFile(name, languageVersion, ...rest);
-
-  const program = ts.createProgram([fileName], options, host);
-  return ts
-    .getPreEmitDiagnostics(program)
-    .map((diagnostic) => `${diagnostic.file?.fileName ?? ''}:${diagnostic.start ?? 0} ${ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')}`);
-}
 
 const cases: Array<{ file: string }> = [{ file: 'petstore-3.0.yaml' }, { file: 'github-trimmed-3.0.json' }];
 
