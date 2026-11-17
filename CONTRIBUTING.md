@@ -5,7 +5,7 @@ need to get a change from idea to merged PR.
 
 ## Getting started
 
-**Requirements**: Node.js >= 20, Yarn 4 (via corepack).
+**Requirements**: Node.js >= 22.19, Yarn 4 (via corepack).
 
 ```bash
 git clone https://github.com/agentfront/mcp-from-openapi.git
@@ -54,8 +54,10 @@ The `public-types` CI job compares every type the built package exports with
 the release recorded as `baseline` in `scripts/public-types-allowlist.json`,
 member by member and in both directions. It also catches what assignability
 alone misses: a removed optional property, `any` appearing or disappearing,
-and `readonly` changes. Each difference must be listed in that file under a
-cause with a reason, and a listed difference that no longer occurs fails too.
+and `readonly` changes. It also reports index signatures that were removed or
+added, and compares rest-tuple parameters element by element. Each difference
+must be listed in that file under a cause with a reason, and a listed
+difference that no longer occurs fails too.
 
 Run it locally (it needs network access, to install the baseline from npm):
 
@@ -79,6 +81,24 @@ After a release, compare against it: run
 `node scripts/diff-public-types.mjs --update-allowlist --baseline <new version>`,
 which records the new baseline. The causes of the released changes are no longer
 differences, so they drop out; anything left still needs its reason.
+
+### Maintaining OpenAPI version support
+
+Which OpenAPI versions the library reads, and how a new version or a new schema
+iteration from the OpenAPI Initiative is absorbed, is written down step by step
+in [docs/maintaining-openapi-support.md](./docs/maintaining-openapi-support.md).
+Three scripts support it:
+
+- `node scripts/sync-oas-sources.mjs` verifies the official schemas and test
+  documents vendored under `e2e/fixtures/oas/` against their pinned checksums
+  (offline); `--update` re-downloads them; `--latest` (read-only, needs the
+  network) reports what is newer upstream and exits 3 when something is. The
+  `spec-watch` workflow runs it weekly and keeps one issue up to date.
+- `node scripts/diff-public-types.mjs` is the public-type check described above.
+- `node scripts/spec-corpus/download.mjs` and `run.mjs` download 38 real-world
+  specs into the git-ignored `.spec-corpus/` and run them through the built
+  library. It is a local survey, not a CI gate, and no spec is ever committed
+  (see [scripts/spec-corpus/README.md](./scripts/spec-corpus/README.md)).
 
 ## Commits and pull requests
 

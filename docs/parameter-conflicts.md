@@ -274,6 +274,8 @@ For `multipart/form-data` (and other) bodies, binary parts (`format: binary`, or
 ]
 ```
 
+`buildHttpRequest` applies these rules when it builds the request (a part's `Content-Type`, `style`, `explode`, `allowReserved` and part `headers`; see [Encoding Objects](./request-builder.md#encoding-objects)).
+
 ---
 
 ## Content Type Selection

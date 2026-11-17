@@ -23,6 +23,26 @@ const tools = await generator.generateTools({ target: "gemini" });
 | `openai` | `strict` + every object closed (`additionalProperties: false`) + every property listed in `required`, with originally-optional fields becoming nullable (`type: [..., 'null']`) — the full OpenAI strict function-calling contract. Typed maps (schema-valued `additionalProperties`) are left alone |
 | `gemini` | `strict` + unions collapsed at **every** level (nullable wrappers unwrap; `type: ['string','null']` arrays keep the first non-null type; other unions keep their first variant and document the omitted alternatives) + unsupported `format` values demoted into descriptions (`date-time` is kept)  |
 
+## Schemas that accept no value
+
+A schema no value satisfies (`false` in an OpenAPI 3.1 or 3.2 document, which becomes `{ not: {} }`; OpenAPI 3.0 writes it the same way) is a legal property that can never be sent. The transforms handle it so no target breaks on it:
+
+| Target | `{ not: {} }` |
+| --- | --- |
+| `strict`, `claude` | Left as written |
+| `openai` | An **optional** property of this kind cannot become required-and-nullable. In a closed object (`additionalProperties: false`, no `patternProperties`) it is left out, which forbids it just the same; in an open object it stays optional. A required one stays required, and the object can never be sent, as the document says |
+| `gemini` | A `oneOf`/`anyOf` member that accepts nothing is not an alternative worth keeping: the first member that accepts a value is kept, and the note lists the other omitted ones (not the never member). When no member accepts a value, the first member is kept |
+
+```typescript
+import { applyClientTarget, collapseNestedUnions } from "mcp-from-openapi";
+
+const schema = { type: "object", additionalProperties: false, properties: { id: { type: "string" }, legacy: { not: {} } } };
+applyClientTarget(schema, "openai");
+// { type: 'object', additionalProperties: false, properties: { id: { type: ['string', 'null'] } }, required: ['id'] }
+collapseNestedUnions({ oneOf: [{ not: {} }, { type: "integer" }, { type: "string" }] });
+// { type: 'integer', description: '1 alternative schema variant(s) omitted for client compatibility: type string.' }
+```
+
 Lossy collapses always leave a trace: omitted variants are described in the `description` and root-level variants are preserved under `x-variants`, so no information silently disappears.
 
 ## Standalone use

@@ -15,14 +15,14 @@ pnpm add mcp-from-openapi
 ```
 
 **Requirements:**
-- Node.js >= 20.0.0
+- Node.js >= 22.19.0
 - Peer dependency: `zod@^4.0.0`
 
 ---
 
 ## Loading an OpenAPI Spec
 
-The library supports four loading methods:
+The library supports four loading methods, and reads Swagger 2.0 and OpenAPI 3.0, 3.1 and 3.2 documents through each of them:
 
 ### From a URL
 
@@ -136,7 +136,7 @@ Object.keys(tool.outputSchema.properties); // ['id', 'name']
 
 The references resolve next to the file, whatever the working directory is. If some references are absolute `http` or `https` URLs, keep those protocols in the list: `["http", "https", "file"]`.
 
-Without `file`, the first `generateTools()` (or `validate()`) fails, and the error says what to change:
+Without `file`, the first `generateTools()` fails, and the error says what to change:
 
 ```
 ParseError: Failed to dereference OpenAPI document: Cannot read $ref "./schemas/pet.json"
@@ -146,6 +146,14 @@ ParseError: Failed to dereference OpenAPI document: Cannot read $ref "./schemas/
 ```
 
 `error.context` holds `reference`, `base`, `resolved` and `rule` (here `'protocol'`). See [When a Reference Cannot Be Read](./ssrf-prevention.md#when-a-reference-cannot-be-read) for every rule.
+
+`validate()` reads the same references but does not throw for one it cannot read: it returns the same text as a validation error, with the JSON Pointer of the `$ref` as its `path` when that is known.
+
+```typescript
+await generator.validate();
+// { valid: false, errors: [{ code: 'UNREADABLE_REFERENCE',
+//     message: 'Cannot read $ref "./schemas/pet.json" ... add "file" to refResolution.allowedProtocols to read it' }] }
+```
 
 > **`file` lets the spec read any file the process can read.** Allow it only for documents you control. Do not allow it for a spec that comes from a URL or from a user: see the [Trust Model](./ssrf-prevention.md#trust-model).
 
@@ -181,6 +189,82 @@ LoadError: LoadOptions.documentUri must be an absolute URI, such as https://exam
 It also replaces the URL or file a document was read from, in `fromURL` and `fromFile`. Without it, a document passed as a string or an object has no location: its relative references resolve against the process working directory, as in earlier releases.
 
 A 3.2 document can name itself with `$self`. That does not move where its references are read from: they are read next to the file, or from the URL, it was actually loaded from (or from `documentUri`). `$self` is the base only for a string or an object with no `documentUri`. See [The `$self` Field](./ssrf-prevention.md#the-self-field).
+
+---
+
+## Swagger 2.0
+
+A document that declares `swagger: "2.0"` loads like any other. The library validates it with the Swagger 2.0 rules, converts it to OpenAPI 3.0, and generates the tools from the conversion, so the tools, the mapper and `buildHttpRequest` are the ones you get for a 3.0 document:
+
+```typescript
+import { OpenAPIToolGenerator, buildHttpRequest } from 'mcp-from-openapi';
+
+const generator = await OpenAPIToolGenerator.fromJSON({
+  swagger: '2.0',
+  info: { title: 'Pets', version: '1.0.0' },
+  host: 'api.example.com',
+  basePath: '/v2',
+  schemes: ['https'],
+  consumes: ['application/json'],
+  produces: ['application/json'],
+  paths: {
+    '/pets': {
+      get: {
+        operationId: 'listPets',
+        parameters: [{ name: 'tags', in: 'query', type: 'array', items: { type: 'string' }, collectionFormat: 'pipes' }],
+        responses: { 200: { description: 'Pets', schema: { type: 'array', items: { $ref: '#/definitions/Pet' } } } },
+      },
+      post: {
+        operationId: 'addPet',
+        parameters: [{ name: 'pet', in: 'body', required: true, schema: { $ref: '#/definitions/Pet' } }],
+        responses: { 201: { description: 'Created', schema: { $ref: '#/definitions/Pet' } } },
+      },
+    },
+  },
+  definitions: {
+    Pet: {
+      type: 'object',
+      required: ['name'],
+      properties: { name: { type: 'string' }, tag: { type: 'string', 'x-nullable': true } },
+    },
+  },
+});
+
+generator.getSpecVersion().family; // '2.0' (the declared version, before and after the conversion)
+
+const tools = await generator.generateTools();
+tools.map((t) => [t.name, t.metadata.method, t.metadata.servers[0].url]);
+// [['listPets', 'get', 'https://api.example.com/v2'], ['addPet', 'post', 'https://api.example.com/v2']]
+
+buildHttpRequest(tools[0], { tags: ['cat', 'dog'] }).url;
+// 'https://api.example.com/v2/pets?tags=cat%7Cdog'
+buildHttpRequest(tools[1], { name: 'Rex' }).body; // '{"name":"Rex"}'
+
+generator.getDocument().openapi; // '3.0.3': the conversion the tools were generated from
+generator.getDiagnostics(); // []: nothing was lost
+```
+
+What to expect:
+
+- **`getDiagnostics()` tells you what the conversion could not carry over exactly**, with `SWAGGER_*` codes: a `collectionFormat: tsv` (OpenAPI 3.0 has no style for it), a missing `consumes` (`application/json` is assumed), a `type: file` outside a form. See [Swagger 2.0](./openapi-versions.md#swagger-20) for every conversion rule and code.
+- **A body parameter becomes the request body.** An object body is flattened into one input per property; any other body is one input called `body`. A `formData` parameter is a property of the request body (`multipart/form-data` when one is a file).
+- **A document with no `host`** describes an API on the host that serves it, which the library knows only from where it loaded the document: `fromURL`, or `documentUri` (`fromJSON(spec, { documentUri: 'https://api.example.com/swagger.json' })`). Otherwise the server URL is relative (`/v2`), `SWAGGER_RELATIVE_SERVER_URL` is recorded, and `buildHttpRequest` needs a `baseUrl`.
+- **`dereference: false` is refused**: the conversion reads a dereferenced document (`DEREFERENCE_REQUIRED`). To read no other document, use `secureDefaults: true`.
+- **Multi-file Swagger documents** work like multi-file OpenAPI ones (see [Multi-file Specifications](#multi-file-specifications)).
+
+To get the OpenAPI 3.0 document itself, without generating tools, use the converter on a dereferenced document:
+
+```typescript
+import { upgradeSwagger2 } from 'mcp-from-openapi';
+
+const { document, diagnostics } = upgradeSwagger2(
+  { swagger: '2.0', info: { title: 'Pets', version: '1.0.0' }, basePath: '/v2', paths: {} },
+  { documentUri: 'https://api.example.com/swagger.json' },
+);
+document.openapi; // '3.0.3'
+document.servers; // [{ url: 'https://api.example.com/v2' }]
+diagnostics; // [] (what was lost, as for getDiagnostics(); here nothing)
+```
 
 ---
 
@@ -345,7 +429,7 @@ if (result.warnings) {
 
 When the document has a `$ref` that does not start with `#`, `validate()` dereferences it first, under the same `refResolution` rules as generation, and validates the result. So it can read files and make network requests. A reference that cannot be read does not throw: the result is `{ valid: false, errors: [{ code: 'UNREADABLE_REFERENCE', message, path }] }`, where generation throws a `ParseError`. A reference to the document's own URI is made local and reads nothing. See [API Reference](./api-reference.md#instance-methods).
 
-By default, validation runs automatically before the first `generateTools()` / `generateTool()` call, with the rules of the version the document declares (OpenAPI 3.0, 3.1 and 3.2; see [OpenAPI Versions](./openapi-versions.md)). Disable with `validate: false`:
+By default, validation runs automatically before the first `generateTools()` / `generateTool()` call, with the rules of the version the document declares (Swagger 2.0 and OpenAPI 3.0, 3.1 and 3.2; see [OpenAPI Versions](./openapi-versions.md)). Disable with `validate: false`:
 
 ```typescript
 const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
@@ -358,7 +442,7 @@ Whatever the setting, `generator.getDiagnostics()` lists what the library notice
 ## Next Steps
 
 - [Configuration](./configuration.md) -- All LoadOptions and GenerateOptions
-- [OpenAPI Versions](./openapi-versions.md) -- Supported versions, OpenAPI 3.2 features, diagnostics
+- [OpenAPI Versions](./openapi-versions.md) -- Supported versions, Swagger 2.0 conversion, OpenAPI 3.2 features, diagnostics
 - [Parameter Conflicts](./parameter-conflicts.md) -- How automatic conflict resolution works
 - [SSRF Prevention](./ssrf-prevention.md) -- Base URIs, `$self`, which references are read, and the trust model
 - [Security](./security.md) -- Authentication handling

@@ -63,7 +63,7 @@ try {
 
 ### ParseError
 
-Thrown when YAML/JSON parsing fails or when `$ref` dereferencing fails.
+Thrown when YAML/JSON parsing fails, when `fromJSON` cannot copy its input, or when `$ref` dereferencing fails.
 
 ```typescript
 try {
@@ -75,6 +75,8 @@ try {
 }
 ```
 
+`fromJSON(json)` copies the object as JSON, and input that cannot be copied (it contains itself, holds a `BigInt`, or is nested too deeply for `JSON.stringify`) is a `ParseError` too: `Failed to read the JSON document: <why>`, with the original error in `context.originalError`.
+
 Also thrown when an OpenAPI document fails validation (when `validate: true`). Validation runs at the first `generateTools()` or `generateTool()`, not in the factories. The message is `Invalid OpenAPI document: <first error>`, followed by `(and N more; see the error's context.errors)` when there is more than one. The first error can quote the document, so the message cuts it at 512 characters and writes control and bidirectional characters as `\uXXXX`; `context.errors` holds every `ValidationErrorDetail` as the validator produced it (at most 1,000 of each kind, then one `DIAGNOSTICS_TRUNCATED` entry):
 
 ```typescript
@@ -84,13 +86,15 @@ try {
   if (error instanceof ParseError && error.context?.errors) {
     for (const { code, path, message } of error.context.errors) {
       console.error(code, path, message);
-      // e.g. 'INVALID_OPENAPI_VERSION', '/swagger', 'Swagger 2.0 documents are not supported. ...'
+      // e.g. 'INVALID_OPENAPI_VERSION', '/swagger', 'Unsupported version: Swagger "1.2". Expected Swagger 2.0 or OpenAPI 3.0.x, ...'
     }
   }
 }
 ```
 
-A document that declares an unsupported version (Swagger 2.0, another major, a malformed value) fails this way with `INVALID_OPENAPI_VERSION`, or `MISSING_OPENAPI_VERSION` when no version is declared; see [OpenAPI Versions](./openapi-versions.md). The same findings are available without throwing from `generator.validate()` (it throws only for a `$ref` that cannot be read, as below), and what validation only warns about from `generator.getDiagnostics()`.
+A document that declares an unsupported version (another major or minor of Swagger or OpenAPI such as Swagger `1.2`, a malformed value) fails this way with `INVALID_OPENAPI_VERSION`, or `MISSING_OPENAPI_VERSION` when no version is declared; see [OpenAPI Versions](./openapi-versions.md). A Swagger 2.0 document loaded with `dereference: false` makes `generateTools()`, `generateTool()` and `lint()` throw a `ParseError` with `DEREFERENCE_REQUIRED` (path `/swagger`) in `context.errors`, also with `validate: false`: the conversion to OpenAPI 3.0 needs the references resolved. Its message is the finding's own text, without the `Invalid OpenAPI document:` prefix. The same findings are available without throwing from `generator.validate()`, which returns them in `result.errors` and does not throw for a `$ref` it cannot read either (it returns `UNREADABLE_REFERENCE`, as below; it throws only for a document that cannot be copied at all), and what validation only warns about from `generator.getDiagnostics()`.
+
+A Swagger 2.0 document whose conversion to OpenAPI 3.0 would create more than `MAX_CONVERSION_ENTRIES` (1,000,000) media type, encoding, header and form property entries cannot be read: `generateTools()`, `generateTool()` and `lint()` throw a `ParseError` (`Cannot convert the Swagger 2.0 document to OpenAPI 3.0: it needs more than 1000000 ...`) whose `context` is `{ code: 'SWAGGER_CONVERSION_TOO_LARGE', maxEntries: 1000000 }`, and every later call throws the same error. A 2.0 document states a root `consumes` or `produces` list once and applies it to every operation, so the 3.0 form repeats it in each request body and response (a few hundred KB of 2.0 text could otherwise become gigabytes); the limit is reached by a document with tens of thousands of operations that use such lists. The matching `SWAGGER_CONVERSION_TOO_LARGE` diagnostic is in `getDiagnostics()`. See [OpenAPI Versions](./openapi-versions.md#limits).
 
 A failed dereference (`generateTools()`, `generateTool()`, `lint()`, or `validate()`, which returns it instead; see below) is a `ParseError` whose message is `Failed to dereference OpenAPI document: <why>` and whose `context.rule` says why. A `$ref` that cannot be read names the reference, what it was resolved against, the URL or path it became, the rule that refused it and the option that would allow it:
 
@@ -150,7 +154,7 @@ Thrown when tool generation fails for a specific operation.
 
 ### RequestBuildError
 
-Thrown by `buildHttpRequest()` for input it cannot turn into a request: a missing required parameter, a value that cannot be serialized (including one its media type cannot carry, a JSON value that is cyclic or too deep, a lone surrogate, a header value or a cookie value that cannot be sent), a name chosen by the input that the tool reserves for a credential or a sibling parameter, an unresolved path placeholder or server variable, a method that is not an RFC 9110 token or is `CONNECT`, a mapper entry with an unknown `type`, and a whole-query (`wholeQuery`) entry that breaks the OpenAPI 3.2 rules. Its `context` names the parameter or method concerned. See [Request Builder](./request-builder.md#errors).
+Thrown by `buildHttpRequest()` for input it cannot turn into a request: a missing required parameter, a value that cannot be serialized (including one its media type cannot carry, a JSON value that is cyclic or too deep, one that throws while it is read (a getter, a proxy), a lone surrogate, a header value or a cookie value that cannot be sent), a name chosen by the input that the tool reserves for a credential or a sibling parameter, an unresolved path placeholder or server variable, a method that is not an RFC 9110 token or is `CONNECT`, a mapper entry with an unknown `type`, and a whole-query (`wholeQuery`) entry that breaks the OpenAPI 3.2 rules. Its `context` names the parameter or method concerned. See [Request Builder](./request-builder.md#errors).
 
 ### SchemaError
 

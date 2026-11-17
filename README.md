@@ -55,8 +55,8 @@ Now you know exactly how to build the HTTP request.
 
 ## Features
 
-- **OpenAPI 3.0, 3.1 and 3.2** -- Validated with the rules of the version a document declares. From 3.2: the `query` operation and `additionalOperations` methods, `in: querystring` whole-query parameters, `style: cookie`, streamed responses (`itemSchema`), `$self`, and security schemes named by URI; what the library skips or ignores is recorded in `getDiagnostics()` instead of dropped
-- **Built-in Request Builder** -- `buildHttpRequest()` applies the full OpenAPI serialization table (form/deepObject/pipeDelimited queries, label/matrix paths, `content` parameters, OpenAPI 3.2 whole-query (`in: querystring`) and `style: cookie`, multipart, binary, `wholeBody`) so you never hand-write request assembly
+- **Swagger 2.0 and OpenAPI 3.0, 3.1 and 3.2** -- Validated with the rules of the version a document declares. From 3.2: the `query` operation and `additionalOperations` methods, `in: querystring` whole-query parameters, `style: cookie`, streamed responses (`itemSchema`), `$self`, and security schemes named by URI; what the library skips or ignores is recorded in `getDiagnostics()` instead of dropped. A Swagger 2.0 document is converted to OpenAPI 3.0 (`upgradeSwagger2`, also exported) and its tools are generated from the conversion, with what could not be carried over exactly recorded the same way
+- **Built-in Request Builder** -- `buildHttpRequest()` applies the full OpenAPI serialization table (form/deepObject/pipeDelimited queries, label/matrix paths, `content` parameters, per-field Encoding Objects in form and multipart bodies, `allowReserved` that never lets a value add a query pair, OpenAPI 3.2 whole-query (`in: querystring`) and `style: cookie`, multipart, binary, `wholeBody`) so you never hand-write request assembly
 - **Client Compatibility Targets** -- `target: 'claude' | 'openai' | 'gemini' | 'strict'` emits schemas each client actually accepts (inlined refs, closed objects, collapsed unions, demoted formats)
 - **Context-Budget Reports** -- `analyzeToolSet()` estimates the token bill per tool and warns at the thresholds where agent accuracy degrades
 - **Overlays & Lint** -- apply [OpenAPI Overlay](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/curation.md) curation files at load time; `lint()` flags the spec gaps that hurt tool-calling accuracy
@@ -151,7 +151,7 @@ for (const tool of await generator.generateTools({ target: "claude" })) {
 | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
 | [Getting Started](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/getting-started.md)         | Loading specs (multi-file included), generating tools, building requests |
 | [Configuration](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/configuration.md)             | LoadOptions, GenerateOptions, RefResolutionOptions                |
-| [OpenAPI Versions](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/openapi-versions.md)       | Supported versions, OpenAPI 3.2 features, diagnostics, known gaps |
+| [OpenAPI Versions](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/openapi-versions.md)       | Supported versions, Swagger 2.0 conversion, OpenAPI 3.2 features, diagnostics, known gaps |
 | [Parameter Conflicts](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/parameter-conflicts.md) | How conflict detection and resolution works                       |
 | [Request Builder](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/request-builder.md)         | `buildHttpRequest` — full OpenAPI parameter serialization         |
 | [Client Targets](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/client-targets.md)           | Per-client schema dialects (Claude, OpenAI, Gemini)               |
@@ -172,10 +172,11 @@ for (const tool of await generator.generateTools({ target: "claude" })) {
 | [API Reference](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/api-reference.md)             | Complete types, interfaces, and exports                           |
 | [Examples](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/examples.md)                       | MCP server, Zod, filtering, security, and more                    |
 | [Architecture](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/architecture.md)               | System overview, data flow, design patterns                       |
+| [Maintaining OpenAPI Support](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/maintaining-openapi-support.md) | For maintainers: adding a version, moving the pinned official sources |
 
 ## Requirements
 
-- Node.js >= 20.0.0
+- Node.js >= 22.19.0
 - TypeScript >= 5.0 (for TypeScript users)
 - Peer dependency: `zod@^4.0.0`
 

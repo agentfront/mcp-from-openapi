@@ -38,8 +38,9 @@ await fetch(request.url, {
 | Headers         | `simple` serialization, RFC 7230 name check, value check (tab, space, visible ASCII, U+0080 to U+00FF; CR/LF/NUL named as injection)  |
 | Cookies         | Folded `Cookie` header with verbatim values, RFC 6265 name/value validation; `form` (the default) and the OpenAPI 3.2 `cookie` style |
 | Reserved names  | A name the input chooses (a form whole query, an exploded `form` object in the query, an exploded `style: cookie` object) never adds or replaces a credential or a sibling parameter |
-| `allowReserved` | RFC 3986 reserved characters left unencoded in query values                                                                      |
-| Bodies          | JSON (incl. `+json`), `x-www-form-urlencoded` (`null` properties left out), `multipart/form-data` (real `FormData`), raw binary pass-through, text |
+| `allowReserved` | `: / ? @ ! $ ' ( ) * , ;` left as they are in a query value or a form field; `& = + # [ ]` always encoded ([`allowReserved`](#allowreserved)) |
+| Bodies          | JSON (incl. `+json`), `x-www-form-urlencoded` (`null` properties left out), `multipart/form-data` (`FormData`, or a `Blob` when a part needs a header), raw binary pass-through, text |
+| Encoding Objects | Per-field `style`, `explode` and `allowReserved` in a form body, a form whole query and a form `content` parameter; those and `contentType` and `headers` for the parts of a multipart body ([Encoding Objects](#encoding-objects)) |
 | `wholeBody`     | Non-object/union bodies sent as the entire body (never wrapped)                                                                  |
 | Security        | Values applied only when present in `input`; `bearer`/`basic` get prefixes, structured schemes (digest) pass through verbatim    |
 | Methods         | A standard method is sent upper-case (`GET`, `QUERY`); an OpenAPI 3.2 `additionalOperations` method is sent exactly as written in the document (`LINK`, `M-SEARCH`) because HTTP methods are case-sensitive. The method must be an RFC 9110 token, and `CONNECT` is refused                                    |
@@ -56,7 +57,7 @@ interface BuiltHttpRequest {
   queryString?: string; // the query exactly as in `url` after the `?`; only for a non-form whole query
   cookies: Record<string, string>; // one value per cookie name (the first, for an exploded array)
   contentType?: string;
-  body?: unknown; // string | FormData | raw binary | undefined
+  body?: unknown; // string | FormData | Blob (a multipart body the builder wrote) | raw binary | undefined
   rawBody?: unknown; // structured body before serialization
 }
 ```
@@ -64,7 +65,7 @@ interface BuiltHttpRequest {
 Things to know:
 
 - **`url` is authoritative.** Send it as it is. `query` and `queryString` describe it for logging and inspection; re-encoding them yourself can change what the server receives (see [Do not rebuild the query string](#do-not-rebuild-the-query-string)).
-- **Multipart bodies** come back as `FormData` and the `content-type` header is deliberately _not_ set — your HTTP client must add the boundary itself. `contentType` still reports `multipart/form-data` for routing.
+- **Multipart bodies** come back as `FormData` and the `content-type` header is deliberately _not_ set — your HTTP client must add the boundary itself. `contentType` still reports `multipart/form-data` for routing. The exception is a body with a part `FormData` cannot write (a text part with a `Content-Type`, or a part header from an Encoding Object): the builder writes the body itself as a `Blob` and sets `content-type: multipart/form-data; boundary=...` in `headers`, which you send as it is ([Multipart parts](#multipart-parts)).
 - **Binary bodies** (`serialization.binary`) pass through untouched (string, `Uint8Array`, `Blob`, ...); everything else serializes per the content type.
 - **The records are ordinary objects.** `headers`, `query` and `cookies` have `Object.prototype` and every key is an own property, so a parameter named `constructor` or `toString` is a key like any other. Input values are read as own properties too: an inherited member such as `toString` is never a value, and neither is a value held only on a prototype (a class instance's getter).
 
@@ -75,6 +76,43 @@ The tool's first server URL is used as the base, with `{variable}` templates sub
 ## Explode defaults
 
 `explode` follows the OpenAPI table: `true` for `form` (and `deepObject`), `false` for every other style — a `spaceDelimited` array without an explicit `explode` serializes space-joined, not as repeated keys.
+
+## `allowReserved`
+
+`allowReserved: true` on a query parameter, or in the Encoding Object of a form field, keeps the characters OpenAPI calls reserved readable instead of percent-encoding them. It is not a way to send any character raw: a value is user data, so the characters that would change what the receiver reads as the query or the form are always encoded.
+
+| Characters in the value | With `allowReserved: true` |
+| --- | --- |
+| `:` `/` `?` `@` `!` `$` `'` `(` `)` `*` `,` `;` | Left as they are |
+| `&` `=` | Always `%26`, `%3D`: a value cannot end its pair or start another, so it can never add a query parameter (such as a credential) |
+| `+` | Always `%2B`: a form reads a raw `+` as a space |
+| `#` | Always `%23`: a raw one would end the query and start a fragment |
+| `[` `]` | Always `%5B`, `%5D`: not allowed in a query (RFC 3986) |
+| A valid percent-encoded triple (`%41`) | Passes through unchanged |
+| Any other `%` (`50%`, `%zz`) | `%25` |
+| Everything else (space, non-ASCII, ...) | Percent-encoded as always (a space is `%20` in a query and `+` in a form) |
+
+```typescript
+// a query parameter `p` with allowReserved: true, and a query credential `api_key`
+buildHttpRequest(tool, { p: "a/b?c:d@e" }).url; // 'https://api.example.com/items?p=a/b?c:d@e'
+buildHttpRequest(tool, { p: "x&api_key=attacker", key: "real" }).url;
+// 'https://api.example.com/items?p=x%26api_key%3Dattacker&api_key=real'
+buildHttpRequest(tool, { p: "a#b" }).url; // 'https://api.example.com/items?p=a%23b'
+buildHttpRequest(tool, { p: "%41 50%" }).url; // 'https://api.example.com/items?p=%41%2050%25'
+```
+
+Where it applies:
+
+| Destination | Effect of `allowReserved` |
+| --- | --- |
+| A query parameter (any style; each item of an array and each value of an object) | As in the table. With `explode: false` a comma inside an item stays raw and cannot be told from the delimiter |
+| A field of an `application/x-www-form-urlencoded` body, form whole query or form `content` parameter whose Encoding Object sets it | The same characters, with a space as `+` |
+| A `multipart/form-data` part | None: parts are not percent-encoded |
+| A path parameter | None: `/`, `?`, `#` and `%` are always encoded, so a value stays one path segment |
+| A header or a cookie parameter | None: the mapper keeps the flag, the builder does not read it |
+| A parameter defined with `content`, a non-form whole query | None: OpenAPI says it does not apply, and the mapper entry has no `allowReserved` |
+
+Before this release `allowReserved: true` left `& = + # [ ]` raw in a query value and read a percent-encoded triple as text (`%41` was sent as `%2541`), so an input value could add query pairs or cut the query short; see [Changes to existing output](./openapi-versions.md#allowreserved-and-the-query-string).
 
 ## Parameters defined with `content`
 
@@ -155,7 +193,7 @@ An OpenAPI 3.2 parameter `in: querystring` holds the entire query string, serial
 
 | Media type | Query string | `request.query` | `request.queryString` |
 | --- | --- | --- | --- |
-| `application/x-www-form-urlencoded` | The object's properties as `name=value` pairs, as a form body writes them (space as `+`; an array is one pair per item; a nested object is JSON text; a `null` property is left out) | The pairs | absent |
+| `application/x-www-form-urlencoded` | The object's properties as `name=value` pairs, as a form body writes them (space as `+`; an array is one pair per item; a nested object is JSON text; a `null` property is left out), or as the field's Encoding Object says ([Encoding Objects](#encoding-objects)) | The pairs | absent |
 | JSON (`application/json`, `+json`) | The percent-encoded JSON text of the value | `{}` | The encoded text |
 | any other (`text/plain`) | The value percent-encoded | `{}` | The encoded text |
 
@@ -198,7 +236,7 @@ request.queryString; // '%7B%22q%22%3A%22a%20b%26c%22%2C%22limit%22%3A5%7D'
 
 An optional whole-query parameter that is absent adds nothing (no `?`). A value that serializes to an empty string (`''` as `text/plain`, an empty object as a form) gives a `url` without `?`; for a non-form media type `queryString` is then `''`.
 
-A form-urlencoded whole query ignores the Encoding Objects (`serialization.encoding`), as a form body does: the mapper carries them, the builder does not apply them.
+A form-urlencoded whole query applies the media type's Encoding Objects (`serialization.encoding`), field by field, as a form body does: `?ids=1%2C2` for `encoding: { ids: { style: "form", explode: false } }`. See [Encoding Objects](#encoding-objects).
 
 **Query credentials.** A security `apiKey` entry `in: query` is added to a form whole query as one more `name=value` pair, in mapper order. A JSON or other whole query has no pairs to add it to, so a credential value in the input is a `RequestBuildError`: send the credential in a header or a cookie. When the whole-query value is absent, the credential is sent as an ordinary pair. A form whole query may not name a pair after a credential either ([Names the input chooses](#names-the-input-chooses)). The generator warns about the JSON or other case before any call is made (`QUERYSTRING_WITH_QUERY_CREDENTIAL`, one per scheme).
 
@@ -237,29 +275,176 @@ This is correct for every other query (and for a form whole query), where `url` 
 
 ## Form serialization
 
-One serializer writes every `application/x-www-form-urlencoded` object: a form request body, a form whole query and a form `content` parameter, so all three behave alike. It applies the Encoding Object defaults: an array property is one pair per item (each item a primitive), an object property is its JSON text, and any other value is its string form. A property that is `undefined` **or `null`** is left out, as an absent parameter is, because a form has no way to write null (before, a `null` in a form body was sent as the text `null`). A `null` array item is still a `RequestBuildError`. Explicit Encoding Objects (`serialization.encoding`) are not applied.
+One serializer writes every `application/x-www-form-urlencoded` object: a form request body, a form whole query and a form `content` parameter, so all three behave alike. A field without an Encoding Object is written by the Encoding Object defaults: an array property is one pair per item (each item a primitive), an object property is its JSON text, and any other value is its string form. A property that is `undefined` **or `null`** is left out, as an absent parameter is, because a form has no way to write null (before, a `null` in a form body was sent as the text `null`). A `null` array item is still a `RequestBuildError`. A field with an Encoding Object follows it ([below](#encoding-objects)).
 
-Only the form serializers drop `null`. A JSON body keeps it (`{"a":"1","z":null}`), and a `multipart/form-data` part with a `null` value is still sent as the text `null`.
+Only the form serializers drop `null`. A JSON body keeps it (`{"a":"1","z":null}`), and a `multipart/form-data` part without an Encoding Object with a `null` value is still sent as the text `null` (one with an Encoding Object leaves it out, like a form).
 
 ```typescript
 // a form body { a: '1', z: null }
 buildHttpRequest(tool, { a: "1", z: null }).body; // 'a=1'
 ```
 
+## Encoding Objects
+
+The `encoding` map of a form media type gives each field its own serialization. The generator puts it on the mapper (`serialization.encoding`: a flattened body property carries its own field's entry, a whole body, a whole query or a `content` parameter the full map), and `buildHttpRequest` applies it in `application/x-www-form-urlencoded` bodies, form whole queries and form `content` parameters, and in `multipart/form-data` bodies. A field with no entry is written as described above, and a tool without `encoding` produces exactly what it always did. An Encoding Object or a map of the wrong shape (a string, a `style` that is not a string, a `contentType` that names no media type) is a `RequestBuildError`.
+
+**Styled fields.** An Encoding Object that gives `style`, `explode` or `allowReserved` makes its field serialize like a query parameter with the same values ("the behavior follows the same values as `query` parameters, including default values"): `style` is `form` (the default), `spaceDelimited`, `pipeDelimited` or `deepObject`, and `explode` defaults to `true` for `form` and `deepObject`, `false` for the others. Giving only `allowReserved` is enough: an object field then becomes exploded `form` pairs, not JSON text. **`contentType` is ignored for a styled field**, as OpenAPI 3.2 specifies (3.0.4 recommends it).
+
+**Fields by content type.** An Encoding Object with none of the three is serialized by `contentType`, or by the default for the value when it has none: JSON text for an object or array item, the string form of a primitive. An array is one value per item. A `contentType` is read like a `content` parameter's media type: JSON text, a form string, or a primitive as it is (an object under `text/plain` is a `RequestBuildError`). In a multipart body the part also carries that `Content-Type`.
+
+| Encoding of `ids: [1, 2, 3]` and `filter: { a: 1, b: 2 }` | `application/x-www-form-urlencoded` body | `multipart/form-data` parts |
+| --- | --- | --- |
+| none | `ids=1&ids=2&ids=3`, `filter=%7B%22a%22%3A1%2C%22b%22%3A2%7D` | `ids`: one part `[1,2,3]`; `filter`: one part `{"a":1,"b":2}` (both JSON text, no `Content-Type`) |
+| `style: form` (exploded by default) | `ids=1&ids=2&ids=3`, `a=1&b=2` | `ids`: three parts; `a` and `b`: one part each |
+| `style: form`, `explode: false` | `ids=1%2C2%2C3`, `filter=a%2C1%2Cb%2C2` | `ids`: one part `1,2,3`; `filter`: one part `a,1,b,2` |
+| `style: spaceDelimited` | `ids=1+2+3`; an object is comma-joined: `filter=a%2C1%2Cb%2C2` | `ids`: one part `1 2 3` |
+| `style: pipeDelimited` | `ids=1%7C2%7C3`; an object is comma-joined | `ids`: one part `1\|2\|3` |
+| `style: deepObject` | `filter%5Ba%5D=1&filter%5Bb%5D=2`; an array is `ids=1&ids=2&ids=3` | `filter[a]` and `filter[b]`: one part each |
+| `contentType: application/json` | `ids=1&ids=2&ids=3` (each item JSON text: `"a"` for the string `a`), `filter=%7B%22a%22%3A1%2C%22b%22%3A2%7D` | `ids`: three parts and `filter`: one, each with `Content-Type: application/json` |
+| `contentType: text/plain` | `ids=1&ids=2&ids=3`; an object is refused | `ids`: three parts with `Content-Type: text/plain`; an object is refused |
+| `contentType: application/json` and `style: form` | `contentType` is ignored: `a=1&b=2` | `contentType` is ignored: parts `a` and `b`, no `Content-Type` |
+
+Each cell was produced by `buildHttpRequest`. More rules:
+
+- **`deepObject`** writes one pair per property with the bracket name (`filter[a]`; in a form body the brackets are percent-encoded, `filter%5Ba%5D`, in a query they stay readable). A nested object nests the brackets (`deep[a][b]=1`: OpenAPI leaves nested objects to the implementation), and an array property repeats the name (`deep[a][c]=1&deep[a][c]=2`). An array of objects, as the value or under a property, has no form servers agree on (`items[0][key]`, `items[][key]`) and is a `RequestBuildError`; so is an array item that is an object under any other style.
+- **Delimiters.** An array with `explode: false`, `spaceDelimited` or `pipeDelimited` is one value with its items joined by `,`, a space or `|`. In a form body the delimiter is percent-encoded like any other character (`%2C`, `+`, `%7C`; see the known gap in [OpenAPI Versions](./openapi-versions.md#known-gaps)), unless the field sets `allowReserved`, which keeps the comma raw (`ids=1,2,3`). An object under `spaceDelimited` or `pipeDelimited` is comma-joined (`filter=a,1,b,2`), as it is for a query parameter.
+- **`allowReserved`** follows [the table above](#allowreserved) in a form body and form whole query; a multipart part is never percent-encoded.
+- **Names the input chooses.** The names `deepObject` brackets and an exploded object put on the wire come from the input, so they are checked against the other fields of the body, the query pairs of the tool and its credentials like any other ([Names the input chooses](#names-the-input-chooses)): an exploded `meta` object with a property `token` in a form that also has a `token` field is a `RequestBuildError`, in a form body, a form whole query and a multipart body alike.
+- **`null`** is left out of a field that has an Encoding Object, in a multipart body as in a form (a field without one keeps `null` as the text `null` in multipart).
+
+```typescript
+import { OpenAPIToolGenerator, buildHttpRequest } from "mcp-from-openapi";
+
+const generator = await OpenAPIToolGenerator.fromJSON({
+  openapi: "3.1.0",
+  info: { title: "Orders", version: "1" },
+  servers: [{ url: "https://api.example.com" }],
+  paths: {
+    "/orders": {
+      post: {
+        operationId: "createOrder",
+        requestBody: {
+          content: {
+            "application/x-www-form-urlencoded": {
+              schema: {
+                type: "object",
+                properties: {
+                  ids: { type: "array", items: { type: "integer" } },
+                  metadata: { type: "object", properties: { plan: { type: "string" } } },
+                  next: { type: "string" },
+                },
+              },
+              encoding: {
+                ids: { style: "pipeDelimited" },
+                metadata: { style: "deepObject", explode: true },
+                next: { allowReserved: true },
+              },
+            },
+          },
+        },
+        responses: { 200: { description: "ok" } },
+      },
+    },
+  },
+});
+const [tool] = await generator.generateTools();
+
+tool.mapper.find((m) => m.inputKey === "metadata")?.serialization;
+// { contentType: 'application/x-www-form-urlencoded',
+//   encoding: { metadata: { style: 'deepObject', explode: true } } }
+
+buildHttpRequest(tool, { ids: [1, 2, 3], metadata: { plan: "pro" }, next: "/orders?page=2&x=1#top" }).body;
+// 'ids=1%7C2%7C3&metadata%5Bplan%5D=pro&next=/orders?page%3D2%26x%3D1%23top'
+```
+
+### Multipart parts
+
+A `multipart/form-data` field follows its Encoding Object the same way, and a body with parts that need a header is written by the builder:
+
+- **A field without an Encoding Object** is sent as it always was: a `Blob` or `Uint8Array` as a file part, an object or array as one part holding its JSON text, any other value as its string form.
+- **A file part** (a `Blob`, a `File` or bytes) keeps its own type; one that has none takes the `contentType` of its Encoding Object. `contentType` may list several media types (`image/png, image/jpeg`): the first is used. A range such as `image/*` names no one type, so it writes no `Content-Type` and a file part keeps its own.
+- **Part `Content-Type`.** A field with a `contentType` (and no style) writes it on each of its parts. An object (or an object item of an array) with an Encoding Object and no `contentType` gets `Content-Type: application/json`; a primitive gets none (`text/plain` is the multipart default), so an array of primitives is one part per item without a `Content-Type`.
+- **Part `headers`.** A header of the Encoding Object is sent only when its `schema` fixes exactly one value (`const`, or an `enum` with one member that is a string, number or boolean): a Header Object describes a header without giving its value, and the input has no place for one, so a header whose value is open is left out. `Content-Type` and `Content-Disposition` are ignored there (the first has its own field, the second is the builder's). The name and value are checked like any header (RFC 7230 token, no CR or LF, sendable characters). RFC 7578 tells receivers to ignore part headers other than those three; the builder sends the ones the document asks for all the same.
+- **The body.** When any part has a `Content-Type` of its own or a header, `FormData` cannot write it, so the builder writes the body: `request.body` is a `Blob`, `request.headers['content-type']` is `multipart/form-data; boundary=mcp-from-openapi-<random>` and `contentType` still says `multipart/form-data`. Otherwise the body is `FormData` and `content-type` is left for your HTTP client, as before.
+
+```typescript
+const generator = await OpenAPIToolGenerator.fromJSON({
+  openapi: "3.1.0",
+  info: { title: "Uploads", version: "1" },
+  servers: [{ url: "https://api.example.com" }],
+  paths: {
+    "/reports": {
+      post: {
+        operationId: "uploadReport",
+        requestBody: {
+          content: {
+            "multipart/form-data": {
+              schema: {
+                type: "object",
+                properties: {
+                  meta: { type: "object", properties: { title: { type: "string" } } },
+                  file: { type: "string", format: "binary" },
+                  tags: { type: "array", items: { type: "string" } },
+                },
+              },
+              encoding: {
+                meta: { contentType: "application/json", headers: { "X-Version": { schema: { const: 2 } } } },
+                tags: { style: "pipeDelimited" },
+              },
+            },
+          },
+        },
+        responses: { 200: { description: "ok" } },
+      },
+    },
+  },
+});
+const [tool] = await generator.generateTools();
+
+const request = buildHttpRequest(tool, {
+  meta: { title: "Q3" },
+  file: new Blob(["data"], { type: "text/csv" }),
+  tags: ["a", "b"],
+});
+request.body instanceof Blob; // true
+request.headers["content-type"]; // 'multipart/form-data; boundary=mcp-from-openapi-<random>'
+await (request.body as Blob).text();
+// --mcp-from-openapi-<random>
+// Content-Disposition: form-data; name="meta"
+// Content-Type: application/json
+// X-Version: 2
+//
+// {"title":"Q3"}
+// --mcp-from-openapi-<random>
+// Content-Disposition: form-data; name="file"; filename="blob"
+// Content-Type: text/csv
+//
+// data
+// --mcp-from-openapi-<random>
+// Content-Disposition: form-data; name="tags"
+//
+// a|b
+// --mcp-from-openapi-<random>--
+```
+
+(Lines end with CRLF.) Before this release the same call returned a `FormData` with `meta` as a plain text field (`{"title":"Q3"}`, no `Content-Type`, no `X-Version`) and `tags` as `["a","b"]`, and no `content-type` header.
+
 ## Names the input chooses
 
-Three serializations let the **input** decide the names that go on the wire, because an object's property names become the names themselves:
+Five serializations let the **input** decide the names that go on the wire, because an object's property names become the names themselves:
 
 - a form whole query (`in: querystring`, `application/x-www-form-urlencoded`): every property is a query pair;
 - an exploded `form` object in the query (`style: form`, `explode: true`, the default for an object): the parameter's name disappears and each property is a pair;
-- an exploded `style: cookie` object: each property is a cookie.
+- a `style: deepObject` object in the query: each property is a pair with a bracket name (`filter[a]`, nested `filter[a][b]`), and such a name is refused when another query entry is literally named `filter[a]`;
+- an exploded `style: cookie` object: each property is a cookie;
+- a field of a form body, a form whole query or a multipart body whose [Encoding Object](#encoding-objects) explodes an object (`style: form`) or writes `deepObject` brackets (`meta[a]`): each property is a form field.
 
 An input that names a property `api_key` would add a query pair or a cookie of that name, which is how a value chosen by the caller could add or replace a credential (or override a sibling parameter). `buildHttpRequest` refuses such a name with a `RequestBuildError` when another mapper entry in the same location puts that name on the wire:
 
 - **a credential** (a security entry in the query or a cookie), whether or not this call supplies it, because a framework may add the credential after the request is built;
 - **a sibling parameter** (another `query` or `cookie` entry), whether or not it has a value, so one parameter's input cannot override another.
 
-An entry's own name is allowed (the exploded object `filter` may have a property `filter`). Names are compared exactly, as query and cookie names are on the wire (`API_KEY` is not `api_key`). For cookies, two exploded objects that name the same cookie are refused as well, instead of one replacing the other. `context` holds `param`, `inputKey`, `location`, `name` and `reservedBy` (the input key of the entry that holds the name). A `deepObject` query names `filter[...]`, and a JSON whole query has no names, so neither is affected.
+An entry's own name is allowed (the exploded object `filter` may have a property `filter`). Names are compared exactly, as query and cookie names are on the wire (`API_KEY` is not `api_key`). For cookies, two exploded objects that name the same cookie are refused as well, instead of one replacing the other. `context` holds `param`, `inputKey`, `location`, `name` and `reservedBy` (the input key of the entry that holds the name). A `deepObject` query parameter names `filter[...]` and is not checked (a sibling query parameter literally named `filter[a]` would be sent as a second pair), and a JSON whole query has no names. In a form body or multipart body the `deepObject` names are checked too: a field named `meta[a]` next to a `deepObject` field `meta` that has a property `a` is refused.
 
 ```typescript
 // An `apiKey` scheme `key` in the query (named api_key) and an exploded `filter` object in the query
@@ -348,9 +533,10 @@ All failures throw `RequestBuildError` (with a `context` object): missing requir
 - **A whole-query entry that is not allowed** (checked first, whatever the input): `wholeQuery` on an entry that is not a non-security `query` entry, a second whole-query entry, one without a media type, or a whole-query entry next to another non-security `query` entry. `context` holds `param`, `inputKey` and `location` (`conflictsWith` for the last).
 - **A missing or invalid media type**: a whole-query entry whose `serialization.contentType` is missing or is not a non-empty string (reported whatever the input holds), or a `content` entry whose `serialization.contentType` is not a non-empty string (reported when its value is given). `context` holds `param`, `inputKey` and `location`.
 - **A value its media type cannot carry**: an `application/x-www-form-urlencoded` parameter that is not an object, or any other media type given something that is not a string, number, boolean or bigint (`context.contentType` holds the media type); an array item in a form that is not a primitive.
-- **A value that is not JSON**: a cycle, a nesting deeper than 1,000 levels, a JSON text longer than V8's maximum string length, a BigInt, a function, or whatever a throwing `toJSON` raises. `context` holds `param` and `location`.
+- **A value that is not JSON**: a cycle, a nesting deeper than 1,000 levels, a JSON text longer than V8's maximum string length, a BigInt, a function, or whatever a throwing `toJSON`, getter or proxy raises while the value is read (a getter that throws used to escape as its own error; it is a `RequestBuildError` now). `context` holds `param` and `location`.
 - **A credential added to a whole query that has no pairs** (JSON or other media type): `context` holds `param`, `location` and `wholeQuery` (the whole-query parameter's name).
-- **A name the input chooses that the tool reserves**: a form whole query, an exploded form object in the query or an exploded `style: cookie` object that names a credential or a sibling parameter, or two cookie objects naming one cookie (`context` holds `param`, `inputKey`, `location`, `name`, `reservedBy`; see [Names the input chooses](#names-the-input-chooses)).
+- **A name the input chooses that the tool reserves**: a form whole query, an exploded form object in the query, an exploded `style: cookie` object or a form or multipart field with an Encoding Object that names a credential or a sibling parameter or field, or two cookie objects naming one cookie (`context` holds `param`, `inputKey`, `location`, `name`, `reservedBy`; see [Names the input chooses](#names-the-input-chooses)).
+- **An Encoding Object that cannot be applied**: a map or an entry that is not an object, a `style` that is not a string, an `explode` or `allowReserved` that is not a boolean, a `contentType` that names no media type, or `headers` that is not an object (for these, `context` holds `param`, `inputKey`, `location` and `field`); a `deepObject` field that holds an array of objects, or an array item that is an object under any other style; an object under a `contentType` that needs a string (`text/plain`); a part header with an invalid name or value (see [Encoding Objects](#encoding-objects)).
 - **A cookie that cannot be sent**: `style: cookie` with `explode: false` for an array or an object (`context.style` is `cookie`), a cookie name that is not an RFC 6265 token, or a value with a character its kind of cookie cannot carry (including a JSON string or object in a `content` cookie; see [Header and cookie values](#header-and-cookie-values)).
 - **A header that cannot be sent**: a name that is not an RFC 7230 token, CR, LF or NUL in the value, or any other character a header value cannot hold (`context.header`).
 - **A lone surrogate** in a value or name that is percent-encoded or form-encoded (`context` holds `param` and `location`).
