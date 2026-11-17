@@ -497,6 +497,25 @@ export function makePinnedLookup(pinned: ResolvedAddress[]) {
 /** HTTP statuses that must not carry a response body (Fetch spec). */
 const NULL_BODY_STATUS: ReadonlySet<number> = new Set([101, 103, 204, 205, 304]);
 
+/** A reason phrase the Fetch API accepts: tab, space and visible characters */
+const SENDABLE_REASON_PHRASE = /^[\t\x20-\x7e\x80-\xff]*$/;
+
+/** A fetch `Response` for a Node response; a final status outside 200-599 is an error, an unusable reason phrase is dropped */
+function toFetchResponse(response: import('node:http').IncomingMessage, chunks: Buffer[]): Response {
+  const status = response.statusCode as number;
+  if (status < 200 || status > 599) {
+    throw new Error(`The server answered with status ${status}, which is not an HTTP response status`);
+  }
+  const reasonPhrase = response.statusMessage as string;
+  const statusText = SENDABLE_REASON_PHRASE.test(reasonPhrase) ? reasonPhrase : '';
+  const responseHeaders = new Headers();
+  for (const [name, value] of Object.entries(response.headers)) {
+    for (const item of Array.isArray(value) ? value : [value as string]) responseHeaders.append(name, item);
+  }
+  const body = NULL_BODY_STATUS.has(status) ? null : Buffer.concat(chunks);
+  return new Response(body, { status, statusText, headers: responseHeaders });
+}
+
 /**
  * Node transport that pins the connection to the validated address(es) via a
  * custom `lookup`, preserving the original hostname for the `Host` header and
@@ -532,22 +551,20 @@ export function nodePinnedTransport(modules: NodeHttpModules): SsrfTransport {
           chunks.push(chunk);
         });
         response.on('end', () => {
-          const status = response.statusCode as number;
-          const responseHeaders = new Headers();
-          const entries = Object.entries(response.headers) as [string, string | string[]][];
-          for (const [key, value] of entries) {
-            if (Array.isArray(value)) {
-              for (const item of value) responseHeaders.append(key, item);
-            } else {
-              responseHeaders.append(key, value);
-            }
+          try {
+            resolve(toFetchResponse(response, chunks));
+          } catch (error) {
+            reject(error);
           }
-          const body = NULL_BODY_STATUS.has(status) ? null : Buffer.concat(chunks);
-          resolve(new Response(body, { status, statusText: response.statusMessage, headers: responseHeaders }));
         });
         /* c8 ignore next -- defensive: a mid-stream socket error surfaces as a rejection */
         response.on('error', reject);
       });
+      request.on('upgrade', (_response, socket) => {
+        socket.destroy();
+        reject(new Error(`The server at ${url} switched protocols instead of answering the request`));
+      });
+      request.on('close', () => reject(new Error(`The connection to ${url} closed before a response`)));
       request.on('error', reject);
       request.end();
     });
