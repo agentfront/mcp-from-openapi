@@ -121,6 +121,9 @@ export interface SchemaConversionOptions {
    * converted once per path). Unbounded when omitted.
    */
   maxNodes?: number;
+
+  /** A budget several conversions share (all parameters of one tool, all its responses), so their sum stays bounded */
+  sharedBudget?: { nodes: number; readonly maxNodes: number };
 }
 
 /** Structural keywords whose value is a map of subschemas (besides `properties`). */
@@ -175,6 +178,7 @@ export function toJsonSchema(schema: object | boolean, options: SchemaConversion
     maxDepth: normalizeConversionLimit(options.maxDepth, 0),
     maxNodes: normalizeConversionLimit(options.maxNodes, 1),
     nodes: 0,
+    sharedBudget: options.sharedBudget,
     stack: new Map(),
     cache: new Map(),
     cyclic: undefined,
@@ -221,6 +225,7 @@ interface ConversionState {
   readonly maxNodes: number;
   /** Nodes charged so far: one per schema visited, plus one per keyword of each schema converted. */
   nodes: number;
+  readonly sharedBudget: { nodes: number; readonly maxNodes: number } | undefined;
   /** Ancestors on the current path, with their stack index: a revisit is a cycle, cut with `{}`. */
   readonly stack: Map<object, number>;
   /** The latest result for every converted node; reused only when it is valid anywhere. */
@@ -380,11 +385,14 @@ function visitSchema(
 
 /** Charge `cost` nodes against the conversion's budget, throwing once it is exceeded */
 function charge(state: ConversionState, cost: number): void {
-  if ((state.nodes += cost) > state.maxNodes) {
+  const shared = state.sharedBudget;
+  const sharedExceeded = shared !== undefined && (shared.nodes += cost) > shared.maxNodes;
+  if ((state.nodes += cost) > state.maxNodes || sharedExceeded) {
+    const maxNodes = sharedExceeded ? shared.maxNodes : state.maxNodes;
     throw new SchemaError(
-      `Schema conversion exceeded the node budget of ${state.maxNodes} (maxSchemaNodes): shared or recursive ` +
+      `Schema conversion exceeded the node budget of ${maxNodes} (maxSchemaNodes): shared or recursive ` +
         `$refs expand into more schema nodes than allowed. Lower maxSchemaDepth or raise maxSchemaNodes.`,
-      { maxNodes: state.maxNodes },
+      { maxNodes },
     );
   }
 }
@@ -397,7 +405,9 @@ function charge(state: ConversionState, cost: number): void {
  * is rejected before it is walked.
  */
 function queueMembers(members: unknown[], depth: number, slots: unknown[], state: ConversionState): JsonSchema[] {
-  if (state.nodes + members.length > state.maxNodes) charge(state, members.length);
+  const shared = state.sharedBudget;
+  const sharedFull = shared !== undefined && shared.nodes + members.length > shared.maxNodes;
+  if (state.nodes + members.length > state.maxNodes || sharedFull) charge(state, members.length);
   const converted: JsonSchema[] = new Array(members.length);
   let holes = 0;
   for (let i = 0; i < members.length; i++) {
@@ -1715,6 +1725,13 @@ export interface GenerateOptions {
    * @default 25000
    */
   maxSchemaNodes?: number;
+
+  /**
+   * The most schema nodes all generated tools may hold together (input, output and stream item schemas).
+   * Past it generation stops with a `SchemaError`. Unlimited by default; `SECURE_MAX_TOTAL_SCHEMA_NODES`
+   * for a generator loaded with `secureDefaults: true`.
+   */
+  maxTotalSchemaNodes?: number;
 
   /**
    * How the tool description is assembled from the operation:

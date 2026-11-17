@@ -68,7 +68,13 @@ import {
   type QuerystringProblem,
 } from './parameter-resolver';
 import { ResponseBuilder } from './response-builder';
-import { SchemaBuilder, fitSchemaDepth, resolveSchemaLimits } from './schema-builder';
+import {
+  SchemaBuilder,
+  fitSchemaDepth,
+  resolveMaxToolNameLength,
+  resolveMaxTotalSchemaNodes,
+  resolveSchemaLimits,
+} from './schema-builder';
 import {
   extractExtensionOverrides,
   extractExtensionSettings,
@@ -212,6 +218,12 @@ function pathKey(path: string): string {
  * instead of warning.
  */
 const skippedOperations = new WeakSet<object>();
+
+/** All conversions of one tool schema together may charge this many times `maxSchemaNodes`; truncation then cuts the result to it */
+const SHARED_CONVERSION_BUDGET_FACTOR = 4;
+
+/** Errors that end a whole `generateTools` run instead of one tool */
+const runFailures = new WeakSet<object>();
 
 /**
  * Apply the `secureDefaults` load preset: redirects off, external `$ref`
@@ -573,6 +585,19 @@ function orderedReads(): OrderedReads {
       await Promise.all(started);
     },
   };
+}
+
+/** The JSON values in `roots`, counted without recursion */
+function countJsonValues(roots: unknown[]): number {
+  let count = 0;
+  const stack = [...roots];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (value === undefined) continue;
+    count++;
+    if (value !== null && typeof value === 'object') for (const child of Object.values(value)) stack.push(child);
+  }
+  return count;
 }
 
 /** Does the schema tree contain an array without maxItems? Cycle-safe. */
@@ -1908,6 +1933,7 @@ export class OpenAPIToolGenerator {
     const document = this.getDocument();
     const tools: McpOpenAPITool[] = [];
     const usedNames = new Set<string>();
+    const schemaNodes = this.schemaNodeBudget(options);
 
     if (!isSpecObject(document.paths)) {
       return tools;
@@ -1943,7 +1969,7 @@ export class OpenAPIToolGenerator {
           // stable, content-derived suffix — the (method, path) pair is unique
           // per operation, so the suffixed name is deterministic across runs.
           if (usedNames.has(tool.name)) {
-            const maxLength = options.maxToolNameLength ?? DEFAULT_MAX_TOOL_NAME_LENGTH;
+            const maxLength = resolveMaxToolNameLength(options.maxToolNameLength, DEFAULT_MAX_TOOL_NAME_LENGTH);
             // Recheck after renaming: the suffixed name can itself be taken
             // (e.g. an operationId that mimics a suffixed name, or truncated
             // hash-only names under tiny caps). Extending the seed reseeds
@@ -1978,9 +2004,11 @@ export class OpenAPIToolGenerator {
               };
             }
           }
+          schemaNodes.charge(tool);
           usedNames.add(tool.name);
           tools.push(tool);
         } catch (error: unknown) {
+          if (runFailures.has(error as object)) throw error;
           // Skipped on purpose: the reason is already a diagnostic
           if (skippedOperations.has(error as object)) continue;
           /* c8 ignore next */
@@ -2053,7 +2081,29 @@ export class OpenAPIToolGenerator {
     if (!entry) {
       throw new Error(`Operation not found: ${operationLabel(String(method), pathStr)}`);
     }
-    return this.buildToolGuarded(pathStr, pathItem, entry, options);
+    const tool = this.buildToolGuarded(pathStr, pathItem, entry, options);
+    this.schemaNodeBudget(options).charge(tool);
+    return tool;
+  }
+
+  /** Counts the schema nodes of the tools of one run against `maxTotalSchemaNodes` */
+  private schemaNodeBudget(options: GenerateOptions): { charge(tool: McpOpenAPITool): void } {
+    const limit = resolveMaxTotalSchemaNodes(options.maxTotalSchemaNodes, this.options.secureDefaults);
+    let total = 0;
+    return {
+      charge: (tool) => {
+        if (limit === Infinity) return;
+        total += countJsonValues([tool.inputSchema, tool.outputSchema, tool.metadata.responseStream?.itemSchema]);
+        if (total <= limit) return;
+        const error = new SchemaError(
+          `The generated tools hold more than ${limit} schema nodes (maxTotalSchemaNodes); generation stops. ` +
+            'Filter the operations, lower maxSchemaDepth or maxSchemaNodes, or raise maxTotalSchemaNodes.',
+          { maxTotalSchemaNodes: limit },
+        );
+        runFailures.add(error);
+        throw error;
+      },
+    };
   }
 
   /**
@@ -2475,7 +2525,11 @@ export class OpenAPIToolGenerator {
     // truncation cuts at (so work stays bounded by what the output keeps), and
     // both phases share the node budget
     const { maxDepth: maxSchemaDepth, maxNodes: maxSchemaNodes } = resolveSchemaLimits(options);
-    const schemaConversion = (depth: number) => ({ maxDepth: depth, maxNodes: maxSchemaNodes });
+    const schemaConversion = (depth: number) => ({
+      maxDepth: depth,
+      maxNodes: maxSchemaNodes,
+      sharedBudget: { nodes: 0, maxNodes: maxSchemaNodes * SHARED_CONVERSION_BUDGET_FACTOR },
+    });
 
     // Format resolution, then depth truncation (applied last, so the final
     // schemas are bounded). Floor of 1: depth 0 would strip the ROOT
@@ -2906,7 +2960,7 @@ export class OpenAPIToolGenerator {
     // source — operationIds and custom toolNameGenerator output included.
     return normalizeToolName(
       rawName,
-      options.maxToolNameLength ?? DEFAULT_MAX_TOOL_NAME_LENGTH,
+      resolveMaxToolNameLength(options.maxToolNameLength, DEFAULT_MAX_TOOL_NAME_LENGTH),
       `${method} ${path}`,
     );
   }

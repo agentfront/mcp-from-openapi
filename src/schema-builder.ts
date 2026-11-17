@@ -28,6 +28,9 @@ export interface TruncateDepthOptions {
  */
 export const DEFAULT_MAX_SCHEMA_NODES = 25_000;
 
+/** The `maxTotalSchemaNodes` of a generator loaded with `secureDefaults: true` */
+export const SECURE_MAX_TOTAL_SCHEMA_NODES = 10_000_000;
+
 /**
  * Guard a depth bound: NaN/Infinity would disable truncation (`depth >= NaN`
  * is always false) and hang on circular graphs; fractional depths floor.
@@ -51,12 +54,23 @@ export function resolveSchemaLimits(options: { maxSchemaDepth?: number; maxSchem
   return {
     maxDepth: normalizeDepthBound(Math.max(1, options.maxSchemaDepth ?? 10)),
     maxNodes:
-      nodes === undefined || Number.isNaN(nodes)
+      typeof nodes !== 'number' || Number.isNaN(nodes)
         ? DEFAULT_MAX_SCHEMA_NODES
         : nodes === Infinity
           ? Infinity
           : Math.max(1, Math.floor(nodes)),
   };
+}
+
+/** The `maxTotalSchemaNodes` of a run: the option when it is a positive number, else the `secureDefaults` value or no limit */
+export function resolveMaxTotalSchemaNodes(maxTotalSchemaNodes: unknown, secureDefaults: boolean): number {
+  if (typeof maxTotalSchemaNodes === 'number' && maxTotalSchemaNodes > 0) return maxTotalSchemaNodes;
+  return maxTotalSchemaNodes === undefined && secureDefaults ? SECURE_MAX_TOTAL_SCHEMA_NODES : Infinity;
+}
+
+/** The `maxToolNameLength` of a run: the option when it is a number of at least 1, else the default */
+export function resolveMaxToolNameLength(maxToolNameLength: unknown, defaultLength: number): number {
+  return typeof maxToolNameLength === 'number' && maxToolNameLength >= 1 ? maxToolNameLength : defaultLength;
 }
 
 /** Whether `error` is a node-budget failure (`maxSchemaNodes`), which a smaller depth may avoid */
