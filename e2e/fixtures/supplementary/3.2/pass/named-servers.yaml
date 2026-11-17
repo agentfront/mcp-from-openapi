@@ -1,0 +1,31 @@
+# Servers with a unique `name` (OpenAPI 3.2), next to one without.
+openapi: 3.2.0
+info:
+  title: Status
+  version: 1.0.0
+servers:
+  - url: https://api.example.com/v2
+    name: production
+    description: The live API
+  - url: https://{region}.staging.example.com
+    name: staging
+    variables:
+      region:
+        default: eu
+        enum: [eu, us]
+  - url: https://localhost:8443
+paths:
+  /status:
+    get:
+      operationId: getStatus
+      summary: Service status
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  up:
+                    type: boolean

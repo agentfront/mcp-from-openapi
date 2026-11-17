@@ -1,0 +1,68 @@
+# One response offering several streamed media types (each with `itemSchema`), and a JSON array as well.
+#  - `exportEvents` lists the event stream before JSON Lines.
+#  - `exportPrices` lists JSON Lines before the event stream.
+#  - `exportTicks` lists two vendor media types, neither of them a known sequential type.
+openapi: 3.2.0
+info:
+  title: Price export
+  version: 1.0.0
+servers:
+  - url: https://prices.example.com
+paths:
+  /events/export:
+    get:
+      operationId: exportEvents
+      summary: Export the events
+      responses:
+        '200':
+          description: The events
+          content:
+            text/event-stream:
+              itemSchema:
+                $ref: '#/components/schemas/PriceTick'
+            application/jsonl:
+              itemSchema:
+                $ref: '#/components/schemas/PriceTick'
+  /prices/export:
+    get:
+      operationId: exportPrices
+      summary: Export the price history
+      responses:
+        '200':
+          description: The history
+          content:
+            application/jsonl:
+              itemSchema:
+                $ref: '#/components/schemas/PriceTick'
+            text/event-stream:
+              itemSchema:
+                $ref: '#/components/schemas/PriceTick'
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PriceTick'
+  /ticks/export:
+    get:
+      operationId: exportTicks
+      summary: Export the ticks
+      responses:
+        '200':
+          description: The ticks
+          content:
+            application/vnd.example.tick-stream+json:
+              itemSchema:
+                $ref: '#/components/schemas/PriceTick'
+            application/vnd.example.tick-batch+json:
+              itemSchema:
+                $ref: '#/components/schemas/PriceTick'
+components:
+  schemas:
+    PriceTick:
+      type: object
+      required: [symbol, price]
+      properties:
+        symbol:
+          type: string
+        price:
+          type: number

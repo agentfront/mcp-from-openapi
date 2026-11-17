@@ -1,0 +1,53 @@
+# One operation whose whole query string is a JSON value (`in: querystring`), next to a path and a header parameter.
+openapi: 3.2.0
+info:
+  title: Feature service
+  version: 2.3.0
+servers:
+  - url: https://features.example.com
+paths:
+  /tenants/{tenant}/features:
+    get:
+      operationId: listFeatures
+      summary: List the map features of a tenant inside a bounding box
+      parameters:
+        - name: tenant
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: X-Request-Id
+          in: header
+          schema:
+            type: string
+            format: uuid
+        - name: geo
+          in: querystring
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bbox]
+                properties:
+                  bbox:
+                    type: array
+                    minItems: 4
+                    maxItems: 4
+                    items:
+                      type: number
+                  kinds:
+                    type: array
+                    items:
+                      type: string
+      responses:
+        '200':
+          description: The features
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  features:
+                    type: array
+                    items:
+                      type: object

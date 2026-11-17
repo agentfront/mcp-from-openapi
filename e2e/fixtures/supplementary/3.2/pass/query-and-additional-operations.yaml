@@ -1,0 +1,94 @@
+# The OpenAPI 3.2 `query` operation and `additionalOperations`, written in an order the generator changes:
+# the paths are not alphabetical, `post` comes before `get`, and PURGE comes before LINK.
+openapi: 3.2.0
+info:
+  title: Documents
+  version: 1.0.0
+servers:
+  - url: https://docs.example.com
+paths:
+  /documents/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    additionalOperations:
+      PURGE:
+        operationId: purgeDocument
+        summary: Drop the cached copies of a document
+        responses:
+          '204':
+            description: Purged
+      LINK:
+        operationId: linkDocument
+        summary: Link a document to another resource
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  target:
+                    type: string
+        responses:
+          '204':
+            description: Linked
+    query:
+      operationId: queryDocument
+      summary: Search inside a document, with the search in the body
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+      responses:
+        '200':
+          description: The matches
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+    get:
+      operationId: getDocument
+      summary: Read a document
+      responses:
+        '200':
+          description: The document
+          content:
+            application/json:
+              schema:
+                type: object
+  /collections:
+    post:
+      operationId: createCollection
+      summary: Create a collection
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+      responses:
+        '201':
+          description: Created
+    get:
+      operationId: listCollections
+      summary: List the collections
+      responses:
+        '200':
+          description: The collections
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object

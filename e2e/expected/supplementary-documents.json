@@ -1,0 +1,245 @@
+{
+  "tools": {
+    "3.0": {
+      "parameter-content": [
+        [
+          "listReports",
+          "get",
+          "/reports",
+          true,
+          {"parameterContentTypes": {"query:filter": "application/json", "header:X-Client-Info": "application/json"}}
+        ]
+      ],
+      "parameter-override": [
+        [
+          "getLedger",
+          "get",
+          "/accounts/{accountId}/ledger",
+          true,
+          {"parameterContentTypes": {"query:filter": "application/json", "query:Page": "application/json"}}
+        ]
+      ]
+    },
+    "3.1": {
+      "parameter-content": [
+        [
+          "listReports",
+          "get",
+          "/reports",
+          true,
+          {"parameterContentTypes": {"query:filter": "application/json", "header:X-Client-Info": "application/json"}}
+        ]
+      ],
+      "parameter-override": [
+        [
+          "getLedger",
+          "get",
+          "/accounts/{accountId}/ledger",
+          true,
+          {"parameterContentTypes": {"query:filter": "application/json", "query:Page": "application/json"}}
+        ]
+      ]
+    },
+    "3.2": {
+      "cookie-style": [["getPreferences", "get", "/preferences", true]],
+      "data-value-examples": [["createPet", "post", "/pets", false], ["getPet", "get", "/pets/{petId}", true]],
+      "event-stream": [["streamOrderEvents", "get", "/orders/events", true, {"responseStream": "text/event-stream"}]],
+      "jsonl-stream": [["tailLogs", "get", "/logs", true, {"responseStream": "application/jsonl"}]],
+      "multi-media-response": [["getPrices", "get", "/prices", true, {"responseStream": "text/event-stream"}]],
+      "named-servers": [["getStatus", "get", "/status", true, {"serverNames": ["production", "staging"]}]],
+      "parameter-content": [
+        [
+          "getReport",
+          "get",
+          "/reports/{selector}",
+          true,
+          {
+            "parameterContentTypes": {
+              "path:selector": "text/plain",
+              "query:filter": "application/json",
+              "header:X-Report-Options": "application/json",
+              "header:X-Note": "text/plain",
+              "cookie:locale-hint": "text/plain",
+              "header:X-Context": "application/json"
+            }
+          }
+        ]
+      ],
+      "parameter-override": [
+        [
+          "getLedger",
+          "get",
+          "/accounts/{accountId}/ledger",
+          true,
+          {"parameterContentTypes": {"query:filter": "application/json", "query:Page": "application/json"}}
+        ]
+      ],
+      "query-and-additional-operations": [
+        ["listCollections", "get", "/collections", true],
+        ["createCollection", "post", "/collections", false],
+        ["getDocument", "get", "/documents/{id}", true],
+        ["queryDocument", "query", "/documents/{id}", true],
+        ["linkDocument", "LINK", "/documents/{id}", false],
+        ["purgeDocument", "PURGE", "/documents/{id}", false]
+      ],
+      "querystring-form": [
+        [
+          "searchPets",
+          "get",
+          "/pets/search",
+          true,
+          {"wholeQuery": {"key": "criteria", "contentType": "application/x-www-form-urlencoded"}}
+        ]
+      ],
+      "querystring-json": [
+        [
+          "listFeatures",
+          "get",
+          "/tenants/{tenant}/features",
+          true,
+          {"wholeQuery": {"key": "geo", "contentType": "application/json"}}
+        ]
+      ],
+      "response-summary": [["getHealth", "get", "/health", true]],
+      "stream-media-types": [
+        ["exportEvents", "get", "/events/export", true, {"responseStream": "text/event-stream"}],
+        ["exportPrices", "get", "/prices/export", true, {"responseStream": "application/jsonl"}],
+        ["exportTicks", "get", "/ticks/export", true, {"responseStream": "application/vnd.example.tick-stream+json"}]
+      ],
+      "cookie-json-content": [
+        [
+          "getVisitor",
+          "get",
+          "/visitor",
+          true,
+          {
+            "parameterContentTypes": {
+              "cookie:session-options": "application/json",
+              "cookie:visit-count": "application/json",
+              "cookie:banner-seen": "application/json"
+            }
+          }
+        ]
+      ],
+      "security-query-credential": [
+        [
+          "searchForm",
+          "get",
+          "/v1/search-form",
+          true,
+          {"wholeQuery": {"key": "criteria", "contentType": "application/x-www-form-urlencoded"}}
+        ],
+        [
+          "searchJson",
+          "get",
+          "/v1/search-json",
+          true,
+          {"wholeQuery": {"key": "criteria", "contentType": "application/json"}}
+        ],
+        [
+          "searchJsonHeaderKey",
+          "get",
+          "/v1/search-json-header-key",
+          true,
+          {"wholeQuery": {"key": "criteria", "contentType": "application/json"}}
+        ]
+      ]
+    }
+  },
+  "diagnostics": {
+    "3.2": {
+      "cookie-json-content": ["COOKIE_CONTENT_NOT_SENDABLE at /paths/~1visitor/get/parameters/0"],
+      "security-query-credential": ["QUERYSTRING_WITH_QUERY_CREDENTIAL at /paths/~1v1~1search-json/get/parameters/0"]
+    }
+  },
+  "inputTypes": {
+    "3.2": {
+      "parameter-content": {
+        "getReport": {
+          "selector": "string",
+          "filter": "object",
+          "X-Report-Options": "object",
+          "X-Note": "string",
+          "locale-hint": "string",
+          "X-Context": "untyped"
+        }
+      },
+      "parameter-override": {
+        "getLedger": {
+          "filter": "object",
+          "X-Trace-Id": null,
+          "x-trace-id": "string",
+          "Page": "integer",
+          "page": "integer"
+        }
+      }
+    },
+    "3.1": {
+      "parameter-override": {
+        "getLedger": {
+          "filter": "object",
+          "X-Trace-Id": null,
+          "x-trace-id": "string",
+          "Page": "integer",
+          "page": "integer"
+        }
+      }
+    },
+    "3.0": {
+      "parameter-override": {
+        "getLedger": {
+          "filter": "object",
+          "X-Trace-Id": null,
+          "x-trace-id": "string",
+          "Page": "integer",
+          "page": "integer"
+        }
+      }
+    }
+  },
+  "invalid": {
+    "3.1": {
+      "query-and-additional-operations": {
+        "validator": {
+          "valid": true,
+          "findings": [
+            "warning FEATURE_NEWER_THAN_DECLARED_VERSION at /paths/~1documents~1{id}/query",
+            "warning FEATURE_NEWER_THAN_DECLARED_VERSION at /paths/~1documents~1{id}/additionalOperations"
+          ]
+        },
+        "tools": [["getDocument", "get", "/documents/{id}", true]],
+        "diagnostics": [
+          "FEATURE_NEWER_THAN_DECLARED_VERSION at /paths/~1documents~1{id}/query",
+          "FEATURE_NEWER_THAN_DECLARED_VERSION at /paths/~1documents~1{id}/additionalOperations"
+        ]
+      },
+      "querystring-parameter": {
+        "validator": {
+          "valid": true,
+          "findings": ["warning FEATURE_NEWER_THAN_DECLARED_VERSION at /paths/~1pets~1search/get/parameters/0/in"]
+        },
+        "tools": [
+          [
+            "searchPets",
+            "get",
+            "/pets/search",
+            true,
+            {"wholeQuery": {"key": "criteria", "contentType": "application/x-www-form-urlencoded"}}
+          ]
+        ],
+        "diagnostics": []
+      }
+    },
+    "3.2": {
+      "parameter-schema-and-content": {
+        "validator": {
+          "valid": true,
+          "findings": ["warning INVALID_PARAMETER_CONTENT at /paths/~1reports/get/parameters/0"]
+        },
+        "tools": [["listReports", "get", "/reports", true]],
+        "diagnostics": ["INVALID_PARAMETER_CONTENT at /paths/~1reports/get/parameters/0"],
+        "inputTypes": {"listReports": {"filter": "string"}}
+      }
+    }
+  }
+}

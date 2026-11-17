@@ -1,0 +1,46 @@
+# Parameters defined with `content` (one media type) instead of `schema`, in the query string and in a header.
+openapi: 3.1.1
+info:
+  title: Reporting
+  version: 1.0.0
+servers:
+  - url: https://reports.example.com
+paths:
+  /reports:
+    get:
+      operationId: listReports
+      summary: List the reports
+      parameters:
+        - name: filter
+          in: query
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  from:
+                    type: string
+                    format: date
+                  to:
+                    type: string
+                    format: date
+        - name: X-Client-Info
+          in: header
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  app:
+                    type: string
+                  build:
+                    type: integer
+      responses:
+        '200':
+          description: The reports
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object

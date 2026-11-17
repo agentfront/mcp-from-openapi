@@ -1,0 +1,38 @@
+# A JSON Lines response: `itemSchema` describes one line, through a `$ref`.
+openapi: 3.2.0
+info:
+  title: Log tail
+  version: 1.0.0
+servers:
+  - url: https://logs.example.com
+paths:
+  /logs:
+    get:
+      operationId: tailLogs
+      summary: Tail the application log
+      parameters:
+        - name: level
+          in: query
+          schema:
+            type: string
+            enum: [debug, info, warn, error]
+      responses:
+        '200':
+          description: One JSON object per line
+          content:
+            application/jsonl:
+              itemSchema:
+                $ref: '#/components/schemas/LogLine'
+components:
+  schemas:
+    LogLine:
+      type: object
+      required: [at, level, message]
+      properties:
+        at:
+          type: string
+          format: date-time
+        level:
+          type: string
+        message:
+          type: string

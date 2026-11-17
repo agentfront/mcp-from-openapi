@@ -1,0 +1,46 @@
+# Cookie parameters with `style: cookie` (OpenAPI 3.2): an array, an object, and an array with `explode: false`.
+openapi: 3.2.0
+info:
+  title: Preferences
+  version: 1.0.0
+servers:
+  - url: https://prefs.example.com
+paths:
+  /preferences:
+    get:
+      operationId: getPreferences
+      summary: Read the preferences stored for the visitor
+      parameters:
+        - name: colors
+          in: cookie
+          style: cookie
+          schema:
+            type: array
+            items:
+              type: string
+        - name: theme
+          in: cookie
+          style: cookie
+          explode: true
+          schema:
+            type: object
+            properties:
+              mode:
+                type: string
+              density:
+                type: string
+        - name: sizes
+          in: cookie
+          style: cookie
+          explode: false
+          schema:
+            type: array
+            items:
+              type: integer
+      responses:
+        '200':
+          description: The preferences
+          content:
+            application/json:
+              schema:
+                type: object

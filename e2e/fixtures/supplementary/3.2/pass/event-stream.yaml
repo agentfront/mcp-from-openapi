@@ -1,0 +1,35 @@
+# A Server-Sent Events response: `itemSchema` describes one event.
+openapi: 3.2.0
+info:
+  title: Order events
+  version: 1.0.0
+servers:
+  - url: https://orders.example.com
+paths:
+  /orders/events:
+    get:
+      operationId: streamOrderEvents
+      summary: Subscribe to order events
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A stream of order events
+          content:
+            text/event-stream:
+              itemSchema:
+                type: object
+                required: [data]
+                properties:
+                  event:
+                    type: string
+                    enum: [order.created, order.shipped]
+                  id:
+                    type: string
+                  retry:
+                    type: integer
+                  data:
+                    type: string

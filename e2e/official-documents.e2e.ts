@@ -17,7 +17,8 @@
  * 3. our validator accepts it (`generator.validate()`);
  * 4. `generateTools()` completes and returns exactly the pinned tools, in
  *    order, each as `[name, metadata.method, metadata.path,
- *    annotations.readOnlyHint]` (e2e/expected/official-documents.json). It
+ *    annotations.readOnlyHint, facts?]` (e2e/expected/official-documents.json;
+ *    `facts` is the optional fifth element, see `ToolFacts`). It
  *    runs with `validate: false`: validation is layer 3, and a document our
  *    validator rejects still gets its generation checked. The pinned list is
  *    what the document declares under `paths`, written from the document and
@@ -29,10 +30,11 @@
  * 5. that generation reports no diagnostic (`generator.getDiagnostics()`) for
  *    something the library could not process: a parameter in a location it
  *    does not map, a security scheme it cannot resolve, an operation or path
- *    item it ignores, a version it cannot read, diagnostics it had to drop. A
- *    diagnostic code that is neither in `UNPROCESSED_CODES` nor in
- *    `INFORMATIONAL_CODES` is reported too, so a new code has to be classified
- *    here.
+ *    item it ignores, a querystring rule that skips an operation, a parameter it
+ *    drops or a `content` it cannot read, a streamed request body, a version it
+ *    cannot read, diagnostics it had to drop. A diagnostic code that is neither
+ *    in `UNPROCESSED_CODES` nor in `INFORMATIONAL_CODES` is reported too, so a
+ *    new code has to be classified here.
  *
  * Each FAIL document, which OAI's suite requires the schema to reject, must
  * be rejected by the official schema here too (the helper's sanity check),
@@ -61,13 +63,21 @@
  * pin, re-vendor with `node scripts/sync-oas-sources.mjs --update`, then update
  * the literal document counts below and the pinned tools in
  * e2e/expected/official-documents.json (see e2e/fixtures/README.md).
+ *
+ * The official documents leave out constructs the library reads where a tool is
+ * built (`in: querystring`, a parameter defined with `content`, `itemSchema`
+ * in a response, named servers, overrides by name and location, the `query`
+ * operation, ...), so the same checks also run over our own documents under
+ * e2e/fixtures/supplementary (a README there lists them). Each must validate
+ * against the official schema of its version, has no known gap allowed, and has
+ * its tools and facts pinned by hand in e2e/expected/supplementary-documents.json.
  */
 import { readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import * as ts from 'typescript';
 import * as yaml from 'yaml';
-import { OpenAPIToolError, OpenAPIToolGenerator } from '../src';
-import type { LoadOptions } from '../src';
+import { DIAGNOSTIC_CODES, OpenAPIToolError, OpenAPIToolGenerator } from '../src';
+import type { LoadOptions, McpOpenAPITool } from '../src';
 import { fixturePath, loadFixture } from './helpers/fixtures';
 import { validateOasDocument, type OasVersion } from './helpers/oas-validate';
 import { compileVirtual } from './helpers/tsc';
@@ -76,10 +86,18 @@ const repoRoot = join(__dirname, '..');
 
 type Check = 'schema' | 'types' | 'validator' | 'generation' | 'diagnostics' | 'crash';
 
+/**
+ * `official`: the OAI test documents vendored under e2e/fixtures/oas.
+ * `supplementary`: our own, under e2e/fixtures/supplementary.
+ */
+type Corpus = 'official' | 'supplementary';
+
 /** One failure a gap covers: a reported line in full, or a pattern with the exact number of lines it matches. */
 type Failure = string | { pattern: RegExp; count: number };
 
 interface KnownGap {
+  /** The documents' corpus; the official OAI documents unless stated. */
+  corpus?: Corpus;
   version: OasVersion;
   /** `crash` entries list FAIL documents; every other check lists PASS documents. */
   check: Check;
@@ -163,16 +181,80 @@ const VERSIONS: Array<{ version: OasVersion; namespace: 'OAS30' | 'OAS31' | 'OAS
 ];
 
 /**
- * The pinned tools of the PASS documents, `[name, method, path, readOnlyHint]`
- * in generation order. A document not listed declares no operation under
- * `paths` (it holds components, webhooks or nothing) and makes no tool.
+ * What a tool shows of the OpenAPI 3.2 reads: a parameter that is the whole
+ * query string, parameters serialized in a media type, a streamed response, the
+ * names of the servers. Each key is present only when the tool has the fact, so
+ * a tool with none has no `facts`, and that absence is pinned like any other
+ * value.
+ *
+ * At the pinned set no official PASS document has a tool with a fact, in any
+ * version, and the pins say so. The constructs do occur, where no tool reads
+ * them: `in: querystring` and a query parameter with `content` only in the
+ * path-level `parameters` of paths that have no operation
+ * (`parameter-object-examples`: `/user`, and `/user/{username}` in 3.1 and
+ * 3.2), which make no tool; parameters with `content` otherwise only in
+ * `components.parameters` (`style-defaults`), which no operation references;
+ * `itemSchema` only in `components.mediaTypes` (`media-type-examples`,
+ * 3.2), reached from a request body whose chosen media type is
+ * `application/json`, never from a response. The facts are therefore pinned
+ * with positive values on our own documents (e2e/fixtures/supplementary,
+ * checked below the official ones), and an absence pinned on an official one
+ * means the tool does not have the fact.
  */
-type ExpectedTool = [name: string, method: string, path: string, readOnlyHint: boolean];
+interface ToolFacts {
+  /** The mapper entry that IS the whole query string (`wholeQuery`): the parameter's name and its media type. */
+  wholeQuery?: { key: string; contentType: string };
+  /**
+   * Every other path, query, header or cookie entry serialized in a media type
+   * (`serialization.contentType`, set when the parameter is defined with
+   * `content`), by parameter name. Body entries carry one too, and are not facts.
+   */
+  parameterContentTypes?: Record<string, string>;
+  /** The media type of the streamed response (`metadata.responseStream.contentType`). */
+  responseStream?: string;
+  /** The `name` of each server of the tool that has one (`metadata.servers`), in order. */
+  serverNames?: string[];
+}
+
+/**
+ * The pinned tools of the PASS documents, `[name, method, path, readOnlyHint,
+ * facts?]` in generation order. A document not listed declares no operation
+ * under `paths` (it holds components, webhooks or nothing) and makes no tool.
+ */
+type ExpectedTool = [name: string, method: string, path: string, readOnlyHint: boolean, facts?: ToolFacts];
 const EXPECTED_TOOLS = (
   JSON.parse(readFileSync(join(__dirname, 'expected', 'official-documents.json'), 'utf8')) as {
     tools: Record<OasVersion, Record<string, ExpectedTool[]>>;
   }
 ).tools;
+
+/** What is pinned for a supplementary `invalid` document: the validator's verdict, the tools, the diagnostics. */
+interface InvalidExpectation {
+  /** `valid`, and every error and warning written `error|warning CODE at /pointer`, errors first. */
+  validator: { valid: boolean; findings: string[] };
+  tools: ExpectedTool[];
+  /** Each diagnostic generation reports, written `CODE at /pointer`. */
+  diagnostics: string[];
+  /** Input types of a tool's properties, see `SUPPLEMENTARY.inputTypes`. */
+  inputTypes?: Record<string, Record<string, string | null>>;
+}
+
+/**
+ * The pinned tools, diagnostics and verdicts of our own documents
+ * (e2e/fixtures/supplementary). `tools` is read like `EXPECTED_TOOLS`;
+ * `diagnostics` lists, for a `pass` document that is meant to produce some,
+ * each as `CODE at /pointer` (a document not listed produces none).
+ */
+const SUPPLEMENTARY = JSON.parse(readFileSync(join(__dirname, 'expected', 'supplementary-documents.json'), 'utf8')) as {
+  tools: Partial<Record<OasVersion, Record<string, ExpectedTool[]>>>;
+  diagnostics: Partial<Record<OasVersion, Record<string, string[]>>>;
+  /**
+   * The `type` of input properties, for a document where it is what tells a rule from its opposite: by document,
+   * then tool name, then property (the parameter name); `null` says the tool has no such property.
+   */
+  inputTypes: Partial<Record<OasVersion, Record<string, Record<string, Record<string, string | null>>>>>;
+  invalid: Partial<Record<OasVersion, Record<string, InvalidExpectation>>>;
+};
 
 /**
  * What OUR validator says about each official FAIL document, asserted both
@@ -442,6 +524,20 @@ const UNPROCESSED_CODES: ReadonlySet<string> = new Set([
   'UNRESOLVED_SECURITY_SCHEME',
   'INVALID_SECURITY_REQUIREMENT',
   'UNSATISFIABLE_SECURITY',
+  // OpenAPI 3.2 querystring rules: the operation makes no tool (a validation error, seen with `validate: false`)
+  'MULTIPLE_QUERYSTRING_PARAMETERS',
+  'QUERYSTRING_WITH_QUERY_PARAMETERS',
+  'QUERYSTRING_PARAMETER_WITHOUT_CONTENT',
+  // a parameter dropped as a repeat of another; a `content` that is not one media type
+  // (empty: ignored, several: one is picked)
+  'DUPLICATE_PARAMETER',
+  'INVALID_PARAMETER_CONTENT',
+  // a request body that declares only `itemSchema`: the tool takes no body input
+  'UNSUPPORTED_STREAMING_REQUEST_BODY',
+  // the tool is made, but a call with some values cannot be built: a JSON cookie value that holds `"` or `,`, an API key
+  // in the query string next to a whole query string that is not form-encoded
+  'COOKIE_CONTENT_NOT_SENDABLE',
+  'QUERYSTRING_WITH_QUERY_CREDENTIAL',
   // operation walker (src/spec/operations.ts)
   'PATH_ITEM_NOT_OBJECT',
   'OPERATION_NOT_OBJECT',
@@ -467,12 +563,16 @@ const INFORMATIONAL_CODES: ReadonlySet<string> = new Set(['NEWER_OPENAPI_VERSION
 // Known gaps
 // ---------------------------------------------------------------------------
 
-const gapKey = (version: OasVersion, check: Check, document: string): string => `${version}/${check}/${document}`;
+const gapKey = (corpus: Corpus, version: OasVersion, check: Check, document: string): string =>
+  `${corpus}/${version}/${check}/${document}`;
 
-const gapsFor = (version: OasVersion, check: Check, document: string): KnownGap[] =>
+const gapsFor = (corpus: Corpus, version: OasVersion, check: Check, document: string): KnownGap[] =>
   KNOWN_GAPS.filter(
     (gap) =>
-      gap.version === version && gap.check === check && (gap.documents === 'all' || gap.documents.includes(document)),
+      (gap.corpus ?? 'official') === corpus &&
+      gap.version === version &&
+      gap.check === check &&
+      (gap.documents === 'all' || gap.documents.includes(document)),
   );
 
 const describeFailure = (failure: Failure): string =>
@@ -486,8 +586,9 @@ const describeFailure = (failure: Failure): string =>
  * fails the check; a failure an entry lists that did not occur as listed is
  * reported so the entry can be deleted or corrected.
  */
-function expectCheck(version: OasVersion, check: Check, document: string, problems: string[]): void {
-  const entries = gapsFor(version, check, document);
+function expectCheck(ref: DocRef, check: Check, problems: string[]): void {
+  const { corpus, version, name: document } = ref;
+  const entries = gapsFor(corpus, version, check, document);
   const remaining = [...problems];
   const stale: string[] = [];
   const consume = (gap: KnownGap, failure: Failure): void => {
@@ -509,7 +610,7 @@ function expectCheck(version: OasVersion, check: Check, document: string, proble
   expect(remaining).toEqual([]);
   if (stale.length > 0) {
     throw new Error(
-      `${gapKey(version, check, document)} no longer fails exactly as KNOWN_GAPS records: ${stale.join('; ')}. ` +
+      `${gapKey(corpus, version, check, document)} no longer fails exactly as KNOWN_GAPS records: ${stale.join('; ')}. ` +
         `Delete "${document}" or the failure from the entry (or correct it).`,
     );
   }
@@ -519,12 +620,26 @@ function expectCheck(version: OasVersion, check: Check, document: string, proble
 // Documents
 // ---------------------------------------------------------------------------
 
-type Kind = 'pass' | 'fail';
+/**
+ * `pass`: valid against the official schema. `fail`: an official document the
+ * schema rejects. `invalid`: a supplementary document that is deliberately invalid.
+ */
+type Kind = 'pass' | 'fail' | 'invalid';
 type Doc = Record<string, unknown>;
 
-const documentNames = (version: OasVersion, kind: Kind): string[] => {
+/** A document of the story: its corpus, its version, whether it must validate, and its name without `.yaml`. */
+interface DocRef {
+  corpus: Corpus;
+  version: OasVersion;
+  kind: Kind;
+  name: string;
+}
+
+const CORPUS_FOLDERS: Record<Corpus, string> = { official: 'oas/documents', supplementary: 'supplementary' };
+
+const documentNames = (corpus: Corpus, version: OasVersion, kind: Kind): string[] => {
   try {
-    return readdirSync(fixturePath(`oas/documents/${version}/${kind}`))
+    return readdirSync(fixturePath(`${CORPUS_FOLDERS[corpus]}/${version}/${kind}`))
       .filter((file) => file.endsWith('.yaml'))
       .map((file) => file.slice(0, -'.yaml'.length))
       .sort();
@@ -535,8 +650,8 @@ const documentNames = (version: OasVersion, kind: Kind): string[] => {
 };
 
 /** A fresh parse each time: the generator and the validator never see a shared object. */
-const loadDocument = (version: OasVersion, kind: Kind, name: string): Doc =>
-  yaml.parse(loadFixture(`oas/documents/${version}/${kind}/${name}.yaml`)) as Doc;
+const loadDocument = ({ corpus, version, kind, name }: DocRef): Doc =>
+  yaml.parse(loadFixture(`${CORPUS_FOLDERS[corpus]}/${version}/${kind}/${name}.yaml`)) as Doc;
 
 /** Removes every `x-` key at any depth. */
 function stripExtensions(node: unknown): unknown {
@@ -559,17 +674,17 @@ interface TypeCheck {
 }
 
 /** Compiles every PASS document of a version as `const d: <namespace>.OpenAPIObject = <literal>;` in one virtual file. */
-function typeCheckDocuments(version: OasVersion, namespace: string, names: string[]): TypeCheck {
+function typeCheckDocuments(corpus: Corpus, version: OasVersion, namespace: string, names: string[]): TypeCheck {
   let source = `import type { ${namespace} } from '../src/spec';\n`;
   const spans: Array<{ name: string; start: number; end: number }> = [];
   names.forEach((name, index) => {
-    const literal = JSON.stringify(stripExtensions(loadDocument(version, 'pass', name)), null, 2);
+    const literal = JSON.stringify(stripExtensions(loadDocument({ corpus, version, kind: 'pass', name })), null, 2);
     const start = source.length;
     source += `const doc${index}: ${namespace}.OpenAPIObject = ${literal};\n`;
     spans.push({ name, start, end: source.length });
   });
 
-  const diagnostics = compileVirtual(`official-${version}.ts`, source, {
+  const diagnostics = compileVirtual(`${corpus}-${version}.ts`, source, {
     baseDir: __dirname,
     compilerOptions: {
       target: ts.ScriptTarget.ES2022,
@@ -599,8 +714,8 @@ function typeCheckDocuments(version: OasVersion, namespace: string, names: strin
 // Layers 3 and 4: our validator and generator
 // ---------------------------------------------------------------------------
 
-async function validatorProblems(version: OasVersion, name: string): Promise<string[]> {
-  const generator = await OpenAPIToolGenerator.fromJSON(loadDocument(version, 'pass', name), OFFLINE);
+async function validatorProblems(ref: DocRef): Promise<string[]> {
+  const generator = await OpenAPIToolGenerator.fromJSON(loadDocument(ref), OFFLINE);
   const result = await generator.validate();
   return result.valid ? [] : (result.errors ?? []).map((error) => `${error.path ?? '/'}: ${error.message}`);
 }
@@ -620,11 +735,11 @@ async function withWarnings<T>(run: () => Promise<T>): Promise<{ value?: T; erro
   }
 }
 
-/** Generates a PASS document's tools with validation off, keeping the generator's diagnostics. */
-async function generate(version: OasVersion, name: string) {
+/** Generates a document's tools with validation off, keeping the generator's diagnostics. */
+async function generate(ref: DocRef) {
   let generator: OpenAPIToolGenerator | undefined;
   const { value, error, warnings } = await withWarnings(async () => {
-    generator = await OpenAPIToolGenerator.fromJSON(loadDocument(version, 'pass', name), {
+    generator = await OpenAPIToolGenerator.fromJSON(loadDocument(ref), {
       ...OFFLINE,
       validate: false,
     });
@@ -633,31 +748,63 @@ async function generate(version: OasVersion, name: string) {
   return { tools: value, error, warnings, diagnostics: generator?.getDiagnostics() ?? [] };
 }
 
-const describeTool = ([name, method, path, readOnlyHint]: ExpectedTool): string =>
-  `${name} (${method} ${path}, readOnlyHint ${readOnlyHint})`;
+/** `JSON.stringify` with the keys of every object sorted, so two spellings of one value compare equal. */
+const canonical = (value: unknown): string =>
+  JSON.stringify(value, (_key, item: unknown) =>
+    item !== null && typeof item === 'object' && !Array.isArray(item)
+      ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : item,
+  );
 
-/** Generation failures: an error, an operation reported failing, and every difference from the pinned tools. */
-async function generationProblems(version: OasVersion, name: string): Promise<string[]> {
-  const expected = EXPECTED_TOOLS[version][name] ?? [];
-  const { tools, error, warnings } = await generate(version, name);
-  if (error) return [`${error instanceof Error ? error.name : 'thrown'}: ${(error as Error).message}`];
-  const problems = warnings.map((warning) => `warning: ${warning}`);
+/** The facts of a generated tool (see `ToolFacts`); `undefined` when it has none. */
+function toolFacts(tool: McpOpenAPITool): ToolFacts | undefined {
+  const facts: ToolFacts = {};
+  const parameterContentTypes: Record<string, string> = {};
+  for (const entry of tool.mapper) {
+    const contentType = entry.serialization?.contentType;
+    if (entry.wholeQuery) facts.wholeQuery = { key: entry.key, contentType: contentType ?? '' };
+    else if (entry.type !== 'body' && contentType !== undefined) {
+      parameterContentTypes[`${entry.type}:${entry.key}`] = contentType;
+    }
+  }
+  if (Object.keys(parameterContentTypes).length > 0) facts.parameterContentTypes = parameterContentTypes;
+  if (tool.metadata.responseStream) facts.responseStream = tool.metadata.responseStream.contentType;
+  const serverNames = (tool.metadata.servers ?? []).flatMap((server) => (server.name === undefined ? [] : server.name));
+  if (serverNames.length > 0) facts.serverNames = serverNames;
+  return Object.keys(facts).length > 0 ? facts : undefined;
+}
 
-  const actual = tools!.map((tool): ExpectedTool => [
+/** A generated tool as it is pinned: `facts` is left out, not `undefined`, when it has none. */
+function pinnedTool(tool: McpOpenAPITool): ExpectedTool {
+  const facts = toolFacts(tool);
+  const pinned: ExpectedTool = [
     tool.name,
     tool.metadata.method,
     tool.metadata.path,
     tool.annotations?.readOnlyHint as boolean,
-  ]);
-  const key = (tool: ExpectedTool): string => JSON.stringify(tool);
-  const unmatched = actual.map(key);
+  ];
+  if (facts) pinned.push(facts);
+  return pinned;
+}
+
+const describeTool = ([name, method, path, readOnlyHint, facts]: ExpectedTool): string =>
+  `${name} (${method} ${path}, readOnlyHint ${readOnlyHint}${facts ? `, facts ${canonical(facts)}` : ''})`;
+
+/** Generation failures: an error, an operation reported failing, and every difference from the pinned tools. */
+async function generationProblems(ref: DocRef, expected: ExpectedTool[]): Promise<string[]> {
+  const { tools, error, warnings } = await generate(ref);
+  if (error) return [`${error instanceof Error ? error.name : 'thrown'}: ${(error as Error).message}`];
+  const problems = warnings.map((warning) => `warning: ${warning}`);
+
+  const actual = tools!.map(pinnedTool);
+  const unmatched = actual.map(canonical);
   for (const tool of expected) {
-    const index = unmatched.indexOf(key(tool));
+    const index = unmatched.indexOf(canonical(tool));
     if (index < 0) problems.push(`missing tool ${describeTool(tool)}`);
     else unmatched.splice(index, 1);
   }
   for (const unexpected of unmatched) problems.push(`unexpected tool ${describeTool(JSON.parse(unexpected))}`);
-  if (problems.length === warnings.length && JSON.stringify(actual) !== JSON.stringify(expected)) {
+  if (problems.length === warnings.length && canonical(actual) !== canonical(expected)) {
     problems.push(
       `tool order: expected ${expected.map(describeTool).join(', ')}; got ${actual.map(describeTool).join(', ')}`,
     );
@@ -665,16 +812,70 @@ async function generationProblems(version: OasVersion, name: string): Promise<st
   return problems;
 }
 
-/** The diagnostics of generating a valid document that say something was not processed, or are not classified. */
-async function diagnosticProblems(version: OasVersion, name: string): Promise<string[]> {
-  const { diagnostics } = await generate(version, name);
-  return diagnostics
-    .filter(({ code }) => !INFORMATIONAL_CODES.has(code))
-    .map(({ code, path, message }) =>
-      UNPROCESSED_CODES.has(code)
-        ? `${code} at ${path ?? '/'}: ${message}`
-        : `${code} at ${path ?? '/'}: unclassified diagnostic code, add it to UNPROCESSED_CODES or INFORMATIONAL_CODES: ${message}`,
-    );
+/**
+ * The diagnostics of generating a document that say something was not
+ * processed, or are not classified. `expected` lists, as `CODE at /pointer`, the
+ * ones the document is meant to produce (a supplementary document that
+ * exercises a diagnostic): each is then a problem only when it does not occur,
+ * and every other one is a problem as before. An unclassified code is a problem
+ * even when expected.
+ */
+async function diagnosticProblems(ref: DocRef, expected: string[] = []): Promise<string[]> {
+  const { diagnostics } = await generate(ref);
+  const remaining = [...expected];
+  const problems: string[] = [];
+  for (const { code, path, message } of diagnostics.filter(({ code: found }) => !INFORMATIONAL_CODES.has(found))) {
+    const key = `${code} at ${path ?? '/'}`;
+    const index = remaining.indexOf(key);
+    if (index >= 0) remaining.splice(index, 1);
+    if (!UNPROCESSED_CODES.has(code)) {
+      problems.push(
+        `${key}: unclassified diagnostic code, add it to UNPROCESSED_CODES or INFORMATIONAL_CODES: ${message}`,
+      );
+    } else if (index < 0) {
+      problems.push(`${key}: ${message}`);
+    }
+  }
+  for (const missing of remaining) problems.push(`missing diagnostic ${missing}`);
+  return problems;
+}
+
+/** What our validator reports for a document, as `valid` and each finding written `error|warning CODE at /pointer`. */
+async function validatorVerdict(ref: DocRef): Promise<{ valid: boolean; findings: string[] }> {
+  const generator = await OpenAPIToolGenerator.fromJSON(loadDocument(ref), OFFLINE);
+  const result = await generator.validate();
+  const finding = (level: string) => (entry: { code?: string; path?: string }) =>
+    `${level} ${entry.code} at ${entry.path ?? '/'}`;
+  return {
+    valid: result.valid,
+    findings: [...(result.errors ?? []).map(finding('error')), ...(result.warnings ?? []).map(finding('warning'))],
+  };
+}
+
+const describeType = (type: unknown): string => (type === null ? 'no such property' : `type ${JSON.stringify(type)}`);
+
+/** The `type` of each pinned input property that the tools generate differently: `tool.property -> type`. */
+async function inputTypeProblems(
+  ref: DocRef,
+  expected: Record<string, Record<string, string | null>>,
+): Promise<string[]> {
+  const { tools } = await generate(ref);
+  const problems: string[] = [];
+  for (const [toolName, properties] of Object.entries(expected)) {
+    const tool = tools?.find(({ name }) => name === toolName);
+    if (!tool) {
+      problems.push(`no tool ${toolName} to read the input types of`);
+      continue;
+    }
+    for (const [property, type] of Object.entries(properties)) {
+      const schema = (tool.inputSchema as { properties?: Record<string, { type?: unknown }> }).properties?.[property];
+      const found = schema === undefined ? null : (schema.type ?? 'untyped');
+      if (found !== type) {
+        problems.push(`${toolName}.${property}: ${describeType(found)}, expected ${describeType(type)}`);
+      }
+    }
+  }
+  return problems;
 }
 
 // ---------------------------------------------------------------------------
@@ -693,13 +894,13 @@ const describeCrash = (stage: string, error: unknown): string => {
 };
 
 /** Every stage's failure that is not one of the library's own errors. */
-async function crashes(version: OasVersion, name: string): Promise<string[]> {
+async function crashes(ref: DocRef): Promise<string[]> {
   const found: string[] = [];
   const attempt = async (stage: string, run: () => Promise<unknown>): Promise<void> => {
     const { error } = await withWarnings(run);
     if (error !== undefined && !(error instanceof OpenAPIToolError)) found.push(describeCrash(stage, error));
   };
-  const load = (options: LoadOptions) => OpenAPIToolGenerator.fromJSON(loadDocument(version, 'fail', name), options);
+  const load = (options: LoadOptions) => OpenAPIToolGenerator.fromJSON(loadDocument(ref), options);
 
   await attempt('validate()', async () => (await load(OFFLINE)).validate());
   await attempt('generateTools()', async () => (await load(OFFLINE)).generateTools());
@@ -714,12 +915,14 @@ async function crashes(version: OasVersion, name: string): Promise<string[]> {
 // ---------------------------------------------------------------------------
 
 describe.each(VERSIONS)('story: official OpenAPI $version test documents', ({ version, namespace, pass, fail }) => {
-  const passNames = documentNames(version, 'pass');
-  const failNames = documentNames(version, 'fail');
+  const corpus: Corpus = 'official';
+  const passNames = documentNames(corpus, version, 'pass');
+  const failNames = documentNames(corpus, version, 'fail');
+  const ref = (kind: Kind, name: string): DocRef => ({ corpus, version, kind, name });
   let typeCheck: TypeCheck;
 
   beforeAll(() => {
-    typeCheck = typeCheckDocuments(version, namespace, passNames);
+    typeCheck = typeCheckDocuments(corpus, version, namespace, passNames);
   });
 
   it('vendors the pinned set of documents', () => {
@@ -728,10 +931,11 @@ describe.each(VERSIONS)('story: official OpenAPI $version test documents', ({ ve
 
   it('pins tools for existing documents only, and lists known gaps for existing documents only', () => {
     expect(Object.keys(EXPECTED_TOOLS[version]).filter((name) => !passNames.includes(name))).toEqual([]);
-    const unknown = KNOWN_GAPS.filter((gap) => gap.version === version).flatMap((gap) =>
-      gap.documents === 'all'
-        ? []
-        : gap.documents.filter((name) => !(gap.check === 'crash' ? failNames : passNames).includes(name)),
+    const unknown = KNOWN_GAPS.filter((gap) => (gap.corpus ?? 'official') === corpus && gap.version === version).flatMap(
+      (gap) =>
+        gap.documents === 'all'
+          ? []
+          : gap.documents.filter((name) => !(gap.check === 'crash' ? failNames : passNames).includes(name)),
     );
     expect(unknown).toEqual([]);
   });
@@ -749,36 +953,40 @@ describe.each(VERSIONS)('story: official OpenAPI $version test documents', ({ ve
   });
 
   describe.each(passNames)('pass/%s', (name) => {
+    const document = ref('pass', name);
+
     it('validates against the official schema', () => {
-      expectCheck(version, 'schema', name, validateOasDocument(version, loadDocument(version, 'pass', name)).errors);
+      expectCheck(document, 'schema', validateOasDocument(version, loadDocument(document)).errors);
     });
 
     it('type-checks against our types', () => {
-      expectCheck(version, 'types', name, typeCheck.byDocument.get(name)!);
+      expectCheck(document, 'types', typeCheck.byDocument.get(name)!);
     });
 
     it('is accepted by our validator', async () => {
-      expectCheck(version, 'validator', name, await validatorProblems(version, name));
+      expectCheck(document, 'validator', await validatorProblems(document));
     });
 
     it('generates the pinned tools', async () => {
-      expectCheck(version, 'generation', name, await generationProblems(version, name));
+      expectCheck(document, 'generation', await generationProblems(document, EXPECTED_TOOLS[version][name] ?? []));
     });
 
     it('generates without a diagnostic for something it could not process', async () => {
-      expectCheck(version, 'diagnostics', name, await diagnosticProblems(version, name));
+      expectCheck(document, 'diagnostics', await diagnosticProblems(document));
     });
   });
 
   if (failNames.length > 0) {
     describe.each(failNames)('fail/%s', (name) => {
+      const document = ref('fail', name);
+
       it('is rejected by the official schema', () => {
-        expect(validateOasDocument(version, loadDocument(version, 'fail', name)).valid).toBe(false);
+        expect(validateOasDocument(version, loadDocument(document)).valid).toBe(false);
       });
 
       it('is rejected by our validator exactly as recorded', async () => {
-        const verdict = VALIDATOR_VERDICTS[version].find(({ document }) => document === name)!;
-        const generator = await OpenAPIToolGenerator.fromJSON(loadDocument(version, 'fail', name), OFFLINE);
+        const verdict = VALIDATOR_VERDICTS[version].find(({ document: failing }) => failing === name)!;
+        const generator = await OpenAPIToolGenerator.fromJSON(loadDocument(document), OFFLINE);
         const result = await generator.validate();
         expect({ document: name, rejectedByOurValidator: !result.valid }).toEqual({
           document: name,
@@ -788,10 +996,140 @@ describe.each(VERSIONS)('story: official OpenAPI $version test documents', ({ ve
       });
 
       it('never crashes the pipeline', async () => {
-        expectCheck(version, 'crash', name, await crashes(version, name));
+        expectCheck(document, 'crash', await crashes(document));
       });
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Supplementary documents: ours, through the same checks
+// ---------------------------------------------------------------------------
+
+/**
+ * Our own documents, e2e/fixtures/supplementary (see its README): one for each
+ * construct the official ones leave out where a tool is built. Each `pass`
+ * document is held to exactly the five checks of an official PASS document, with
+ * no known gap allowed, and its tools and facts are pinned in
+ * e2e/expected/supplementary-documents.json, written from the document and the
+ * specification before the library's output was compared. An `invalid` document
+ * is deliberately not valid against the official schema of its version (the
+ * schema must reject it, which is asserted; a document that merely failed the
+ * schema by accident would belong in `pass`), so the schema and type checks do
+ * not apply: the library's own verdict, tools and diagnostics are pinned instead.
+ */
+const SUPPLEMENTARY_VERSIONS: Array<{
+  version: OasVersion;
+  namespace: 'OAS30' | 'OAS31' | 'OAS32';
+  pass: number;
+  invalid: number;
+}> = [
+  { version: '3.0', namespace: 'OAS30', pass: 2, invalid: 0 },
+  { version: '3.1', namespace: 'OAS31', pass: 2, invalid: 2 },
+  { version: '3.2', namespace: 'OAS32', pass: 15, invalid: 1 },
+];
+
+describe.each(SUPPLEMENTARY_VERSIONS)(
+  'story: supplementary OpenAPI $version documents',
+  ({ version, namespace, pass, invalid }) => {
+    const corpus: Corpus = 'supplementary';
+    const passNames = documentNames(corpus, version, 'pass');
+    const invalidNames = documentNames(corpus, version, 'invalid');
+    const ref = (kind: Kind, name: string): DocRef => ({ corpus, version, kind, name });
+    const pinnedTools = SUPPLEMENTARY.tools[version] ?? {};
+    const pinnedDiagnostics = SUPPLEMENTARY.diagnostics[version] ?? {};
+    const pinnedInputTypes = SUPPLEMENTARY.inputTypes[version] ?? {};
+    const pinnedInvalid = SUPPLEMENTARY.invalid[version] ?? {};
+    let typeCheck: TypeCheck;
+
+    beforeAll(() => {
+      typeCheck = typeCheckDocuments(corpus, version, namespace, passNames);
+    });
+
+    it('holds the pinned set of documents', () => {
+      expect({ pass: passNames.length, invalid: invalidNames.length }).toEqual({ pass, invalid });
+    });
+
+    it('pins tools and diagnostics for existing documents only, and invalid ones for invalid documents only', () => {
+      expect(Object.keys(pinnedTools).filter((name) => !passNames.includes(name))).toEqual([]);
+      expect(Object.keys(pinnedDiagnostics).filter((name) => !passNames.includes(name))).toEqual([]);
+      expect(Object.keys(pinnedInputTypes).filter((name) => !passNames.includes(name))).toEqual([]);
+      expect(Object.keys(pinnedInvalid).sort()).toEqual(invalidNames);
+      expect(KNOWN_GAPS.filter((gap) => gap.corpus === corpus && gap.version === version)).toEqual([]);
+    });
+
+    it('resolves the spec types the documents are checked against', () => {
+      expect(typeCheck.unattributed).toEqual([]);
+    });
+
+    describe.each(passNames)('pass/%s', (name) => {
+      const document = ref('pass', name);
+
+      it('validates against the official schema', () => {
+        expectCheck(document, 'schema', validateOasDocument(version, loadDocument(document)).errors);
+      });
+
+      it('type-checks against our types', () => {
+        expectCheck(document, 'types', typeCheck.byDocument.get(name)!);
+      });
+
+      it('is accepted by our validator', async () => {
+        expectCheck(document, 'validator', await validatorProblems(document));
+      });
+
+      it('generates the pinned tools', async () => {
+        expectCheck(document, 'generation', await generationProblems(document, pinnedTools[name] ?? []));
+      });
+
+      it('generates exactly the pinned diagnostics', async () => {
+        expectCheck(document, 'diagnostics', await diagnosticProblems(document, pinnedDiagnostics[name] ?? []));
+      });
+
+      it('reads the pinned parameters as the pinned input types', async () => {
+        expectCheck(document, 'generation', await inputTypeProblems(document, pinnedInputTypes[name] ?? {}));
+      });
+    });
+
+    if (invalidNames.length > 0) {
+      describe.each(invalidNames)('invalid/%s', (name) => {
+        const document = ref('invalid', name);
+        const expected = (): InvalidExpectation => pinnedInvalid[name];
+
+        it('is rejected by the official schema', () => {
+          expect(validateOasDocument(version, loadDocument(document)).valid).toBe(false);
+        });
+
+        it('gets the pinned verdict from our validator', async () => {
+          expect(await validatorVerdict(document)).toEqual(expected().validator);
+        });
+
+        it('generates the pinned tools', async () => {
+          expectCheck(document, 'generation', await generationProblems(document, expected().tools));
+        });
+
+        it('generates exactly the pinned diagnostics', async () => {
+          expectCheck(document, 'diagnostics', await diagnosticProblems(document, expected().diagnostics));
+        });
+
+        it('reads the pinned parameters as the pinned input types', async () => {
+          expectCheck(document, 'generation', await inputTypeProblems(document, expected().inputTypes ?? {}));
+        });
+
+        it('never crashes the pipeline', async () => {
+          expectCheck(document, 'crash', await crashes(document));
+        });
+      });
+    }
+  },
+);
+
+describe('story: official OpenAPI documents, diagnostic codes', () => {
+  it('classifies only diagnostic codes the library defines', () => {
+    // A misspelled code would never match a diagnostic, and the document that produces it would fail as unclassified
+    const defined = new Set<string>(Object.values(DIAGNOSTIC_CODES));
+    expect([...UNPROCESSED_CODES, ...INFORMATIONAL_CODES].filter((code) => !defined.has(code))).toEqual([]);
+    expect([...UNPROCESSED_CODES].filter((code) => INFORMATIONAL_CODES.has(code))).toEqual([]);
+  });
 });
 
 describe('story: official OpenAPI documents, the work-in-progress dialect', () => {

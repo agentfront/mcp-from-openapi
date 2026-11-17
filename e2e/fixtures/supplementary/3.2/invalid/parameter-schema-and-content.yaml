@@ -1,0 +1,31 @@
+# DELIBERATELY INVALID: a Parameter Object has `schema` or `content`, never both. The official 3.2 schema
+# rejects the document; the library reads `schema` and warns that `content` is ignored.
+openapi: 3.2.0
+info:
+  title: Reporting
+  version: 1.0.0
+servers:
+  - url: https://reports.example.com
+paths:
+  /reports:
+    get:
+      operationId: listReports
+      summary: List the reports
+      parameters:
+        - name: filter
+          in: query
+          schema:
+            type: string
+          content:
+            application/json:
+              schema:
+                type: object
+      responses:
+        '200':
+          description: The reports
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
