@@ -338,7 +338,7 @@ applyOverlay<T extends object>(document: T, overlay: OverlayDocument): T
 
 ### lintDocument
 
-Agent-readiness lint with severity-ranked findings and fix hints; `generator.lint()` runs it on the overlay-patched, dereferenced document. A Swagger 2.0 document is converted to OpenAPI 3.0 first, so the findings are those of its tools (pass it dereferenced; a `$ref` left in it is not followed). See [Curation](./curation.md).
+Agent-readiness lint with severity-ranked findings and fix hints; `generator.lint()` runs it on the overlay-patched, dereferenced document. A Swagger 2.0 document is converted to OpenAPI 3.0 first, so the findings are those of its tools (pass it dereferenced; a `$ref` left in it is not followed). When that conversion is abandoned at `MAX_CONVERSION_ENTRIES` it returns ONE finding, severity `error`, code `swagger-conversion-too-large`, `path` `''` (a finding about the whole document), instead of throwing or reading as clean; `generator.lint()` throws the generation `ParseError` (`context.code` `SWAGGER_CONVERSION_TOO_LARGE`). See [Curation](./curation.md).
 
 ```typescript
 lintDocument(document: object): LintResult

@@ -70,7 +70,7 @@ toPascalIdentifier('3d.scan'); // "T3dScan"
 | object with `properties` | object type; optionality from `required`; non-identifier keys quoted |
 | bare object | `Record<string, unknown>` (`Record<string, never>` when `additionalProperties: false`) |
 | typed `additionalProperties` / `patternProperties` | `Record<string, T>` (intersected when properties also exist) |
-| boolean schemas | `true` → `unknown`, `false` → `never`; a schema whose `not` is `{}` or `true` (`{ not: {} }` is what `false` converts to and how OpenAPI 3.0 writes "never") → `never`, whatever else it says |
+| boolean schemas | `true` → `unknown`, `false` → `never`; a schema whose `not` is `{}` or `true` (`{ not: {} }` is what `false` converts to and how OpenAPI 3.0 writes "never") → `never`, whatever else it says. At the root of an input or output this includes an object schema (`{ type: 'object', properties: { a: ... }, not: {} }`): the declaration is `type XOutput = never;`, not an `interface`, which cannot be `never`, and its `signature` is `Promise<never>` |
 | `$ref` leftovers | `unknown` (declarations are always self-contained) |
 | cycles / nesting beyond `maxDepth` | `unknown` (during generation the printer depth follows `maxSchemaDepth`, so it never collapses levels the schema still carries; standalone default 8) |
 

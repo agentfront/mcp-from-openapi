@@ -317,6 +317,7 @@ Failed to dereference OpenAPI document: Cannot read $ref "<reference>" [at "<poi
 - Each quoted part is cut at 256 characters and written with control and bidirectional characters escaped, because the document controls all of them, in the message and in `error.context` alike.
 - The `<hint>` appears only when the document has no base URI and the reference is relative.
 - When several references cannot be read, the one named is the first in document order (the entry document depth first, then each referenced document as it is read), whatever order the network or the disk answers in.
+- When any read or parse fails (a refused or unreadable reference, or a referenced document that is neither JSON nor YAML), no new read is started, and the rejection settles only after the reads already started have ended. A failed dereference (the `ParseError` of `generateTools()` or `initialize()`, or the `UNREADABLE_REFERENCE` of `validate()`) therefore leaves no request or file read running, and no further reference is read after it. The cost is time: a failure can wait for a slow read that was already in flight, at most `LoadOptions.timeout` for an HTTP one (a slow `/a.json` of 3 s with `timeout: 800` rejected after 831 ms).
 
 `error.context` holds the same facts, bounded and escaped the same way:
 

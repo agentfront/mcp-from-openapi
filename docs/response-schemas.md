@@ -103,7 +103,7 @@ The preferred response is selected from `preferredStatusCodes` (default `[200, 2
 4. **Any explicit 3xx** response, else the `3XX` range
 5. **The first** response with a schema (`default` only when no other response has one)
 
-An explicit code always wins over a range of its own class. With responses `299` and `2XX` the answer is `299`, although `2XX` covers the preferred `200`: a range is the fallback for the codes the document does not list. The same order chooses the [streamed response](#streaming-responses).
+An explicit code beats a range of its own class only where the rules say so: always for 2xx (rule 2 comes before every range rule) and for a code listed in `preferredStatusCodes` (rule 1); for 3xx only while no range covers a code of `preferredStatusCodes` (rule 3 comes before rule 4); and never for the other classes, where a range covering a code of `preferredStatusCodes` beats an explicit code that is not listed there. With responses `299` and `2XX` the answer is `299`, although `2XX` covers the preferred `200`: a range is the fallback for the codes the document does not list. With `499` and `4XX` and `preferredStatusCodes: [404]` the answer is `4XX`, not `499`: rule 3 finds the range that covers `404` before rule 5 reaches the first response. The same order chooses the [streamed response](#streaming-responses): with the same `499` and `4XX`, both streaming, `metadata.responseStream.statusCode` is `'4XX'` for `[404]` and `499` for the default list.
 
 | Response keys | `preferredStatusCodes` | Chosen (`x-status-code`) |
 | --- | --- | --- |
@@ -114,6 +114,10 @@ An explicit code always wins over a range of its own class. With responses `299`
 | `3XX`, `2XX` | default | `'2XX'` |
 | `2XX`, `4XX` | `[404, 200]` | `'4XX'` (it covers `404`, the first preferred code) |
 | `2XX`, `3XX`, `299` | `[201]` | `299` (rule 2) |
+| `499`, `4XX` | `[404]` | `'4XX'` (rule 3: it covers `404`; the explicit `499` is not preferred) |
+| `499`, `4XX` | default | `499` (rule 5: no range covers a preferred code) |
+| `399`, `3XX` | `[301]` | `'3XX'` (rule 3 comes before rule 4) |
+| `399`, `3XX` | default | `399` (rule 4: the explicit one) |
 | `2xx`, `5xx` | default | `'2XX'` |
 
 Override the preference order:
@@ -274,7 +278,7 @@ tool.metadata.responseHints; // { unboundedArray: true, largeResponseRisk: true,
 
 How the stream is found:
 
-- **Which response.** One with a media type that declares `itemSchema` (a schema object, or a boolean, which becomes `{}`). Of several, the preferred one is chosen as `includeAllResponses: false` chooses an output schema ([Selection Priority](#selection-priority): the `preferredStatusCodes` order, any explicit 2xx, a range covering a preferred code or `2XX`, a 3xx, then the first). A `default` response is used only when no numbered response or range streams. A `2XX` key gives `statusCode: '2XX'`.
+- **Which response.** One with a media type that declares `itemSchema` (a schema object, or a boolean: `true` becomes `{}`, any item, and `false` becomes `{ not: {} }`, no item). Of several, the preferred one is chosen as `includeAllResponses: false` chooses an output schema ([Selection Priority](#selection-priority): the `preferredStatusCodes` order, any explicit 2xx, a range covering a preferred code or `2XX`, a 3xx, then the first). A `default` response is used only when no numbered response or range streams. A `2XX` key gives `statusCode: '2XX'`.
 - **Which media type.** Within that response, the **first one in the document's `content` order that declares `itemSchema`**. There is no preference list for streams. The choice is independent of the media type the output schema comes from, so a response that offers `application/json` (with a `schema`) and `text/event-stream` (with an `itemSchema`) gives both: an `outputSchema` from the first and a `responseStream` from the second, whichever is listed first. Of `text/event-stream` and `application/jsonl` both with `itemSchema`, the one written first is the stream.
 - **Both `schema` and `itemSchema`** on one media type: `outputSchema` comes from `schema` (when that is the media type the output schema is read from) and `responseStream` from `itemSchema`. The output schema is annotated `x-content-type` with its own media type.
 - **Other responses.** A response that has its own schema still goes into `outputSchema`, and the output schema and the stream may come from different responses. A `200` stream with no schema next to a `404` JSON error gives an `outputSchema` of the 404 variant alone (`x-status-code: 404`), because the stream has none: read `responseStream` for the stream.

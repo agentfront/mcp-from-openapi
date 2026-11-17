@@ -246,7 +246,7 @@ When `false`, only the single preferred response is used. It is the first of the
 4. any explicit 3xx code, else the `3XX` range;
 5. the first response with a schema (`default` only when nothing else has one).
 
-An explicit code always wins over a range of its own class: with responses `299` and `2XX` the answer is 299, although `2XX` covers the preferred 200. A range key keeps its name in the output: `x-status-code` is `'2XX'` and `metadata.responseStatusRanges` lists it (`metadata.responseStatusCodes` holds only numbers). See [Response Schemas](./response-schemas.md#selection-priority).
+An explicit code beats a range of its own class for 2xx (rule 2 precedes every range rule), for a code listed in `preferredStatusCodes` (rule 1), and for 3xx while no range covers a code of `preferredStatusCodes`: with responses `299` and `2XX` the answer is 299, although `2XX` covers the preferred 200. In the other classes a range covering a code of `preferredStatusCodes` wins (rule 3): with `499` and `4XX` and `preferredStatusCodes: [404]` the answer is `4XX`. A range key keeps its name in the output: `x-status-code` is `'2XX'` and `metadata.responseStatusRanges` lists it (`metadata.responseStatusCodes` holds only numbers). See [Response Schemas](./response-schemas.md#selection-priority).
 
 A streamed response (OpenAPI 3.2 `itemSchema`) is not part of the union either way: it is reported in `metadata.responseStream`. The response is chosen by the same status code preference (ranges included; its `statusCode` is then `'2XX'`); within it, the stream's media type is the first one with `itemSchema` in document order, independent of the media type the output schema comes from. See [Response Schemas](./response-schemas.md#streaming-responses).
 
