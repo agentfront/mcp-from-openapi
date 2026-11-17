@@ -73,7 +73,16 @@ Workflow `outputs` derive the tool's output schema best-effort: `$statusCode` �
 
 ## Options
 
-`ArazzoGenerateOptions` is the schema-shaping subset of [`GenerateOptions`](./configuration.md): `target`, `maxSchemaDepth`, `maxSchemaNodes`, `maxProperties`, `maxDescriptionLength`, `stripExamples`, `includeExamples`, `resolveFormats`/`formatResolvers`, `preferredStatusCodes`, `includeAllResponses`, `maxToolNameLength`, `includeSecurityInInput`, and `emitTypeSignatures`. They apply to the per-step embedded schemas AND the consolidated workflow schemas, in the same order as `generateTool` (formats → depth truncation → trims → client target). One difference: a workflow schema over `maxSchemaNodes` fails with an `ArazzoError`, where `generateTool` would cut it shallower with a `SCHEMA_DEPTH_REDUCED` warning, since `fromArazzo` returns no diagnostics to report that in (the per-step schemas come from `generateTool`, so they are cut shallower). Operation-filtering options have no meaning here and are not accepted.
+`ArazzoGenerateOptions` is the schema-shaping subset of [`GenerateOptions`](./configuration.md): `target`, `maxSchemaDepth`, `maxSchemaNodes`, `maxProperties`, `maxDescriptionLength`, `stripExamples`, `includeExamples`, `resolveFormats`/`formatResolvers`, `preferredStatusCodes`, `includeAllResponses`, `maxToolNameLength`, `includeSecurityInInput`, and `emitTypeSignatures`. They apply to the per-step embedded schemas AND the consolidated workflow schemas, in the same order as `generateTool` (formats → depth truncation → trims → client target). A workflow's input or output schema over `maxSchemaNodes` at `maxSchemaDepth` is cut at the deepest depth that fits, as `generateTool` cuts an operation's (an output that returns an input is derived from the inputs converted at each depth tried); only when not even depth 1 fits does the workflow fail with an `ArazzoError` (`Failed to build workflow "getPetFlow": its input schema exceeds the node budget of 40 (maxSchemaNodes) even cut at depth 1 ...`).
+
+`fromArazzo` returns only the tools, so `onDiagnostic(diagnostic, source?)` receives its findings once every tool is made (never when it throws): a workflow schema cut shallower (`SCHEMA_DEPTH_REDUCED`, `path` `/workflows/0/inputs` or `/workflows/0/outputs`, no `source`), then the diagnostics of each generator `fromArazzo` created for a raw document in `sources` (`source` is its name, `path` points into that document), a step's tool cut shallower among them. A generator you pass in `sources` keeps its findings in its own `getDiagnostics()`.
+
+```typescript
+const tools = await fromArazzo(doc, {
+  sources: { pets: petstoreDoc },
+  onDiagnostic: (diagnostic, source) => console.warn(source ?? 'arazzo', diagnostic.code, diagnostic.message),
+});
+``` Operation-filtering options have no meaning here and are not accepted.
 
 ## Errors
 

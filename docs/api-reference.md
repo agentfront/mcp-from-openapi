@@ -287,7 +287,7 @@ applyClientTarget(schema: JsonSchema, target: ClientTarget, options?: ClientTarg
 
 ### fromArazzo / parseRuntimeExpression
 
-Convert an Arazzo 1.0 workflow document into consolidated MCP tools (one per workflow, IR on `metadata.workflow`); parse Arazzo runtime expressions standalone. Throws `ArazzoError` with a JSON-Pointer `path`. See [Arazzo Workflows](./arazzo.md).
+Convert an Arazzo 1.0 workflow document into consolidated MCP tools (one per workflow, IR on `metadata.workflow`); parse Arazzo runtime expressions standalone. Throws `ArazzoError` with a JSON-Pointer `path`. `FromArazzoOptions.onDiagnostic(diagnostic, source?)` receives the findings once every tool is made: a workflow schema cut shallower (`SCHEMA_DEPTH_REDUCED`), then the diagnostics of the generators made for raw sources (`source`: the source name). See [Arazzo Workflows](./arazzo.md).
 
 ```typescript
 fromArazzo(document: ArazzoDocument | string, options: FromArazzoOptions): Promise<McpOpenAPITool[]>
@@ -357,7 +357,7 @@ toSdkTool<TSchema>(tool: McpOpenAPITool, wrapper?: SdkSchemaWrapper<TSchema>): [
 
 ### inferAnnotationsFromMethod / extractExtensionOverrides / resolveExtensionEnabled
 
-Annotation inference and `x-mcp` extension family parsing. `extractExtensionOverrides(operation, { maxMetaNodes })` throws a `SchemaError` when the extensions' `meta`, with its `$ref`s resolved, copies more than `maxMetaNodes` values (default `100000`) or nests more than 1,000 levels. See [Annotations & Extensions](./annotations.md).
+Annotation inference and `x-mcp` extension family parsing. `extractExtensionOverrides(operation, { maxMetaNodes })` throws a `SchemaError` when the extensions' `meta`, with its `$ref`s resolved, copies more than `maxMetaNodes` values (default `25000`) or nests more than 1,000 levels. See [Annotations & Extensions](./annotations.md).
 
 ### createSecurityContext
 
@@ -938,7 +938,7 @@ interface GenerateOptions {
   includeDeprecated?: boolean; // default: false
   includeAllResponses?: boolean; // default: true
   maxSchemaDepth?: number; // default: 10 (deeper structures truncated)
-  maxSchemaNodes?: number; // default: 100000 (per schema; Infinity disables)
+  maxSchemaNodes?: number; // default: 25000 (per schema; over it a schema is cut shallower; Infinity disables)
   includeExamples?: boolean; // default: false (parameter/media-type examples)
   includeSecurityInInput?: boolean | string[]; // default: false; array = per-scheme selection
   target?: ClientTarget; // per-client schema dialect transforms

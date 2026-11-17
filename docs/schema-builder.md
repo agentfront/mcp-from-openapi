@@ -207,7 +207,7 @@ SchemaBuilder.truncateDepth(schema, 5);
 SchemaBuilder.truncateDepth(schema, 5, { maxNodes: 10_000 }); // throws SchemaError past 10k nodes
 ```
 
-This powers the `maxSchemaDepth` and `maxSchemaNodes` generate options (defaults `10` and `100000`). The generator does not fail a tool at the first `SchemaError` from it: it cuts that schema at the deepest depth that fits (see [maxSchemaNodes](./configuration.md#maxschemanodes)).
+This powers the `maxSchemaDepth` and `maxSchemaNodes` generate options (defaults `10` and `25000`). The generator does not fail a tool at the first `SchemaError` from it: it cuts that schema at the deepest depth that fits (see [maxSchemaNodes](./configuration.md#maxschemanodes)).
 
 ### simplify
 

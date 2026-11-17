@@ -1413,15 +1413,19 @@ A schema that exceeded the node budget at `maxSchemaDepth` failed its tool with 
 const tools = await generator.generateTools();
 ```
 
-Before: no `getItem` tool, and `console.warn('Failed to generate tool for GET /item:', 'Schema exceeds the node budget of 100000 (maxSchemaNodes) after depth truncation: ...')`.
+Before: no `getItem` tool, and `console.warn('Failed to generate tool for GET /item:', 'Schema exceeds the node budget of 100000 (maxSchemaNodes) after depth truncation: ...')` (the default budget was 100000).
 
 After:
 
 ```typescript
 tools.map((t) => t.name); // ['getItem', ...]
 generator.getDiagnostics()[0].message;
-// 'GET /item: its output schema exceeds the node budget of 100000 (maxSchemaNodes) at maxSchemaDepth 10, so it is cut at depth 6; raise maxSchemaNodes to keep more of it'
+// 'GET /item: its output schema exceeds the node budget of 25000 (maxSchemaNodes) at maxSchemaDepth 10, so it is cut at depth 5; raise maxSchemaNodes to keep more of it'
 ```
+
+### The default `maxSchemaNodes` is 25,000 (it was 100,000)
+
+A schema over the budget used to cost its tool, so the default was set high enough to only stop schemas no client could use. It now costs depth, so the default is set to cut only the outliers: the largest tools of the pinned GitHub and Discord descriptions need 22,232 and 19,225 nodes and stay whole, as does every tool of the 35 public descriptions in the maintainers' survey corpus (`scripts/spec-corpus/`) that load, except Microsoft Graph (811 tools), Stripe (171) and Datadog (2), whose largest tools go from 20 MB, 3 MB and 1.5 MB to 5 MB, 0.9 MB and 1.1 MB. The extension meta, the values a tool copies from the spec and a client target's inlining share the budget and still fail the tool past it: none of those descriptions comes near. `maxSchemaNodes: 100000` gives the earlier tools back (with the shallower cut).
 
 ### A `$ref` inside a schema's `x-` extension is kept as written
 
