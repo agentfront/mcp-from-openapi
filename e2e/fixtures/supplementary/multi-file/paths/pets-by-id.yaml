@@ -1,0 +1,14 @@
+parameters:
+  - $ref: ../parameters/PetId.yaml
+get:
+  operationId: getPet
+  summary: Get a pet
+  responses:
+    '200':
+      description: The pet
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Pet.yaml
+    '404':
+      $ref: ../responses/NotFound.yaml

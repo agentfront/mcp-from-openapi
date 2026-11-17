@@ -166,9 +166,9 @@ const KNOWN_GAPS: KnownGap[] = [
   {
     version: '3.2',
     check: 'diagnostics',
-    category: 'security-scheme-uri',
+    category: 'security-scheme-in-another-document',
     reason:
-      'A Security Requirement key that is a URI (`otherapi#/components/securitySchemes/generic_auth`) is not resolved yet: the requirement is ignored with an UNRESOLVED_SECURITY_SCHEME diagnostic.',
+      'The key `otherapi#/components/securitySchemes/generic_auth` is a URI that names ANOTHER document (a relative reference, so the document `otherapi` next to this one), and by design the schemes of another document are never read, so nothing is fetched for it: the requirement is ignored with an UNRESOLVED_SECURITY_SCHEME diagnostic. A key that names a scheme of THIS document by URI does resolve (the supplementary document `security-scheme-uri`). The story parses documents from text, with no base URI, so the diagnostic says there is none to resolve the reference against; with one it would say the scheme is in another document.',
     failures: [{ pattern: /^UNRESOLVED_SECURITY_SCHEME at \/paths\/~1pets~1\{id\}\/put\/security\/1[/:]/, count: 1 }],
     documents: ['operation-object-example'],
   },
@@ -253,6 +253,12 @@ const SUPPLEMENTARY = JSON.parse(readFileSync(join(__dirname, 'expected', 'suppl
    * then tool name, then property (the parameter name); `null` says the tool has no such property.
    */
   inputTypes: Partial<Record<OasVersion, Record<string, Record<string, Record<string, string | null>>>>>;
+  /**
+   * The security schemes a tool resolves, for a document where it is which scheme a Security Requirement named
+   * that matters (a key that is a URI): by document, then tool name, each scheme as `name:type` of the tool's
+   * security entries (the order is not pinned).
+   */
+  securitySchemes: Partial<Record<OasVersion, Record<string, Record<string, string[]>>>>;
   invalid: Partial<Record<OasVersion, Record<string, InvalidExpectation>>>;
 };
 
@@ -524,6 +530,20 @@ const UNPROCESSED_CODES: ReadonlySet<string> = new Set([
   'UNRESOLVED_SECURITY_SCHEME',
   'INVALID_SECURITY_REQUIREMENT',
   'UNSATISFIABLE_SECURITY',
+  // `$self` (src/base-uri.ts): ignored, so the references of the document resolve as if it were absent
+  // (against the retrieval URI, or the working directory when there is none): not a string or a URI reference
+  // without a fragment, a form the library refuses to use as a base, a relative one with nothing to resolve it against
+  'INVALID_SELF',
+  'REFUSED_SELF',
+  'UNRESOLVABLE_SELF',
+  // the URI the document was retrieved from is past 2,048 characters, so it is not used: its relative references
+  // fail the load. Recorded when the generator is created, from `fromURL` (a long final URL) or `fromFile`; a
+  // document the story parses from text has no retrieval URI to be too long
+  'BASE_URI_TOO_LONG',
+  // a validation error, never a `getDiagnostics()` entry: `validate()` returns it, instead of throwing, for a
+  // reference that cannot be read. Listed so that one that ever appears there is reported, not unclassified;
+  // the story below pins that it is returned and not recorded
+  'UNREADABLE_REFERENCE',
   // OpenAPI 3.2 querystring rules: the operation makes no tool (a validation error, seen with `validate: false`)
   'MULTIPLE_QUERYSTRING_PARAMETERS',
   'QUERYSTRING_WITH_QUERY_PARAMETERS',
@@ -878,6 +898,28 @@ async function inputTypeProblems(
   return problems;
 }
 
+/**
+ * The security schemes each pinned tool resolves, `name:type` of its mapper's security entries. A Security
+ * Requirement key that is a URI is read as a scheme of this document or of another one, so the pin says which
+ * scheme it became (a tool with a wrong scheme, or none, is a difference).
+ */
+async function securityProblems(ref: DocRef, expected: Record<string, string[]>): Promise<string[]> {
+  const { tools } = await generate(ref);
+  const problems: string[] = [];
+  for (const [toolName, schemes] of Object.entries(expected)) {
+    const tool = tools?.find(({ name }) => name === toolName);
+    if (!tool) {
+      problems.push(`no tool ${toolName} to read the security schemes of`);
+      continue;
+    }
+    const found = tool.mapper.flatMap(({ security }) => (security ? [`${security.scheme}:${security.type}`] : []));
+    if (canonical([...found].sort()) !== canonical([...schemes].sort())) {
+      problems.push(`${toolName}: security schemes ${found.join(', ') || 'none'}, expected ${schemes.join(', ') || 'none'}`);
+    }
+  }
+  return problems;
+}
+
 // ---------------------------------------------------------------------------
 // FAIL documents: the pipeline never crashes
 // ---------------------------------------------------------------------------
@@ -1025,8 +1067,8 @@ const SUPPLEMENTARY_VERSIONS: Array<{
   invalid: number;
 }> = [
   { version: '3.0', namespace: 'OAS30', pass: 2, invalid: 0 },
-  { version: '3.1', namespace: 'OAS31', pass: 2, invalid: 2 },
-  { version: '3.2', namespace: 'OAS32', pass: 15, invalid: 1 },
+  { version: '3.1', namespace: 'OAS31', pass: 2, invalid: 3 },
+  { version: '3.2', namespace: 'OAS32', pass: 19, invalid: 2 },
 ];
 
 describe.each(SUPPLEMENTARY_VERSIONS)(
@@ -1039,6 +1081,7 @@ describe.each(SUPPLEMENTARY_VERSIONS)(
     const pinnedTools = SUPPLEMENTARY.tools[version] ?? {};
     const pinnedDiagnostics = SUPPLEMENTARY.diagnostics[version] ?? {};
     const pinnedInputTypes = SUPPLEMENTARY.inputTypes[version] ?? {};
+    const pinnedSecurity = SUPPLEMENTARY.securitySchemes[version] ?? {};
     const pinnedInvalid = SUPPLEMENTARY.invalid[version] ?? {};
     let typeCheck: TypeCheck;
 
@@ -1054,6 +1097,7 @@ describe.each(SUPPLEMENTARY_VERSIONS)(
       expect(Object.keys(pinnedTools).filter((name) => !passNames.includes(name))).toEqual([]);
       expect(Object.keys(pinnedDiagnostics).filter((name) => !passNames.includes(name))).toEqual([]);
       expect(Object.keys(pinnedInputTypes).filter((name) => !passNames.includes(name))).toEqual([]);
+      expect(Object.keys(pinnedSecurity).filter((name) => !passNames.includes(name))).toEqual([]);
       expect(Object.keys(pinnedInvalid).sort()).toEqual(invalidNames);
       expect(KNOWN_GAPS.filter((gap) => gap.corpus === corpus && gap.version === version)).toEqual([]);
     });
@@ -1087,6 +1131,10 @@ describe.each(SUPPLEMENTARY_VERSIONS)(
 
       it('reads the pinned parameters as the pinned input types', async () => {
         expectCheck(document, 'generation', await inputTypeProblems(document, pinnedInputTypes[name] ?? {}));
+      });
+
+      it('resolves the pinned security requirements to the pinned schemes', async () => {
+        expectCheck(document, 'generation', await securityProblems(document, pinnedSecurity[name] ?? {}));
       });
     });
 
@@ -1129,6 +1177,25 @@ describe('story: official OpenAPI documents, diagnostic codes', () => {
     const defined = new Set<string>(Object.values(DIAGNOSTIC_CODES));
     expect([...UNPROCESSED_CODES, ...INFORMATIONAL_CODES].filter((code) => !defined.has(code))).toEqual([]);
     expect([...UNPROCESSED_CODES].filter((code) => INFORMATIONAL_CODES.has(code))).toEqual([]);
+  });
+});
+
+describe('story: official OpenAPI documents, an unreadable reference', () => {
+  // The supplementary `self-uri` document names itself by `$self`: pointing one reference at a schema it does not
+  // have is a reference the library cannot read, whatever `refResolution` allows
+  it('is a validation error that validate() returns, and never a diagnostic', async () => {
+    const document = loadDocument({ corpus: 'supplementary', version: '3.2', kind: 'pass', name: 'self-uri' });
+    const text = JSON.stringify(document).replace('#/components/schemas/PetId', '#/components/schemas/Missing');
+    const generator = await OpenAPIToolGenerator.fromJSON(JSON.parse(text) as object, OFFLINE);
+
+    const result = await generator.validate();
+    expect(result.valid).toBe(false);
+    expect(result.errors?.map(({ code, path }) => [code, path])).toEqual([
+      ['UNREADABLE_REFERENCE', '/paths/~1pets~1{petId}/get/parameters/0/schema'],
+    ]);
+    expect(generator.getDiagnostics().map(({ code }) => code)).not.toContain('UNREADABLE_REFERENCE');
+    // generation throws the same finding, as a ParseError
+    await expect(generator.generateTools()).rejects.toMatchObject({ context: { rule: 'missing-target' } });
   });
 });
 

@@ -1,0 +1,44 @@
+# `$self` (OpenAPI 3.2) is the document's own URI, and a `$ref` that names that URI is the document itself: it is
+# read from the document, never fetched. The story allows no external reference at all, so a parameter whose schema
+# is still a `$ref` here would have no `type`. One reference is written with the whole URI, the other relative to it.
+openapi: 3.2.0
+$self: https://example.com/pets/openapi.yaml
+info:
+  title: Pets
+  version: 1.0.0
+servers:
+  - url: https://api.example.com
+paths:
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      summary: Read a pet
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            $ref: 'https://example.com/pets/openapi.yaml#/components/schemas/PetId'
+        - name: expand
+          in: query
+          schema:
+            $ref: 'openapi.yaml#/components/schemas/Expand'
+      responses:
+        '200':
+          description: The pet
+          content:
+            application/json:
+              schema:
+                $ref: 'https://example.com/pets/openapi.yaml#/components/schemas/Pet'
+components:
+  schemas:
+    PetId:
+      type: integer
+    Expand:
+      type: string
+      enum: [owner]
+    Pet:
+      type: object
+      properties:
+        id:
+          type: integer

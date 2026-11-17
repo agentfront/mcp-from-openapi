@@ -1,0 +1,46 @@
+# Security Requirement keys that are URIs (OpenAPI 3.2). A key that names a scheme of THIS document resolves to it,
+# whether the URI is the document's `$self` or only a fragment. A key that names ANOTHER document is not resolved,
+# because another document's schemes are never read: that alternative is dropped with an UNRESOLVED_SECURITY_SCHEME
+# diagnostic and the operation keeps the alternative that resolves.
+openapi: 3.2.0
+$self: https://example.com/pets/openapi.yaml
+info:
+  title: Pets
+  version: 1.0.0
+servers:
+  - url: https://api.example.com
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    bearerAuth:
+      type: http
+      scheme: bearer
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      summary: List pets
+      security:
+        - 'https://example.com/pets/openapi.yaml#/components/securitySchemes/apiKeyAuth': []
+        - 'https://example.com/other/openapi.yaml#/components/securitySchemes/bearerAuth': []
+      responses:
+        '200':
+          description: The pets
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      summary: Read a pet
+      security:
+        - '#/components/securitySchemes/bearerAuth': []
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: The pet

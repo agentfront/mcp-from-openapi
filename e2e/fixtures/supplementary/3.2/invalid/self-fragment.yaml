@@ -1,0 +1,18 @@
+# DELIBERATELY INVALID: `$self` must be a URI reference without a fragment (the official 3.2 schema requires
+# `^[^#]*$`). The library ignores it, reports INVALID_SELF, and its validator rejects the document; with
+# validation off the tool is generated.
+openapi: 3.2.0
+$self: https://example.com/ping/openapi.yaml#ping
+info:
+  title: Ping
+  version: 1.0.0
+servers:
+  - url: https://api.example.com
+paths:
+  /ping:
+    get:
+      operationId: ping
+      summary: Check that the API answers
+      responses:
+        '200':
+          description: Pong

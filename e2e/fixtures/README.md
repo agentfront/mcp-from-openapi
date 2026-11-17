@@ -117,15 +117,30 @@ To pin a newer iteration, change the entry's `url` (and its `path` only if the l
 
 ## Supplementary documents (`supplementary/`)
 
-Hand-written OpenAPI documents, not vendored: they have no upstream, no pin and no entry in `oas/sources.json`, and `scripts/sync-oas-sources.mjs` never looks at the folder. They exist because the official test documents leave out, where a tool is built, constructs the library reads: `in: querystring`, a parameter defined with `content`, `itemSchema` in a response, named servers, an override by name and location, and the `query` operation next to `additionalOperations`. Each supplementary document gives one of them a place where a tool is made. [`supplementary/README.md`](./supplementary/README.md) lists every document and what it covers.
+Hand-written OpenAPI documents, not vendored: they have no upstream, no pin and no entry in `oas/sources.json`, and `scripts/sync-oas-sources.mjs` never looks at the folder. They exist because the official test documents leave out, where a tool is built, constructs the library reads: `in: querystring`, a parameter defined with `content`, `itemSchema` in a response, named servers, an override by name and location, the `query` operation next to `additionalOperations`, and `$self` with the Security Requirement keys that are URIs. Each supplementary document gives one of them a place where a tool is made. [`supplementary/README.md`](./supplementary/README.md) lists every document and what it covers.
 
 The folders are `supplementary/<version>/pass/` and `supplementary/<version>/invalid/`:
 
 | Folder (under `supplementary/`) | Documents | Held to |
 | ------------------------------- | --------- | ------- |
-| `3.0/pass`, `3.1/pass`, `3.2/pass` | 2, 2 and 15 | The five checks of an official PASS document, with no known gap allowed: the official JSON Schema for its version (offline, `e2e/helpers/oas-validate.ts`), our `OAS30` / `OAS31` / `OAS32` types, our validator, the pinned tools, the pinned diagnostics |
-| `3.1/invalid`, `3.2/invalid` | 2 and 1 | **Deliberately invalid** against the official schema of the declared version, to pin what the library does with what that version does not define (a `query` operation in a 3.1 document, a parameter with both `schema` and `content`). The story asserts the official schema rejects each one, then pins our validator's verdict, the tools, the diagnostics, and that nothing crashes |
+| `3.0/pass`, `3.1/pass`, `3.2/pass` | 2, 2 and 19 | The five checks of an official PASS document, with no known gap allowed: the official JSON Schema for its version (offline, `e2e/helpers/oas-validate.ts`), our `OAS30` / `OAS31` / `OAS32` types, our validator, the pinned tools, the pinned diagnostics |
+| `3.1/invalid`, `3.2/invalid` | 3 and 2 | **Deliberately invalid** against the official schema of the declared version, to pin what the library does with what that version does not define (a `query` operation, an `in: querystring` parameter and `$self` in a 3.1 document, a parameter with both `schema` and `content`, a `$self` with a fragment). The story asserts the official schema rejects each one, then pins our validator's verdict, the tools, the diagnostics, and that nothing crashes |
 
 The story `e2e/official-documents.e2e.ts` runs them. Tools and facts (the whole-query entry, the media types of parameters defined with `content`, the streamed response, the server names) and diagnostics are pinned by hand in [`e2e/expected/supplementary-documents.json`](../expected/supplementary-documents.json), written from the document and the specification and then compared with the library's output: a difference is reported, never copied into the pin.
 
 **Adding a document:** put it under `<version>/pass/` (or `invalid/`), keep it focused and realistic, give every operation an `operationId`, pin its tools and facts in `e2e/expected/supplementary-documents.json`, and update the literal counts in `SUPPLEMENTARY_VERSIONS` in the story and the counts in this section.
+
+### The multi-file tree (`supplementary/multi-file/`)
+
+One API described over 17 files, for `e2e/multi-file.e2e.ts`. It is not run through the five checks above (those read one document at a time, offline): the story reads it from disk, serves it from a loopback HTTP server and records every request, to pin what a relative `$ref` is read against for each way a document gets into the library (`fromFile`, `fromURL` with and without redirects, `fromJSON` / `fromYAML` with `documentUri`) and that `$self` names the document without moving a read. Hand-written, not vendored, and not in `oas/sources.json`.
+
+```text
+multi-file/
+  openapi-3.0.yaml  openapi-3.1.yaml  openapi-3.2.yaml    the same root in each version: three path items by `$ref`
+  paths/                  pets.yaml, pets-by-id.yaml, owners/owner.yaml (reaches back up with ../../)
+  parameters/             PetId.yaml, OwnerId.yaml, paging/Limit.yaml
+  schemas/                Pet.yaml and Owner.yaml (a cycle), NewPet.yaml, Error.yaml, Id.yaml
+  responses/              PetList.yaml, Problem.yaml, NotFound.yaml
+```
+
+Three roots and 14 files they share (the files are version-neutral). Every root declares four tools (`getOwner`, `listPets`, `createPet`, `getPet`), and loading one reads 14 files, each once (15 requests when the root is fetched too). Each root is valid by the official schema of its version with its references unresolved. [`supplementary/README.md`](./supplementary/README.md) describes the tree; adding or removing a file changes the pinned list in the story on purpose.

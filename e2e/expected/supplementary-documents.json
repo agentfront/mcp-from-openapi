@@ -101,6 +101,10 @@
         ]
       ],
       "response-summary": [["getHealth", "get", "/health", true]],
+      "security-scheme-uri": [["listPets", "get", "/pets", true], ["getPet", "get", "/pets/{petId}", true]],
+      "self-refused": [["ping", "get", "/ping", true]],
+      "self-relative": [["ping", "get", "/ping", true]],
+      "self-uri": [["getPet", "get", "/pets/{petId}", true]],
       "stream-media-types": [
         ["exportEvents", "get", "/events/export", true, {"responseStream": "text/event-stream"}],
         ["exportPrices", "get", "/prices/export", true, {"responseStream": "application/jsonl"}],
@@ -149,11 +153,22 @@
   "diagnostics": {
     "3.2": {
       "cookie-json-content": ["COOKIE_CONTENT_NOT_SENDABLE at /paths/~1visitor/get/parameters/0"],
-      "security-query-credential": ["QUERYSTRING_WITH_QUERY_CREDENTIAL at /paths/~1v1~1search-json/get/parameters/0"]
+      "security-query-credential": ["QUERYSTRING_WITH_QUERY_CREDENTIAL at /paths/~1v1~1search-json/get/parameters/0"],
+      "security-scheme-uri": [
+        "UNRESOLVED_SECURITY_SCHEME at /paths/~1pets/get/security/1/https:~1~1example.com~1other~1openapi.yaml#~1components~1securitySchemes~1bearerAuth"
+      ],
+      "self-refused": ["REFUSED_SELF at /$self"],
+      "self-relative": ["UNRESOLVABLE_SELF at /$self"]
+    }
+  },
+  "securitySchemes": {
+    "3.2": {
+      "security-scheme-uri": {"listPets": ["apiKeyAuth:apiKey"], "getPet": ["bearerAuth:http"]}
     }
   },
   "inputTypes": {
     "3.2": {
+      "self-uri": {"getPet": {"petId": "integer", "expand": "string"}},
       "parameter-content": {
         "getReport": {
           "selector": "string",
@@ -199,6 +214,11 @@
   },
   "invalid": {
     "3.1": {
+      "self": {
+        "validator": {"valid": true, "findings": ["warning FEATURE_NEWER_THAN_DECLARED_VERSION at /$self"]},
+        "tools": [["ping", "get", "/ping", true]],
+        "diagnostics": ["FEATURE_NEWER_THAN_DECLARED_VERSION at /$self"]
+      },
       "query-and-additional-operations": {
         "validator": {
           "valid": true,
@@ -231,6 +251,11 @@
       }
     },
     "3.2": {
+      "self-fragment": {
+        "validator": {"valid": false, "findings": ["error INVALID_SELF at /$self"]},
+        "tools": [["ping", "get", "/ping", true]],
+        "diagnostics": ["INVALID_SELF at /$self"]
+      },
       "parameter-schema-and-content": {
         "validator": {
           "valid": true,
