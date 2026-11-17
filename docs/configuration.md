@@ -27,12 +27,13 @@ const generator = await OpenAPIToolGenerator.fromURL(url, {
 | ----------------- | -------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `dereference`     | `boolean`                              | `true`  | Resolve all `$ref` pointers in the spec                                                                                                                                                             |
 | `baseUrl`         | `string`                               | `''`    | Override server URLs from the spec (each server keeps its `name` and `description`)                                                                                                                 |
+| `documentUri`     | `string`                               | -       | Where the document was retrieved from: what its relative `$ref`s are read against, and one of the URIs that name it. An absolute `http`, `https` or `file` URI of at most 2,048 characters without user information, fragment or (for `file:`) host, else `LoadError` before anything is fetched or read. Replaces the URL or file `fromURL` / `fromFile` read. Not `baseUrl`: it never changes `servers`. See [Document URI](#document-uri) |
 | `headers`         | `Record<string, string>`               | `{}`    | Custom HTTP headers for URL loading. Sent only to the spec URL's origin: dropped once a redirect leaves it, and never sent to external `$ref` hosts                                                 |
 | `timeout`         | `number`                               | `30000` | HTTP request timeout in milliseconds                                                                                                                                                                |
-| `validate`        | `boolean`                              | `true`  | Validate the document with the rules of the version it declares, at the first `generateTools()` / `generateTool()` — see [OpenAPI Versions](./openapi-versions.md). `false` skips it; the declared version is still recorded in `getDiagnostics()` |
+| `validate`        | `boolean`                              | `true`  | Validate the document with the rules of the version it declares, at the first `generateTools()` / `generateTool()` — see [OpenAPI Versions](./openapi-versions.md). `false` skips it; the declared version is still recorded in `getDiagnostics()`. `generator.validate()` is not affected by this option: it always validates, and dereferences first when the document has a `$ref` that does not start with `#` |
 | `followRedirects` | `boolean`                              | `true`  | Follow HTTP redirects when loading from URL                                                                                                                                                         |
-| `refResolution`   | `RefResolutionOptions`                 | `{}`    | Security settings for `$ref` resolution                                                                                                                                                             |
-| `secureDefaults`  | `boolean`                              | `false` | One-flag strict posture for untrusted specs: redirects off, external `$ref` resolution disabled. Explicit values win **per key** — tightening one `refResolution` knob keeps the rest of the preset |
+| `refResolution`   | `RefResolutionOptions`                 | `{}`    | Security settings for `$ref` resolution |
+| `secureDefaults`  | `boolean`                              | `false` | One-flag strict posture for untrusted specs: redirects off, external `$ref` resolution disabled (a reference to the document's own URI is not external: it is still resolved, without a fetch). Explicit values win **per key** — tightening one `refResolution` knob keeps the rest of the preset |
 | `overlays`        | `OverlayDocument \| OverlayDocument[]` | -       | OpenAPI Overlay 1.0 docs applied before dereferencing/validation — see [Curation](./curation.md)                                                                                                    |
 
 ### RefResolutionOptions
@@ -41,12 +42,36 @@ Controls how external `$ref` pointers are resolved during dereferencing. See [SS
 
 | Option             | Type       | Default             | Description                         |
 | ------------------ | ---------- | ------------------- | ----------------------------------- |
-| `allowedProtocols` | `string[]` | `['http', 'https']` | Protocols allowed for external refs |
+| `allowedProtocols` | `string[]` | `['http', 'https']` | Protocols allowed for external refs. A relative `$ref` is checked as the absolute URL it resolves to, and a local path counts as `file`: a multi-file spec on disk needs `file`, which lets the document read any file the process can read (see [Trust Model](./ssrf-prevention.md#trust-model)) |
 | `allowedHosts`     | `string[]` | `[]` (all allowed)  | Whitelist specific hostnames        |
 | `blockedHosts`     | `string[]` | `[]`                | Additional hostnames to block       |
 | `allowInternalIPs` | `boolean`  | `false`             | Disable built-in SSRF protection    |
 
 Host entries match case-insensitively and ignore trailing root dots and IPv6 brackets: `['internal.corp']` also blocks `internal.corp.` and `INTERNAL.CORP`.
+
+A `$ref` that no resolver may read fails with a `ParseError` that names the reference, its base, the rule that refused it and the option that would allow it, and carries them in `error.context`: see [When a Reference Cannot Be Read](./ssrf-prevention.md#when-a-reference-cannot-be-read).
+
+### Document URI
+
+A relative `$ref` (`./schemas/pet.json`) is read against the document's **retrieval URI**:
+
+| Loaded with | Retrieval URI |
+| --- | --- |
+| `fromURL` | The final URL after redirects, without user information or fragment |
+| `fromFile` | The file's `file:` URL |
+| `documentUri`, any factory | `documentUri` |
+| `fromJSON`, `fromYAML` without `documentUri` | None: relative references resolve against an absolute `$self` of a 3.2 document, else against the process working directory, as in earlier releases |
+
+```typescript
+const generator = await OpenAPIToolGenerator.fromJSON(spec, {
+  documentUri: "file:///tmp/petstore/openapi.json",
+  refResolution: { allowedProtocols: ["file"] },
+});
+```
+
+`$self` (OpenAPI 3.2) names the document but never moves where its references are read from, whenever a retrieval URI exists (see [The `$self` Field](./ssrf-prevention.md#the-self-field)). A `$ref` to the document's own URI (its retrieval URI or `$self`) is resolved from the document, with no fetch, also under `secureDefaults`.
+
+The base changes which URL a relative reference becomes, never which URLs may be read: the result passes `allowedProtocols`, `allowedHosts`, `blockedHosts` and the internal-address check like an absolute reference. A `documentUri`, a `$self` and a retrieval URI each have at most 2,048 characters. `documentUri` is checked first, so a bad value costs no request and no file read. The messages, the limits and what counts as the same document are in [SSRF Prevention](./ssrf-prevention.md#base-uris-and-relative-references).
 
 ---
 

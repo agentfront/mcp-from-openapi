@@ -25,6 +25,8 @@ static async fromYAML(yaml: string, options?: LoadOptions): Promise<OpenAPIToolG
 static async fromJSON(json: object, options?: LoadOptions): Promise<OpenAPIToolGenerator>
 ```
 
+**Base URI.** A relative external `$ref` is read against the document's retrieval URI: the final URL after redirects for `fromURL` (without user information or fragment), the file's `file:` URL for `fromFile`, or `LoadOptions.documentUri`, which replaces both. `fromJSON` and `fromYAML` have none without `documentUri`: relative references then resolve against an absolute `$self` (OpenAPI 3.2) or else the process working directory. With a retrieval URI, `$self` only names the document (a `$ref` to it, or a Security Requirement key, is local) and never moves where references are read from. A bad `documentUri` (not an absolute `http`, `https` or `file` URI of at most 2,048 characters, or with user information, a fragment, or a host in a `file:` URI) throws a `LoadError` (context `documentUri`) before anything is fetched or read. A relative reference still has to pass `refResolution`: reading files next to a `fromFile` document needs `file` in `allowedProtocols`. See [Multi-file Specifications](./getting-started.md#multi-file-specifications) and [SSRF Prevention](./ssrf-prevention.md#base-uris-and-relative-references).
+
 #### Instance Methods
 
 ```typescript
@@ -38,9 +40,11 @@ getSpecVersion(): SpecVersionInfo
 
 **`generateTool(path, method)`**: `method` is a standard method in any case (`'get'`, `'GET'`, `'query'`) or an OpenAPI 3.2 `additionalOperations` method exactly as written in the document (`'LINK'` finds `LINK`; `'link'` does not). Only the operations the declared version defines are found: `query` and `additionalOperations` exist from 3.2 on, so `generateTool('/search', 'query')` on a 3.1 document throws `Operation not found`. The tool's `metadata.method` is the canonical form: the lowercase field name of a standard method, the key as written otherwise. It throws a `GenerationError` (context `path`, `method`, `pointer`) for an operation that `generateTools()` skips with a diagnostic: a parameter in a location the library does not map, such as a Swagger `in: body` (`UNSUPPORTED_PARAMETER_LOCATION`), parameters that break an OpenAPI 3.2 rule on `in: querystring` (`MULTIPLE_QUERYSTRING_PARAMETERS`, `QUERYSTRING_WITH_QUERY_PARAMETERS`, `QUERYSTRING_PARAMETER_WITHOUT_CONTENT`; with `validate: true` the validator rejects such a document first), or no Security Requirement that can be satisfied (`UNSATISFIABLE_SECURITY`).
 
-**`generateTools()` / `generateTool()` and validation**: with `validate: true` (the default) the first call validates the document (after dereferencing, when that is on) and later calls reuse the result. A document that fails throws a `ParseError` whose message is `Invalid OpenAPI document: <first error>` (with `(and N more; see the error's context.errors)` when there are more) and whose `context.errors` is the full `ValidationErrorDetail[]`. The quoted first error is cut at 512 characters and any control or bidirectional character in it is written as `\uXXXX`, so the message is safe to log; `context.errors` is not altered. `validate()` is separate: it validates the loaded document as it is (not dereferenced) each time it is called, returns the result instead of throwing, and records no diagnostics.
+**`generateTools()` / `generateTool()` and validation**: with `validate: true` (the default) the first call validates the document (after dereferencing, when that is on) and later calls reuse the result. A document that fails throws a `ParseError` whose message is `Invalid OpenAPI document: <first error>` (with `(and N more; see the error's context.errors)` when there are more) and whose `context.errors` is the full `ValidationErrorDetail[]`. The quoted first error is cut at 512 characters and any control or bidirectional character in it is written as `\uXXXX`, so the message is safe to log; `context.errors` is not altered. `validate()` is separate: see below.
 
-**`getDiagnostics()`** returns what the generator noticed without failing, in the order it was first noticed, each finding once (a copy; changing it changes nothing). It grows as the generator works: the declared version at load, the validator's warnings at the first generation with `validate: true`, and the constructs generation skipped or ignored. Every `severity` is `'warning'` today. It keeps at most `MAX_DIAGNOSTICS` (1,000) distinct findings, then ends with one `DIAGNOSTICS_TRUNCATED` entry. See [OpenAPI Versions](./openapi-versions.md#diagnostics) for every code and the limits on quoted text and `path`.
+**`validate()`** validates the document with the rules of the version it declares and returns a `ValidationResult` (`valid: false` for a document that breaks a rule, no throw), whatever the `validate` load option says, and records no diagnostics. When `dereference` is on (the default) and the document holds a `$ref` that does not start with `#`, it dereferences first and validates the result, as generation does: it can read files and make network requests, under exactly the `refResolution` gates, SSRF protections and redirect rules of generation, and `getDocument()` returns the dereferenced document afterwards. A reference to the document's own URI is made local and reads nothing. A reference that cannot be read (refused by a rule, missing, not JSON or YAML, a pointer that leads nowhere, ...) does **not** throw: the result is `{ valid: false, errors: [{ code: 'UNREADABLE_REFERENCE', message, path }] }`, where `message` is the text of the `ParseError` generation throws (without its `Failed to dereference OpenAPI document:` prefix), bounded and escaped, and `path` the JSON Pointer of the `$ref` when it is in this document (absent otherwise). Only a document JSON cannot copy (a YAML alias that makes it contain itself) still throws the `ParseError`, as generation does. The dereference happens at most once per generator: `generateTools()` after `validate()` reuses it, and the reverse, concurrent calls share one, and after a failure the next call tries again. A document with only `#` references, or any document when `dereference` is `false`, is validated as loaded without reading anything.
+
+**`getDiagnostics()`** returns what the generator noticed without failing, in the order it was first noticed, each finding once (a copy; changing it changes nothing). It grows as the generator works: the declared version at load, why `$self` is not used when it is present and ignored (`INVALID_SELF`, `REFUSED_SELF`, `UNRESOLVABLE_SELF`, or `FEATURE_NEWER_THAN_DECLARED_VERSION` in a 3.0 or 3.1 document), and a retrieval URI too long to be used (`BASE_URI_TOO_LONG`), the validator's warnings at the first generation with `validate: true`, and the constructs generation skipped or ignored. Every `severity` is `'warning'` today. It keeps at most `MAX_DIAGNOSTICS` (1,000) distinct findings, then ends with one `DIAGNOSTICS_TRUNCATED` entry. See [OpenAPI Versions](./openapi-versions.md#diagnostics) for every code and the limits on quoted text and `path`.
 
 ```typescript
 interface SpecDiagnostic {
@@ -212,6 +216,8 @@ Errors (`valid: false`):
 | `QUERYSTRING_PARAMETER_WITHOUT_CONTENT` | An `in: querystring` parameter has no `content`, or one that holds no media type |
 | `OPERATION_NOT_OBJECT` | A method field, or an `additionalOperations` value, is not an object (`get: "x"`). A fixed field holding `null` is skipped without a finding |
 | `ADDITIONAL_OPERATIONS_NOT_OBJECT` | `additionalOperations` is not an object (read only when the document declares 3.2 or newer) |
+| `INVALID_SELF` | `$self` (read when the document declares 3.2 or newer) is not a string in the form of a URI reference, or has a fragment. The generator also records it at load and ignores the field |
+| `UNREADABLE_REFERENCE` | Returned by `generator.validate()`, never by `Validator.validate()`: a `$ref` the generator could not read (see above) |
 | `INVALID_METHOD_TOKEN` | An `additionalOperations` key is not an HTTP method token (RFC 9110) |
 | `DUPLICATE_FIXED_METHOD` | An `additionalOperations` key is the upper-case name of a method that has its own field (`GET`, `QUERY`) |
 
@@ -222,7 +228,7 @@ Warnings:
 | `NO_PATHS`, `NO_SERVERS`, `NO_OPERATIONS`, `NO_OPERATION_ID`, `NO_SECURITY_SCHEMES` | No paths or servers, a path without operations, an operation without `operationId`, security requirements without schemes |
 | `NEWER_OPENAPI_VERSION` | The document declares a 3.x minor version newer than 3.2 |
 | `CONFLICTING_VERSION_FIELDS` | The document declares both `openapi` and `swagger` (`swagger` is ignored) |
-| `FEATURE_NEWER_THAN_DECLARED_VERSION` | A `query` operation or `additionalOperations` in a document declaring 3.0 or 3.1 (not read, so no tool and not validated), or an `in: querystring` parameter in such a document (which is read all the same) |
+| `FEATURE_NEWER_THAN_DECLARED_VERSION` | A `query` operation or `additionalOperations` in a document declaring 3.0 or 3.1 (not read, so no tool and not validated), `$self` in such a document (not read), or an `in: querystring` parameter in such a document (which is read all the same) |
 | `INVALID_PARAMETER_CONTENT` | A parameter's `content` cannot be read as OpenAPI defines it, and the message says what is done instead: several media types (one is used), none or not a map (ignored), a `schema` next to it (`schema` is used; `content` for `in: querystring`), a media type that is not an object, or one with `itemSchema` (not read for a parameter). A media type left as an unresolved `$ref` is reported by generation only |
 | `DUPLICATE_PARAMETER` | A parameter list (a path item's or an operation's) repeats a `name` and `in` (a header name in any case); the last one is used, an exact repeat of an `in: querystring` parameter included. An operation-level parameter that overrides a path-level one is not a duplicate |
 | `PATH_ITEM_NOT_OBJECT` | A path item is not an object; it holds no operations |
@@ -502,9 +508,9 @@ isStandardMethod("LINK"); // false
 
 ### DIAGNOSTIC_CODES / MAX_DIAGNOSTICS
 
-`DIAGNOSTIC_CODES` is the one frozen registry of every code a diagnostic from `generator.getDiagnostics()` can carry (its keys equal its values); `DiagnosticCode` is the union of those strings. It holds the codes of the version and operation-walk logic (`NEWER_OPENAPI_VERSION`, `FEATURE_NEWER_THAN_DECLARED_VERSION`, `CONFLICTING_VERSION_FIELDS`, `PATH_ITEM_NOT_OBJECT`, `OPERATION_NOT_OBJECT`, `ADDITIONAL_OPERATIONS_NOT_OBJECT`, `INVALID_METHOD_TOKEN`, `DUPLICATE_FIXED_METHOD`, `METHOD_CASE_VARIANT`, `REFUSED_METHOD`), the version errors (`INVALID_OPENAPI_VERSION`, `MISSING_OPENAPI_VERSION`), the validator warnings (`NO_PATHS`, `NO_OPERATIONS`, `NO_OPERATION_ID`, `NO_SERVERS`, `NO_SECURITY_SCHEMES`), the generator's (`UNRESOLVED_SECURITY_SCHEME`, `INVALID_SECURITY_REQUIREMENT`, `UNSATISFIABLE_SECURITY`, `UNSUPPORTED_PARAMETER_LOCATION`, `UNSUPPORTED_STREAMING_REQUEST_BODY`), the parameter rules (`MULTIPLE_QUERYSTRING_PARAMETERS`, `QUERYSTRING_WITH_QUERY_PARAMETERS`, `QUERYSTRING_PARAMETER_WITHOUT_CONTENT`, `INVALID_PARAMETER_CONTENT`, `DUPLICATE_PARAMETER`), the generator's warnings about a tool that is made but cannot take some inputs (`COOKIE_CONTENT_NOT_SENDABLE`, `QUERYSTRING_WITH_QUERY_CREDENTIAL`) and `DIAGNOSTICS_TRUNCATED`. Each is described in [OpenAPI Versions](./openapi-versions.md#diagnostics).
+`DIAGNOSTIC_CODES` is the one frozen registry of every code a diagnostic from `generator.getDiagnostics()` can carry (its keys equal its values); `DiagnosticCode` is the union of those strings. It holds the codes of the version and operation-walk logic (`NEWER_OPENAPI_VERSION`, `FEATURE_NEWER_THAN_DECLARED_VERSION`, `CONFLICTING_VERSION_FIELDS`, `PATH_ITEM_NOT_OBJECT`, `OPERATION_NOT_OBJECT`, `ADDITIONAL_OPERATIONS_NOT_OBJECT`, `INVALID_METHOD_TOKEN`, `DUPLICATE_FIXED_METHOD`, `METHOD_CASE_VARIANT`, `REFUSED_METHOD`), the version errors (`INVALID_OPENAPI_VERSION`, `MISSING_OPENAPI_VERSION`), the validator warnings (`NO_PATHS`, `NO_OPERATIONS`, `NO_OPERATION_ID`, `NO_SERVERS`, `NO_SECURITY_SCHEMES`), the document URIs' (`INVALID_SELF`, `REFUSED_SELF`, `UNRESOLVABLE_SELF`: why `$self` is ignored; `BASE_URI_TOO_LONG`: a retrieval URI that is not used), the generator's (`UNRESOLVED_SECURITY_SCHEME`, `INVALID_SECURITY_REQUIREMENT`, `UNSATISFIABLE_SECURITY`, `UNSUPPORTED_PARAMETER_LOCATION`, `UNSUPPORTED_STREAMING_REQUEST_BODY`), the parameter rules (`MULTIPLE_QUERYSTRING_PARAMETERS`, `QUERYSTRING_WITH_QUERY_PARAMETERS`, `QUERYSTRING_PARAMETER_WITHOUT_CONTENT`, `INVALID_PARAMETER_CONTENT`, `DUPLICATE_PARAMETER`), the generator's warnings about a tool that is made but cannot take some inputs (`COOKIE_CONTENT_NOT_SENDABLE`, `QUERYSTRING_WITH_QUERY_CREDENTIAL`) and `DIAGNOSTICS_TRUNCATED`. Each is described in [OpenAPI Versions](./openapi-versions.md#diagnostics).
 
-`MAX_DIAGNOSTICS` (`1000`) is the most findings one list keeps: `getDiagnostics()`, and each of a `ValidationResult`'s `errors` and `warnings`. `LEGACY_PATH_KEY_MAX_LENGTH` (`1024`) is the longest path key the historical validation paths and messages quote.
+`UNREADABLE_REFERENCE` is in the registry too but is never a `getDiagnostics()` entry: it is the validation error `generator.validate()` returns for a reference it cannot read. `MAX_DIAGNOSTICS` (`1000`) is the most findings one list keeps: `getDiagnostics()`, and each of a `ValidationResult`'s `errors` and `warnings`. `LEGACY_PATH_KEY_MAX_LENGTH` (`1024`) is the longest path key the historical validation paths and messages quote.
 
 ```typescript
 import { DIAGNOSTIC_CODES } from "mcp-from-openapi";
@@ -849,7 +855,8 @@ Options for loading OpenAPI specifications. See [Configuration](./configuration.
 ```typescript
 interface LoadOptions {
   dereference?: boolean; // default: true
-  baseUrl?: string;
+  baseUrl?: string; // replaces the API's server URLs; not the document's own URI
+  documentUri?: string; // where the document was retrieved from: what its relative $refs are read against (absolute http, https or file URI, at most 2,048 characters)
   headers?: Record<string, string>;
   timeout?: number; // default: 30000 (ms)
   validate?: boolean; // default: true
@@ -903,7 +910,7 @@ Security configuration for `$ref` resolution. See [SSRF Prevention](./ssrf-preve
 
 ```typescript
 interface RefResolutionOptions {
-  allowedProtocols?: string[]; // default: ['http', 'https']
+  allowedProtocols?: string[]; // default: ['http', 'https']; add 'file' to read files (a relative $ref of a fromFile document is a file)
   allowedHosts?: string[];
   blockedHosts?: string[];
   allowInternalIPs?: boolean; // default: false
@@ -984,8 +991,9 @@ See [Error Handling](./error-handling.md) for usage patterns.
 | Class              | Thrown When                              |
 | ------------------ | ---------------------------------------- |
 | `OpenAPIToolError` | Base class for all errors                |
-| `LoadError`        | URL fetch or file read fails             |
-| `ParseError`       | YAML/JSON parsing or dereferencing fails |
+| `LoadError`        | URL fetch or file read fails, or `LoadOptions.documentUri` is invalid |
+| `SsrfError`        | A `LoadError` for a spec URL the SSRF guard refuses; `context.reason` says why (`invalid-url`, `protocol`, `host-not-allowed`, `host-blocked`, `internal-address`, `resolved-address`, `dns-failed`, `too-large`, `too-many-redirects`, `no-transport`) |
+| `ParseError`       | YAML/JSON parsing or dereferencing fails. A failed dereference has `context.rule` (a document that cannot be copied at all has only `originalError`); one that names a `$ref` adds `reference`, `base`, `resolved` and, when known, `path` (see [SSRF Prevention](./ssrf-prevention.md#when-a-reference-cannot-be-read)) |
 | `ValidationError`  | OpenAPI document is invalid              |
 | `GenerationError`  | Tool generation fails                    |
 | `SchemaError`      | Schema manipulation fails                |

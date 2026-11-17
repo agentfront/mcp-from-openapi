@@ -114,15 +114,17 @@ Where `responses` is present it must not be empty, in any version.
 Constructs from a newer version are not errors in an older document; they are warnings:
 
 - a `query` operation, or `additionalOperations`, in a document declaring 3.0 or 3.1: not read, so not validated either (the document is valid even if the ignored `additionalOperations` is malformed), and one `FEATURE_NEWER_THAN_DECLARED_VERSION` warning each;
-- an `in: querystring` parameter in a document declaring 3.0 or 3.1: a `FEATURE_NEWER_THAN_DECLARED_VERSION` warning instead of `INVALID_PARAMETER_IN`. The operation still makes a tool: the generator reads the location in every version.
+- an `in: querystring` parameter in a document declaring 3.0 or 3.1: a `FEATURE_NEWER_THAN_DECLARED_VERSION` warning instead of `INVALID_PARAMETER_IN`. The operation still makes a tool: the generator reads the location in every version;
+- `$self` in a document declaring 3.0 or 3.1: a `FEATURE_NEWER_THAN_DECLARED_VERSION` warning. The field is not read, so references resolve as if it were absent.
 
-Other constructs a version added (`webhooks`, `$self`, ...) are not checked against the declared version.
+Other constructs a version added (`webhooks`, ...) are not checked against the declared version.
 
 The validator reads exactly the operations the generator turns into tools (`resolveOperationLayout`), so it also applies these rules:
 
 - at most one `in: querystring` parameter per operation (`MULTIPLE_QUERYSTRING_PARAMETERS`), never together with `in: query` parameters (`QUERYSTRING_WITH_QUERY_PARAMETERS`), and it must declare `content` with a media type, not `schema` (`QUERYSTRING_PARAMETER_WITHOUT_CONTENT`). The path item's parameters count with the operation's, after an operation-level parameter has overridden a path-level one with the same name and location. These are errors in every version, because the generator reads the location in every version. With `validate: false` the generator enforces the same three rules itself: the operation makes no tool, and the code is recorded in `getDiagnostics()`;
 - a parameter's `content` should hold exactly one usable media type, and not sit next to a `schema` (`INVALID_PARAMETER_CONTENT`, a warning that says what generation does instead: it uses one media type, ignores a `content` that is empty or not a map, uses `schema` when there is one, reads a media type that is not an object as one with no schema, and does not read an `itemSchema` in it), and a parameter list (a path item's, or an operation's) should not repeat a `name` and `in`, a header name in any case (`DUPLICATE_PARAMETER`, a warning: the last one is used);
-- in a document declaring 3.2 or newer, `additionalOperations` must be an object (`ADDITIONAL_OPERATIONS_NOT_OBJECT`), each key must be an HTTP method token (`INVALID_METHOD_TOKEN`), and no key may be the upper-case name of a method that has its own field, such as `GET` or `QUERY` (`DUPLICATE_FIXED_METHOD`).
+- in a document declaring 3.2 or newer, `additionalOperations` must be an object (`ADDITIONAL_OPERATIONS_NOT_OBJECT`), each key must be an HTTP method token (`INVALID_METHOD_TOKEN`), and no key may be the upper-case name of a method that has its own field, such as `GET` or `QUERY` (`DUPLICATE_FIXED_METHOD`);
+- in a document declaring 3.2 or newer, `$self` must be a string in the form of a URI reference (RFC 3986) without a fragment (`INVALID_SELF`, an error). The rules the generator adds before it uses `$self` as a base (no user information, an `http`, `https` or `file` scheme, ...) depend on where the document was read from, which the validator does not know, so they are generator diagnostics (`REFUSED_SELF`, `UNRESOLVABLE_SELF`) and never validation errors.
 
 Findings of the operation walk that are errors or warnings when validating:
 
@@ -153,8 +155,8 @@ The validator does not enforce every difference between the versions. For exampl
 | Parameter `in: querystring` | Supported | One input whose value is the whole query string, serialized in the media type of its `content`. The mapper entry has `type: 'query'` and `wholeQuery: true`. Whatever version the document declares the operation makes a tool; in 3.0 or 3.1 the validator also warns (`FEATURE_NEWER_THAN_DECLARED_VERSION`). At most one per operation, never with `in: query` parameters, and it must use `content`: the validator rejects a document that breaks a rule, and with `validate: false` the operation makes no tool and the diagnostic is recorded (`generateTool()` throws a `GenerationError`). See [Whole-query parameters](#whole-query-parameters-in-querystring) |
 | Media Type `itemSchema` in a response (streams such as `text/event-stream`) | Supported | Reported in `metadata.responseStream` with `responseHints.streaming`, never as `outputSchema`: a media type with only `itemSchema` contributes nothing to it. The stream's media type is the first one with `itemSchema` in document order, chosen apart from the output schema's, so JSON and `text/event-stream` in one response give both. Read whatever version the document declares. See [Streaming responses](#streaming-responses) |
 | Media Type `itemSchema` in a request body (a streamed upload) | Not yet (planned) | The body is left out: the tool takes no body input, and `UNSUPPORTED_STREAMING_REQUEST_BODY` is recorded |
-| `$self` | Not yet (planned) | Ignored, with no diagnostic. It does not change how `$ref`s or servers resolve |
-| Security scheme named by URI in a Security Requirement | Not yet (planned) | The scheme is not resolved, so its Security Requirement object cannot be satisfied: that object is dropped (with every scheme it names) and `UNRESOLVED_SECURITY_SCHEME` is recorded. If every requirement of an operation is dropped, the operation makes no tool (`UNSATISFIABLE_SECURITY`); see [Security](./security.md) |
+| `$self` | Supported | In a document declaring 3.2 or newer it is the document's identity: a `$ref` to it is resolved from the document, with no fetch, and a Security Requirement key can name the document's schemes by it. It does not move where relative `$ref`s are read from: that is the retrieval URI (the URL or file the document was loaded from, or `documentUri`), and `$self` is the base of reads only for a document with no retrieval URI. A `$self` that breaks a rule is ignored with `INVALID_SELF` (also a validation error), `REFUSED_SELF` or `UNRESOLVABLE_SELF`; in a 3.0 or 3.1 document it is ignored with `FEATURE_NEWER_THAN_DECLARED_VERSION`. It never changes `servers`, and every URL built from it passes the same checks as an absolute `$ref`. The `$self` of a referenced document is not read. See [The `$self` Field](./ssrf-prevention.md#the-self-field) |
+| Security scheme named by URI in a Security Requirement | Supported | In a document declaring 3.2 or newer, a key that is not a component name and resolves to this document with the fragment `/components/securitySchemes/<name>` is that scheme. A scheme of another document is not fetched: its Security Requirement object cannot be satisfied, so it is dropped (with every scheme it names) and `UNRESOLVED_SECURITY_SCHEME` is recorded. If every requirement of an operation is dropped, the operation makes no tool (`UNSATISFIABLE_SECURITY`). See [Security](./security.md#schemes-named-by-uri-openapi-32) |
 | `style: cookie` on a cookie parameter | Supported | `buildHttpRequest` writes `name=value` pairs separated by `; ` with the values as given (RFC 6265 cookie-octets only). An exploded array repeats the name (`color=blue; color=black`), an exploded object is one cookie per property (`R=100; G=200`; a property may not name another cookie the tool sends), and an array or object with `explode: false` throws a `RequestBuildError`. Read whatever version the document declares; a cookie parameter without `style: cookie` is serialized as before. See [Request Builder](./request-builder.md#cookies-and-style-cookie) |
 | Response `summary` (and the now-optional `description`) | Supported | `summary` is the description of the output schema when the response has no `description` (and the schema has none). A response with neither gets an output schema with no description |
 | Example `dataValue` | Supported | With `includeExamples`, `dataValue` is used in preference to `value` |
@@ -349,7 +351,7 @@ Each entry is `{ severity, code, message, path? }`. `path` is a JSON Pointer (RF
 
 The list grows as the generator works:
 
-1. **On load**: the declared version.
+1. **On load**: the declared version, why `$self` is ignored when the document has one that is, and a retrieval URI that is too long to be used.
 2. **At the first generation with `validate: true`**: the validator's warnings.
 3. **While generating**: everything the generator skips or ignores. `generateTools()` walks every path; `generateTool()` records the findings of the path item and operation it builds.
 
@@ -368,7 +370,7 @@ With `validate: false` the second stage never happens. `generator.validate()` re
 | `NO_OPERATION_ID` | An operation has no `operationId`; its tool name comes from the method and path | Validation |
 | `NO_SERVERS` | The document defines no servers | Validation |
 | `NO_SECURITY_SCHEMES` | The document has `security` but no `components.securitySchemes` | Validation |
-| `FEATURE_NEWER_THAN_DECLARED_VERSION` | A `query` operation or `additionalOperations` in a document declaring 3.0 or 3.1: it is not read, so it makes no tool. Also, when validating, an `in: querystring` parameter in such a document (it is read all the same: the operation makes a tool) | Validation, generation |
+| `FEATURE_NEWER_THAN_DECLARED_VERSION` | A `query` operation or `additionalOperations` in a document declaring 3.0 or 3.1: it is not read, so it makes no tool. Also `$self` in such a document (not read: references resolve as if it were absent), and, when validating, an `in: querystring` parameter (it is read all the same: the operation makes a tool) | Load (`$self`), validation, generation |
 | `PATH_ITEM_NOT_OBJECT` | A path item is not an object (`"/pets": null`); it holds no operations | Validation, generation |
 | `OPERATION_NOT_OBJECT` | A method field, or an `additionalOperations` value, is not an object; it is ignored | Generation (validation: error) |
 | `ADDITIONAL_OPERATIONS_NOT_OBJECT` | `additionalOperations` is not an object; it is ignored | Generation (validation: error) |
@@ -376,7 +378,11 @@ With `validate: false` the second stage never happens. `generator.validate()` re
 | `DUPLICATE_FIXED_METHOD` | An `additionalOperations` key is the upper-case name of a method that has its own field (`GET`, `QUERY`); the operation is ignored and only the field is read | Generation (validation: error) |
 | `METHOD_CASE_VARIANT` | An `additionalOperations` key is another case of a method that has its own field (`post`, `Get`); allowed by the specification, but the library sends such a method upper-cased, so the key is ignored | Validation, generation |
 | `REFUSED_METHOD` | An `additionalOperations` key is `CONNECT` (any case), which opens a tunnel instead of sending a request; the operation is ignored | Validation, generation |
-| `UNRESOLVED_SECURITY_SCHEME` | A Security Requirement object names a scheme that `components.securitySchemes` does not define (a scheme named by URI included). One diagnostic per missing scheme; the whole object is dropped | Generation |
+| `INVALID_SELF` | `$self`, in a document declaring 3.2 or newer, is not a string, is not a URI reference (a space or a non-ASCII character), or has a fragment. It is ignored; the validator rejects the document | Load (validation: error) |
+| `REFUSED_SELF` | `$self` has user information, a scheme other than `http`, `https` or `file`, is a `file:` URI naming a host or in a document retrieved over the network, or is longer than 2,048 characters (or resolves to a longer URI). It is ignored; the message gives the reason without quoting the value | Load |
+| `UNRESOLVABLE_SELF` | `$self` is a relative reference and the document has no usable retrieval URI to resolve it against (`fromJSON` or `fromYAML` without `documentUri`, or a retrieval URI too long to be used). It is ignored | Load |
+| `BASE_URI_TOO_LONG` | The URI the document was retrieved from (the final URL of `fromURL` after redirects, or the `file:` URL of `fromFile`) is longer than 2,048 characters, so it is not used: a reference to the document by that URI is not recognised as local, and a relative reference to another document fails the load (rule `base-too-long`). No `path` | Load |
+| `UNRESOLVED_SECURITY_SCHEME` | A Security Requirement object names a scheme that `components.securitySchemes` does not define, and that (in a 3.2 or newer document) is not a URI naming a scheme of this document: a scheme in another document is not read. One diagnostic per missing scheme; the whole object is dropped | Generation |
 | `INVALID_SECURITY_REQUIREMENT` | A Security Requirement is not an object; it is dropped | Generation |
 | `UNSATISFIABLE_SECURITY` | Every Security Requirement of an operation was dropped, so no way to authenticate is known; the operation makes no tool | Generation |
 | `UNSUPPORTED_PARAMETER_LOCATION` | A parameter has an `in` the generator does not map to a request (a Swagger `body`, a missing `in`); the operation makes no tool | Generation |
@@ -388,9 +394,10 @@ With `validate: false` the second stage never happens. `generator.validate()` re
 | `QUERYSTRING_WITH_QUERY_CREDENTIAL` | A whole-query parameter serialized as anything but `application/x-www-form-urlencoded` (no name=value pairs) in an operation whose security scheme sends an API key in the query. One per scheme; `buildHttpRequest` refuses a call using it. The tool is still made | Generation |
 | `DUPLICATE_PARAMETER` | A parameter list (a path item's or an operation's) repeats a `name` and `in` (a header name in any case, an `in: querystring` parameter exactly); the last one is used and each earlier one is ignored | Validation, generation |
 | `UNSUPPORTED_STREAMING_REQUEST_BODY` | A request body's media type declares only `itemSchema` (a streamed upload); the tool takes no body input | Generation |
+| `UNREADABLE_REFERENCE` | **A validation error only, never a `getDiagnostics()` entry.** `generator.validate()` returns it, instead of throwing, for a `$ref` it cannot read (refused by a `refResolution` rule, missing, not JSON or YAML, a pointer that leads nowhere, ...). `message` is the `ParseError` message of generation without its prefix; `path` is the JSON Pointer of the `$ref` when it is in the document itself | `validate()` result |
 | `DIAGNOSTICS_TRUNCATED` | The list reached `MAX_DIAGNOSTICS`; later findings were not recorded | Last entry |
 
-"Validation: error" means the validator rejects the document for that finding (see [What validation checks per version](#what-validation-checks-per-version)); the diagnostic exists when generation runs with `validate: false`. When validating, the codes marked "Validation, generation" are warnings and reach `getDiagnostics()`; with `validate: false`, generation records them itself.
+The table lists every code of `DIAGNOSTIC_CODES`. Two kinds are validation errors: `INVALID_SELF` is both an error of `validate()` and a warning-severity diagnostic recorded at load, and `UNREADABLE_REFERENCE` is only ever an error returned by `generator.validate()`. "Validation: error" means the validator rejects the document for that finding (see [What validation checks per version](#what-validation-checks-per-version)); the diagnostic exists when generation runs with `validate: false`. When validating, the codes marked "Validation, generation" are warnings and reach `getDiagnostics()`; with `validate: false`, generation records them itself.
 
 ### Limits and escaping
 
@@ -599,9 +606,223 @@ tool.outputSchema; // the 204 variant
 
 The same holds for an `in: querystring` parameter, which used to skip its operation (`UNSUPPORTED_PARAMETER_LOCATION`) and now makes a whole-query tool, and for `dataValue` in an Example Object (preferred over `value` when `includeExamples` is on; an example with both used `value`).
 
+### A relative `$ref` resolves against the document's location
+
+A relative external `$ref` resolved against the process working directory, whatever the document was loaded from. It now resolves against the document's retrieval URI: the URL a `fromURL` document was finally read from, the file of a `fromFile` document, or `LoadOptions.documentUri`. A document with none of these (`fromJSON`, `fromYAML`) resolves against an absolute `$self` when it has one (3.2), and otherwise against the working directory as before.
+
+```typescript
+// /tmp/petstore/openapi.json holds { "$ref": "./schemas/pet.json" }: the file /tmp/petstore/schemas/pet.json.
+// The process runs with / as its working directory.
+const generator = await OpenAPIToolGenerator.fromFile("/tmp/petstore/openapi.json", {
+  refResolution: { allowedProtocols: ["file"] },
+});
+const [tool] = await generator.generateTools();
+```
+
+Before:
+
+```
+ParseError: Failed to dereference OpenAPI document: Error opening file /schemas/pet.json: ENOENT: no such file or directory, open '/schemas/pet.json'
+```
+
+After:
+
+```typescript
+Object.keys(tool.outputSchema.properties); // ['id', 'name']
+```
+
+What to check:
+
+- **A `fromFile` document used to read its references from the working directory.** That worked only when the process was started in the spec's own directory. If you relied on it for a spec whose references sit elsewhere, say where with `documentUri`: `documentUri: pathToFileURL(process.cwd() + "/").href` restores the old base.
+- **A `fromURL` document whose relative references used to fail now fetches them from its own location**, through the same host, address and redirect checks (and without your `headers`). Before, `./schemas/pet.json` was looked up as a local file and refused (`Unable to resolve $ref pointer`). This is a widening: a load that used to fail now makes a request to the host the spec came from. An absolute `$ref` to that host was always fetched, so it reaches nothing new, but if you load specs you do not trust, restrict `allowedHosts` or use `secureDefaults: true`.
+- **A 3.2 document with no retrieval URI and an absolute `http` or `https` `$self` fetches its relative references from the `$self`** under the default options (a `fromJSON` document, say). They used to resolve against the working directory and be refused as local files; with `file` allowed they were read from disk, and are now fetched instead. Every check still applies, and `$self` never moves the reads of a document that has a retrieval URI (see below).
+- **Reading local files still needs `file` in `allowedProtocols`**, for `fromFile` as before.
+
+### A `$ref` to the document's own URI is resolved locally, and held to a pointer that exists
+
+A `$ref` that names the document's own URI (`https://specs.example.com/petstore/openapi.json#/components/schemas/Pet` in a document served from that URL, or its `$self`) was an external reference: with the default options the document was fetched a second time (without your `headers`) and the reference resolver followed the pointer in the copy, and under `secureDefaults` it stayed unresolved. It is now resolved from the document, like `#/components/schemas/Pet`.
+
+```typescript
+// a response schema is { "$ref": "https://specs.example.com/petstore/openapi.json#/components/schemas/Pet" }
+const generator = await OpenAPIToolGenerator.fromJSON(spec, {
+  documentUri: "https://specs.example.com/petstore/openapi.json",
+  secureDefaults: true,
+});
+const [tool] = await generator.generateTools();
+tool.outputSchema;
+```
+
+Before (`documentUri` did not exist, so the document had no location, and `secureDefaults` leaves an external reference as written):
+
+```typescript
+{ $ref: 'https://specs.example.com/petstore/openapi.json#/components/schemas/Pet', 'x-status-code': 200, description: 'ok', 'x-content-type': 'application/json' }
+```
+
+After:
+
+```typescript
+{ type: 'object', properties: { id: { type: 'integer' } }, 'x-status-code': 200, description: 'ok', 'x-content-type': 'application/json' }
+```
+
+A reference of this kind is also held to the rules below. Each row was run with `fromURL` against a local server, before this release and after, once with the default options and once with `secureDefaults: true`; `U` stands for the document's own URL.
+
+| `$ref` | Before, default options | Before, `secureDefaults` | After (both) |
+| --- | --- | --- | --- |
+| `U#/components/schemas/Pet` | The document is fetched again; the schema resolves | Left as written | Resolves, no fetch |
+| `U#/components/schemas/My%20Pet` (key `My Pet`) | Resolves (the fetched copy decodes the fragment) | Left as written | Resolves: the fragment is percent-decoded as a JSON Pointer |
+| `U#/components/schemas/A~1B` (key `A/B`) | Resolves | Left as written | Resolves |
+| `U`, `U#`, and `""` with a base | `U`, `U#`: the whole document, fetched again. `""`: left as written | Left as written | The whole document. `""` without a base is still left as written |
+| `U#/components/schemas/Nope` (nothing there) | `ParseError`: `Missing $ref pointer "#/components/schemas/Nope". Token "Nope" does not exist.`, with no `rule` | Left as written, no error | `ParseError`, rule `missing-target`: `it names this document, but "#/components/schemas/Nope" points to nothing in it` |
+| `U#/components/schemas/Alias/properties`, where `Alias` is `{ "$ref": "#/components/schemas/Pet" }` | Followed through `Alias` | Left as written | `ParseError`, rule `missing-target`: `its pointer goes through another $ref (at "#/components/schemas/Alias"), which is not followed` |
+| `U#/components/schemas/Pet` with a `description` beside it | The sibling `description` is kept | Left as written | The sibling is dropped, as for `#/...` |
+| `U#Pet` (a plain-name fragment) | `ParseError`: `Invalid $ref pointer "Pet"...` | Left as written | Same `ParseError` (rule `missing-target`); under `secureDefaults`, left as written |
+
+A plain local reference (`#/components/schemas/Nope`) did not change: it still becomes `{}` without an error, and `#/components/schemas/My%20Pet` still finds nothing (see Known gaps). Only references that name the document by URI are checked. A missing target never turned into `{}` for these before: it was an error with the default options and left as written under `secureDefaults`; it is an error in both now.
+
+What to check:
+
+- **No second request.** With `fromURL` and the default options, a document that referred to its own URL used to cause a second `GET` of it; it causes none now.
+- **A pointer through another `$ref` is refused.** It used to resolve when the document was fetched again. Point at the target of the alias instead.
+- Which URIs count, and the limits, are in [SSRF Prevention](./ssrf-prevention.md#references-to-the-document-itself).
+
+### `validate()` reads the references of the document, and reports what it cannot read
+
+`generator.validate()` validated the loaded document as it was, without reading any reference. When the document holds a `$ref` that does not start with `#` (and `dereference` is on), it now dereferences first and validates the result, so it can read files and make network requests, with the same `refResolution` rules as generation. A reference it cannot read does not throw: it is the result.
+
+```typescript
+// a response schema is { "$ref": "https://schemas.example.com/pet.json" }
+const generator = await OpenAPIToolGenerator.fromJSON(spec, {
+  refResolution: { allowedHosts: ["trusted.example.org"] },
+});
+await generator.validate();
+```
+
+Before:
+
+```typescript
+{ valid: true } // the reference was never read
+```
+
+After:
+
+```typescript
+{
+  valid: false,
+  errors: [
+    {
+      message: 'Cannot read $ref "https://schemas.example.com/pet.json" resolved against "/" to "https://schemas.example.com/pet.json": its host "schemas.example.com" is not in refResolution.allowedHosts; add the host to refResolution.allowedHosts to read it',
+      code: 'UNREADABLE_REFERENCE',
+    },
+  ],
+}
+```
+
+(The process runs with `/` as its working directory, which is what a document with no location resolves against. `generateTools()` throws the `ParseError` with this text after `Failed to dereference OpenAPI document: `.) When the `$ref` is in the document itself and its place is known, the error has a `path`: the JSON Pointer of the `$ref`.
+
+What to check:
+
+- **Code that called `validate()` to check a document without side effects** (before accepting it, say) now reads whatever the document references. Call it only where generation would be acceptable, or load with `dereference: false`, which validates without reading.
+- **It does not throw for an unreadable reference**, so a caller that used `try/catch` around `validate()` to catch a failure should read `result.errors` for `UNREADABLE_REFERENCE`. The one thing that still throws is a document that cannot be copied at all (a YAML alias that makes it contain itself, with a reference to read): the same `ParseError` generation throws.
+- **The work is shared.** The dereference happens once per generator: `generateTools()` after `validate()` reuses it, the other way round too, and concurrent calls share one set of fetches. After a failure the next call tries again. `getDocument()` returns the dereferenced document after `validate()`, also for a document whose only external-looking references name its own URI (they are made local and read nothing). `validate()` still adds nothing to `getDiagnostics()`.
+
+### `$self` and schemes named by URI are read
+
+`$self` was ignored, and a Security Requirement key that was a URI dropped its whole requirement object. In a document declaring 3.2 or newer both are read now: `$self` as the document's identity, a URI key as the scheme of this document it names.
+
+**`$self` never moves where references are read from.** The retrieval URI does, whenever there is one. OpenAPI 3.2 makes `$self` the base of relative references; the specification leaves open where an implementation retrieves a document from, so the identity follows the specification and the retrieval location is an implementation choice.
+
+```typescript
+// a 3.2 document; $self is "https://specs.example.com/v1/openapi.json"; a response schema is { "$ref": "./schemas/pet.json" }
+// 1. a document with no retrieval URI
+const generator = await OpenAPIToolGenerator.fromJSON(spec, {
+  refResolution: { allowedHosts: ["trusted.example.org"] },
+});
+await generator.generateTools(); // the process runs with / as its working directory
+```
+
+Before (`$self` ignored: the reference was a local file, which is blocked):
+
+```
+ParseError: Failed to dereference OpenAPI document: Unable to resolve $ref pointer "/schemas/pet.json"
+```
+
+After (no retrieval URI, so the absolute `$self` is where the reads go: `https://specs.example.com/v1/schemas/pet.json`):
+
+```
+ParseError: Failed to dereference OpenAPI document: Cannot read $ref "./schemas/pet.json" at "#/paths/~1pets/get/responses/200/content/application~1json/schema"
+  resolved against "https://specs.example.com/v1/openapi.json" to "https://specs.example.com/v1/schemas/pet.json":
+  its host "specs.example.com" is not in refResolution.allowedHosts; add the host to refResolution.allowedHosts to read it
+```
+
+`allowedHosts` stops the example before any request; without it, the reference is fetched from that host (with a local server standing in for it, it is). This is a change in what a load fetches, noted above. With a retrieval URI the same document reads from where it was loaded:
+
+```typescript
+// 2. the same document with a documentUri of a mirror
+await OpenAPIToolGenerator.fromJSON(spec, {
+  documentUri: "https://mirror.example.net/petstore/openapi.json",
+  refResolution: { allowedHosts: ["trusted.example.org"] },
+}).then((generator) => generator.generateTools());
+// ParseError: ... resolved against "https://mirror.example.net/petstore/openapi.json"
+//   to "https://mirror.example.net/petstore/schemas/pet.json": its host "mirror.example.net" is not in ...
+
+// 3. the same document read from /tmp/petstore32/openapi.json with fromFile, default options
+// ParseError: ... resolved against "/tmp/petstore32/openapi.json" to "/tmp/petstore32/schemas/pet.json":
+//   it is read as a local file, and refResolution.allowedProtocols ("http", "https") does not include "file"; ...
+```
+
+A mirror serves its own copies, and a file-loaded spec reads its sibling files whatever `$self` says: `specs.example.com` is not contacted in either case. (Before this release the second and third cases failed the same way as the first, `Unable to resolve $ref pointer`, because relative references resolved against the working directory.) See [The `$self` Field](./ssrf-prevention.md#the-self-field).
+
+A security scheme named by URI:
+
+```typescript
+// a 3.2 document with components.securitySchemes.ApiKey and, on an operation,
+//   security: [{ "#/components/securitySchemes/ApiKey": [] }]
+const generator = await OpenAPIToolGenerator.fromJSON(spec);
+const tools = await generator.generateTools();
+```
+
+Before:
+
+```typescript
+tools.length; // 0
+generator.getDiagnostics().map((d) => d.code); // ['UNRESOLVED_SECURITY_SCHEME', 'UNSATISFIABLE_SECURITY']
+```
+
+After:
+
+```typescript
+tools.length; // 1
+tools[0].metadata.security; // [{ scheme: 'ApiKey', type: 'apiKey', scopes: [], name: 'X-Key', in: 'header' }]
+generator.getDiagnostics(); // []
+```
+
+A 3.0 or 3.1 document that has a `$self` field now records `FEATURE_NEWER_THAN_DECLARED_VERSION` for it (a warning; the field is ignored, as before).
+
+### The error for a `$ref` that cannot be read
+
+A reference that the allow-list or the host checks refused failed with the reference resolver's generic message, and the `ParseError` kept the raw error in `context.originalError`. It now names the reference, the base, the rule and what would allow it, and `ParseError.context` carries `rule`, `reference`, `base`, `resolved` and, when known, `path`, each bounded and escaped; the raw error is not kept. A fetch that failed changed too:
+
+```
+// fromJSON documents, the process runs with / as its working directory
+// a response schema is { "$ref": "https://schemas.example.com/pet.json" }, allowedHosts: ["trusted.example.org"]
+// before: ParseError: Failed to dereference OpenAPI document: Unable to resolve $ref pointer "https://schemas.example.com/pet.json"
+//         context: { originalError }
+// after:  ParseError: Failed to dereference OpenAPI document: Cannot read $ref "https://schemas.example.com/pet.json"
+//           resolved against "/" to "https://schemas.example.com/pet.json":
+//           its host "schemas.example.com" is not in refResolution.allowedHosts; add the host to refResolution.allowedHosts to read it
+//         context: { rule: 'host-not-allowed', reference, base: '/', resolved }
+
+// a reference to a server that answers 404
+// before: ParseError: Failed to dereference OpenAPI document: Failed to resolve external $ref "http://127.0.0.1:<port>/missing.json": 404 Not Found
+// after:  ParseError: Failed to dereference OpenAPI document: Cannot read $ref "http://127.0.0.1:<port>/missing.json"
+//           resolved against "/" to "http://127.0.0.1:<port>/missing.json": the server answered 404 "Not Found"
+```
+
+Every other failure of a dereference has a `rule` now (`invalid-document` for a file that is not JSON or YAML, `missing-target` for a pointer that leads nowhere, `unreadable` for the rest), except a document that cannot be copied at all (a YAML alias that makes it contain itself), which keeps only `originalError`. When several references cannot be read the first in document order is the one reported. Code that matched on the old message text should read `error.context.rule` instead. See [When a Reference Cannot Be Read](./ssrf-prevention.md#when-a-reference-cannot-be-read).
+
 ### Fields that only add
 
-`x-parameter-content-type` and `x-parameter-whole-query` on input properties, `wholeQuery` on a mapper entry, `queryString` on a built request, `metadata.servers[].name`, `metadata.responseStream` and `responseHints.streaming`, and the new warnings (`INVALID_PARAMETER_CONTENT`, `DUPLICATE_PARAMETER`, `UNSUPPORTED_STREAMING_REQUEST_BODY`, `COOKIE_CONTENT_NOT_SENDABLE`, `QUERYSTRING_WITH_QUERY_CREDENTIAL`; a valid document stays valid).
+`x-parameter-content-type` and `x-parameter-whole-query` on input properties, `wholeQuery` on a mapper entry, `queryString` on a built request, `metadata.servers[].name`, `metadata.responseStream` and `responseHints.streaming`, `LoadOptions.documentUri`, `rule`, `reference`, `base`, `resolved` and `path` on the `context` of a `ParseError`, `context.reason` on an `SsrfError`, and the new warnings (`INVALID_PARAMETER_CONTENT`, `DUPLICATE_PARAMETER`, `UNSUPPORTED_STREAMING_REQUEST_BODY`, `COOKIE_CONTENT_NOT_SENDABLE`, `QUERYSTRING_WITH_QUERY_CREDENTIAL`, `INVALID_SELF`, `REFUSED_SELF`, `UNRESOLVABLE_SELF`, `BASE_URI_TOO_LONG`; a valid document stays valid, apart from a 3.2 document whose `$self` is not a URI reference, which `validate()` now rejects with `INVALID_SELF`). `fromArazzo` rejects a `loadOptions.documentUri` with an `ArazzoError` (see [Arazzo Workflows](./arazzo.md#sources)).
 
 ### If you wrote your own request builder
 
@@ -639,7 +860,12 @@ What the library does not do yet. These exist today and apply as stated; each is
 - A `$ref` with sibling keywords (`$ref` plus `description`) keeps only the target when the library dereferences internal references itself; external references keep the siblings.
 - The Encoding Object is carried on the mapper (`serialization.encoding`, for a `content` parameter and a form-urlencoded whole query too), but `buildHttpRequest` does not apply it: a multipart part declared `contentType: application/json` is sent as a plain string field, and a form property's `style` and `explode` are ignored.
 - Alternative security requirements (`security: [{ a: [] }, { b: [] }]`) are flattened: every scheme of every requirement object that can be satisfied becomes a requirement of the tool, rather than a choice between them.
-- A relative external `$ref` resolves against the process working directory, not against the location of the document that contains it.
+- A document with no retrieval URI (`fromJSON` or `fromYAML` without `documentUri`) resolves a relative external `$ref` against an absolute `$self` when it has one, and otherwise against the process working directory. With a retrieval URI (`fromURL`, `fromFile`, `documentUri`) it resolves against that, whatever `$self` says.
+- A local reference (`#/...`) keeps the reading it always had: its percent-escapes are not decoded (`#/components/schemas/My%20Pet` finds nothing), and a pointer that leads nowhere becomes `{}` without an error. Only a reference that names the document by its URI is decoded and checked (rule `missing-target`).
+- The `$self` of a document reached through a `$ref` is not read: a relative reference inside it resolves against the URL or path it was fetched from.
+- A relative reference under a Schema Object with its own `$id` resolves against that `$id` in a document declaring 3.1, because the reference resolver applies nested `$id` scopes there. In a document declaring 3.0 or 3.2 it resolves against the document's base URI instead. The rewrite of a `$ref` to the document's own URI skips a schema with its own `$id` in every version.
+- A `$ref` to the document's own URI is resolved locally only when its fragment is empty or a JSON Pointer; a plain-name fragment (`#Pet`, an `$anchor`) is left to the reference resolver.
+- A Security Requirement that names a scheme by the URI of another document is dropped (`UNRESOLVED_SECURITY_SCHEME`); schemes of other documents are never read.
 - A request body media type that carries parameters is matched whole. `application/x-www-form-urlencoded; charset=utf-8` is not recognized as a form, so an object body is sent as JSON text under that `content-type` header (`{"a":"x y","n":1}`); `multipart/form-data; boundary=x` is sent the same way, as JSON text, with that header. `application/json; charset=utf-8` happens to work, because an object is written as JSON anyway. Media types of `content` parameters and whole queries are compared without their parameters and are not affected.
 - A cookie parameter with the default `form` style is sent without percent-encoding, where OpenAPI 3.2.1 describes percent-encoded form cookies: a value with a space or `;` throws a `RequestBuildError` instead of being encoded, and `%` and non-ASCII characters up to U+00FF are sent as they are.
 - A path value of `.` or `..` is sent as a dot segment (`/files/../meta`), which a client that normalizes URLs (`new URL`, `fetch`) resolves to another path (`/meta`). Values such as `%2e%2e` or `a/../b` are encoded and stay one segment.

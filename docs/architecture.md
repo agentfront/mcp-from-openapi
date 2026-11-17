@@ -29,7 +29,8 @@ User Input (URL / File / String / Object)
          ↓
      Read declared version (detectSpecVersion)
          ↓
-   Dereference $refs (optional, with SSRF protection)
+   Dereference $refs (optional, with SSRF protection; references to the
+   document itself are made local first, relative ones resolve against its base URI)
          ↓
      Validate (optional, rules of the declared version; once per generator)
          ↓
@@ -57,7 +58,8 @@ User Input (URL / File / String / Object)
 - Provides four factory methods for loading specs from different sources
 - Manages the dereference lifecycle (lazy initialization)
 - Coordinates validation, parameter resolution, response building, and metadata extraction
-- Handles SSRF protection for `$ref` resolution
+- Handles SSRF protection for `$ref` resolution, and keeps the document's URIs: the retrieval URI (`documentUri`, or the URL or file it was read from) that relative references are read against, and, from 3.2, the `$self` that names it
+- Makes `validate()` dereference first when the document holds a `$ref` that does not start with `#`, returning `UNREADABLE_REFERENCE` for one it cannot read
 - Generates tool names (from operationId or path+method)
 - Enumerates operations through the spec layer, never by indexing a path item with a method name
 - Records what it skipped or ignored as diagnostics (`getDiagnostics()`) instead of dropping it silently
@@ -119,14 +121,14 @@ Which operations a document has follows its declared version (`resolveOperationL
 - Path parameters are defined and required
 - Operations have non-empty responses (`responses` is required in 3.0 only)
 - Parameters have name, a location the declared version defines, and schema/content
-- OpenAPI 3.2 rules: at most one `in: querystring` parameter, not combined with `in: query`, using `content` with a media type; in a document declaring 3.2 or newer, `additionalOperations` is an object whose keys are HTTP method tokens other than the upper-case name of a method with its own field; method fields hold objects
+- OpenAPI 3.2 rules: at most one `in: querystring` parameter, not combined with `in: query`, using `content` with a media type; in a document declaring 3.2 or newer, `additionalOperations` is an object whose keys are HTTP method tokens other than the upper-case name of a method with its own field; method fields hold objects; in a document declaring 3.2 or newer, `$self` is a string in the form of a URI reference without a fragment
 
 **Checks (warnings):**
 - No paths defined
 - No servers defined
 - No operation IDs
 - Security requirements without schemes
-- A newer 3.x minor version, both `openapi` and `swagger`, or a construct newer than the declared version (`query` and `additionalOperations` in a 3.0 or 3.1 document are not read; `in: querystring` is read all the same)
+- A newer 3.x minor version, both `openapi` and `swagger`, or a construct newer than the declared version (`query`, `additionalOperations` and `$self` in a 3.0 or 3.1 document are not read; `in: querystring` is read all the same)
 - A parameter's `content` that does not hold exactly one media type, and a parameter list that repeats a name and location
 - Values the operation walk ignores (a path item that is not an object, a case variant of a standard method as an `additionalOperations` key, a `CONNECT` method)
 - Each list (`errors`, `warnings`) is capped at 1,000 entries, then one `DIAGNOSTICS_TRUNCATED` entry
@@ -187,6 +189,8 @@ src/
   ├── security-resolver.ts   # SecurityResolver class + types
   ├── schema-builder.ts      # SchemaBuilder class
   ├── validator.ts           # Validator class
+  ├── base-uri.ts            # Document URIs, $self rules, self-reference detection, security scheme URIs
+  ├── ssrf.ts                # SSRF guard: host/address checks, pinned transport, safeFetch
   ├── types.ts               # Type definitions + utility functions
   ├── errors.ts              # Error class hierarchy
   └── spec/                  # Version-aware spec layer (imports nothing from outside)

@@ -55,6 +55,7 @@ Now you know exactly how to build the HTTP request.
 
 ## Features
 
+- **OpenAPI 3.0, 3.1 and 3.2** -- Validated with the rules of the version a document declares. From 3.2: the `query` operation and `additionalOperations` methods, `in: querystring` whole-query parameters, `style: cookie`, streamed responses (`itemSchema`), `$self`, and security schemes named by URI; what the library skips or ignores is recorded in `getDiagnostics()` instead of dropped
 - **Built-in Request Builder** -- `buildHttpRequest()` applies the full OpenAPI serialization table (form/deepObject/pipeDelimited queries, label/matrix paths, `content` parameters, OpenAPI 3.2 whole-query (`in: querystring`) and `style: cookie`, multipart, binary, `wholeBody`) so you never hand-write request assembly
 - **Client Compatibility Targets** -- `target: 'claude' | 'openai' | 'gemini' | 'strict'` emits schemas each client actually accepts (inlined refs, closed objects, collapsed unions, demoted formats)
 - **Context-Budget Reports** -- `analyzeToolSet()` estimates the token bill per tool and warns at the thresholds where agent accuracy degrades
@@ -64,8 +65,8 @@ Now you know exactly how to build the HTTP request.
 - **Complete Schemas** -- Input schema combines all parameters; output schema from responses (with oneOf unions); streamed responses (`itemSchema`) reported in `metadata.responseStream`; clean JSON Schema 2020-12 output (`nullable` unions, normalized `examples`)
 - **MCP-Native Tools** -- `title` and tool `annotations` (readOnly/destructive/idempotent hints) inferred from HTTP semantics, overridable via the `x-mcp` extension family; spec-compliant tool names (64-char cap, stable hash truncation, collision dedup); deterministic tool ordering for prompt-cache friendliness; `toSdkTool()` for one-line SDK registration
 - **Security Resolution** -- Framework-agnostic auth for Bearer, Basic, Digest, API Key, OAuth2, OpenID, mTLS, HMAC, AWS Sig V4; per-scheme `includeSecurityInInput`
-- **SSRF Prevention** -- Blocks internal IPs, localhost, and cloud metadata endpoints by default during `$ref` resolution; one-flag `secureDefaults` posture for untrusted specs
-- **Multiple Input Sources** -- Load from URL, file, YAML string, or JSON object
+- **SSRF Prevention** -- Blocks internal IPs, localhost, and cloud metadata endpoints by default during `$ref` resolution; one-flag `secureDefaults` posture for untrusted specs; a documented trust model for what a spec can make the library read
+- **Multiple Input Sources** -- Load from URL, file, YAML string, or JSON object; multi-file specs resolve relative `$ref`s against where the document was loaded from (URL, file or `documentUri`)
 - **Rich Metadata** -- Authentication, servers, tags, deprecation, external docs, `x-frontmcp` extension
 - **Production Ready** -- Full TypeScript support, validation, structured errors, 100% test coverage (enforced)
 - **Runtime Agnostic** -- Works on Node and V8 isolates (Cloudflare Workers) alike
@@ -148,7 +149,7 @@ for (const tool of await generator.generateTools({ target: "claude" })) {
 
 | Document                                                                                                    | Description                                                       |
 | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| [Getting Started](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/getting-started.md)         | Loading specs, generating tools, building requests                |
+| [Getting Started](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/getting-started.md)         | Loading specs (multi-file included), generating tools, building requests |
 | [Configuration](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/configuration.md)             | LoadOptions, GenerateOptions, RefResolutionOptions                |
 | [OpenAPI Versions](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/openapi-versions.md)       | Supported versions, OpenAPI 3.2 features, diagnostics, known gaps |
 | [Parameter Conflicts](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/parameter-conflicts.md) | How conflict detection and resolution works                       |
@@ -162,7 +163,7 @@ for (const tool of await generator.generateTools({ target: "claude" })) {
 | [Response Schemas](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/response-schemas.md)       | Output schemas, status codes, oneOf unions, streamed responses    |
 | [Annotations & Extensions](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/annotations.md)    | Tool title, annotation inference, `x-mcp` extension family        |
 | [Security](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/security.md)                       | SecurityResolver, all auth types, custom resolvers                |
-| [SSRF Prevention](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/ssrf-prevention.md)         | Ref resolution security, blocked IPs and hosts                    |
+| [SSRF Prevention](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/ssrf-prevention.md)         | Ref resolution security, base URIs and `$self`, trust model       |
 | [Format Resolution](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/FORMAT_RESOLUTION.md)     | Format-to-schema enrichment (uuid, date-time, email, int32, etc.) |
 | [Naming Strategies](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/naming-strategies.md)     | Custom tool naming and conflict resolvers                         |
 | [SchemaBuilder](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/schema-builder.md)            | JSON Schema utility methods                                       |
@@ -191,7 +192,10 @@ Bug reports and feature requests go through the
 
 Report vulnerabilities privately — see the
 [security policy](https://github.com/agentfront/mcp-from-openapi/blob/main/SECURITY.md).
-When loading untrusted specs, use `secureDefaults: true`.
+When loading untrusted specs, use `secureDefaults: true`, and do not allow
+the `file` protocol in `refResolution.allowedProtocols` for a spec you do not
+control: it lets the spec read any local file the process can read (see the
+[trust model](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/ssrf-prevention.md#trust-model)).
 
 ## Related Projects
 

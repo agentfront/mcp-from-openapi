@@ -11,6 +11,7 @@ All errors extend `OpenAPIToolError`, which extends `Error`:
 ```
 OpenAPIToolError (base)
   ├── LoadError
+  │     └── SsrfError
   ├── ParseError
   ├── ValidationError
   ├── GenerationError
@@ -40,7 +41,25 @@ try {
 }
 ```
 
-**Context fields:** `url`, `filePath`, `status`, `originalError`
+A `LoadOptions.documentUri` that is not an absolute `http`, `https` or `file` URI of at most 2,048 characters, without user information, fragment or (for `file:`) host, also throws a `LoadError`. It is checked first, before `fromURL` fetches or `fromFile` reads anything. `context.documentUri` holds the value as the message quotes it, cut, with any user information shown as `***@`. See [SSRF Prevention](./ssrf-prevention.md#documenturi).
+
+**Context fields:** `url`, `filePath`, `status`, `originalError`, `documentUri`
+
+### SsrfError
+
+A `LoadError` thrown when the SSRF guard refuses the spec URL of `fromURL` (or a redirect hop of it). Catch it apart from other load failures, or let `instanceof LoadError` handle both. `context.reason` says why: `invalid-url`, `protocol`, `host-not-allowed`, `host-blocked`, `internal-address` (the host is an internal name or address), `resolved-address` (the name resolves to one), `dns-failed`, `too-large` (the body exceeds 10 MiB), `too-many-redirects` and `no-transport`.
+
+```typescript
+try {
+  await OpenAPIToolGenerator.fromURL("http://169.254.169.254/latest/meta-data/");
+} catch (error) {
+  if (error instanceof SsrfError) {
+    error.context?.reason; // 'internal-address'
+  }
+}
+```
+
+**Context fields:** `url`, `reason`
 
 ### ParseError
 
@@ -71,9 +90,35 @@ try {
 }
 ```
 
-A document that declares an unsupported version (Swagger 2.0, another major, a malformed value) fails this way with `INVALID_OPENAPI_VERSION`, or `MISSING_OPENAPI_VERSION` when no version is declared; see [OpenAPI Versions](./openapi-versions.md). The same findings are available without throwing from `generator.validate()`, and what validation only warns about from `generator.getDiagnostics()`.
+A document that declares an unsupported version (Swagger 2.0, another major, a malformed value) fails this way with `INVALID_OPENAPI_VERSION`, or `MISSING_OPENAPI_VERSION` when no version is declared; see [OpenAPI Versions](./openapi-versions.md). The same findings are available without throwing from `generator.validate()` (it throws only for a `$ref` that cannot be read, as below), and what validation only warns about from `generator.getDiagnostics()`.
 
-**Context fields:** `originalError`, `errors` (when validation fails during dereference)
+A failed dereference (`generateTools()`, `generateTool()`, `lint()`, or `validate()`, which returns it instead; see below) is a `ParseError` whose message is `Failed to dereference OpenAPI document: <why>` and whose `context.rule` says why. A `$ref` that cannot be read names the reference, what it was resolved against, the URL or path it became, the rule that refused it and the option that would allow it:
+
+```typescript
+try {
+  await generator.generateTools();
+} catch (error) {
+  if (error instanceof ParseError && error.context?.rule) {
+    error.message;
+    // 'Failed to dereference OpenAPI document: Cannot read $ref "./schemas/pet.json"
+    //  resolved against "/tmp/petstore/openapi.json" to "/tmp/petstore/schemas/pet.json":
+    //  it is read as a local file, and refResolution.allowedProtocols ("http", "https") does not include "file";
+    //  add "file" to refResolution.allowedProtocols to read it'
+    error.context.rule; // 'protocol'
+    error.context.reference; // './schemas/pet.json'
+    error.context.base; // '/tmp/petstore/openapi.json'
+    error.context.resolved; // '/tmp/petstore/schemas/pet.json'
+    // error.context.path, the JSON Pointer of the $ref, is there when the location is known:
+    // not for this document, which declares 3.1; a 3.0 or 3.2 one has it
+  }
+}
+```
+
+`rule` is one of `protocol`, `host-not-allowed`, `host-blocked`, `internal-address`, `resolved-address`, `dns-failed`, `too-large`, `timeout`, `response`, `fetch-failed`, `file-error`, `missing-target`, `invalid-document`, `base-too-long` and `unreadable`; each is described in [SSRF Prevention](./ssrf-prevention.md#when-a-reference-cannot-be-read). The message and every string of `context` are cut and escaped (a document controls them), the query of `base` and `resolved` is shown as `?...`, and the raw error is not kept. When several references cannot be read, the one reported is the first in document order, whatever order the network answers in. The exception is a document that cannot be copied at all (a YAML alias that makes it contain itself): that `ParseError` has only `originalError`.
+
+`generator.validate()` reads references like generation but does not throw for one that cannot be read. It returns `{ valid: false, errors: [{ code: 'UNREADABLE_REFERENCE', message, path }] }`, with `message` the text above without the `Failed to dereference OpenAPI document:` prefix and `path` the JSON Pointer of the `$ref` when it is in the document itself.
+
+**Context fields:** `rule`, `reference`, `base`, `resolved`, `path` (a dereference failure; the last four only when it names a `$ref`), `errors` (when validation fails), `originalError` (a document that cannot be copied)
 
 ### ValidationError
 

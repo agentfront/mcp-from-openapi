@@ -42,7 +42,7 @@ const generator = await OpenAPIToolGenerator.fromURL('https://api.example.com/op
 });
 ```
 
-Auto-detects JSON vs YAML based on `Content-Type` header or URL extension.
+Auto-detects JSON vs YAML based on `Content-Type` header or URL extension. The URL the document was finally read from (after redirects) is its base URI for relative `$ref`s: see [Multi-file Specifications](#multi-file-specifications).
 
 ### From a File
 
@@ -50,7 +50,7 @@ Auto-detects JSON vs YAML based on `Content-Type` header or URL extension.
 const generator = await OpenAPIToolGenerator.fromFile('./openapi.yaml');
 ```
 
-Accepts `.json`, `.yaml`, and `.yml` files. For other extensions, attempts JSON first, then YAML.
+Accepts `.json`, `.yaml`, and `.yml` files. For other extensions, attempts JSON first, then YAML. Relative `$ref`s resolve next to the file; reading them needs `file` in `refResolution.allowedProtocols`: see [Multi-file Specifications](#multi-file-specifications).
 
 ### From a YAML String
 
@@ -113,6 +113,74 @@ const generator = await OpenAPIToolGenerator.fromJSON(spec);
 ```
 
 The JSON object is deep-cloned internally, so your original is never mutated.
+
+A string or an object has no location, so pass `documentUri` if it has relative `$ref`s (see [Multi-file Specifications](#multi-file-specifications)).
+
+---
+
+## Multi-file Specifications
+
+A spec split across files names the other files with relative `$ref`s, such as `{ "$ref": "./schemas/pet.json" }`. A relative reference resolves against the document's base URI: where the document was loaded from. Each way of loading has one, or takes it as an option.
+
+### Files on disk
+
+Load the main file with `fromFile` and allow the `file` protocol, which is blocked by default:
+
+```typescript
+const generator = await OpenAPIToolGenerator.fromFile("/tmp/petstore/openapi.json", {
+  refResolution: { allowedProtocols: ["file"] },
+});
+const [tool] = await generator.generateTools();
+Object.keys(tool.outputSchema.properties); // ['id', 'name']
+```
+
+The references resolve next to the file, whatever the working directory is. If some references are absolute `http` or `https` URLs, keep those protocols in the list: `["http", "https", "file"]`.
+
+Without `file`, the first `generateTools()` (or `validate()`) fails, and the error says what to change:
+
+```
+ParseError: Failed to dereference OpenAPI document: Cannot read $ref "./schemas/pet.json"
+  resolved against "/tmp/petstore/openapi.json" to "/tmp/petstore/schemas/pet.json":
+  it is read as a local file, and refResolution.allowedProtocols ("http", "https") does not include "file";
+  add "file" to refResolution.allowedProtocols to read it
+```
+
+`error.context` holds `reference`, `base`, `resolved` and `rule` (here `'protocol'`). See [When a Reference Cannot Be Read](./ssrf-prevention.md#when-a-reference-cannot-be-read) for every rule.
+
+> **`file` lets the spec read any file the process can read.** Allow it only for documents you control. Do not allow it for a spec that comes from a URL or from a user: see the [Trust Model](./ssrf-prevention.md#trust-model).
+
+### A URL
+
+```typescript
+const generator = await OpenAPIToolGenerator.fromURL("https://specs.example.com/petstore/openapi.json");
+```
+
+`./schemas/pet.json` resolves against the URL the document was finally read from (after redirects, without credentials or fragment): `https://specs.example.com/petstore/schemas/pet.json`. `http` and `https` are allowed by default, so no option is needed. The reference passes the same host and internal-address checks as any other, and your `headers` are not sent with it.
+
+### A string or an object: `documentUri`
+
+`fromYAML` and `fromJSON` do not know where the text came from. Say so with `documentUri`:
+
+```typescript
+import { readFile } from "node:fs/promises";
+
+const spec = JSON.parse(await readFile("/tmp/petstore/openapi.json", "utf8"));
+
+const generator = await OpenAPIToolGenerator.fromJSON(spec, {
+  documentUri: "file:///tmp/petstore/openapi.json",
+  refResolution: { allowedProtocols: ["file"] },
+});
+```
+
+`documentUri` is an absolute `http`, `https` or `file` URI of at most 2,048 characters with no user information, no fragment and, for `file:`, no host; anything else throws a `LoadError` before anything is fetched or read (user information is never quoted back):
+
+```
+LoadError: LoadOptions.documentUri must be an absolute URI, such as https://example.com/openapi.yaml, found "./openapi.json"
+```
+
+It also replaces the URL or file a document was read from, in `fromURL` and `fromFile`. Without it, a document passed as a string or an object has no location: its relative references resolve against the process working directory, as in earlier releases.
+
+A 3.2 document can name itself with `$self`. That does not move where its references are read from: they are read next to the file, or from the URL, it was actually loaded from (or from `documentUri`). `$self` is the base only for a string or an object with no `documentUri`. See [The `$self` Field](./ssrf-prevention.md#the-self-field).
 
 ---
 
@@ -275,6 +343,8 @@ if (result.warnings) {
 }
 ```
 
+When the document has a `$ref` that does not start with `#`, `validate()` dereferences it first, under the same `refResolution` rules as generation, and validates the result. So it can read files and make network requests. A reference that cannot be read does not throw: the result is `{ valid: false, errors: [{ code: 'UNREADABLE_REFERENCE', message, path }] }`, where generation throws a `ParseError`. A reference to the document's own URI is made local and reads nothing. See [API Reference](./api-reference.md#instance-methods).
+
 By default, validation runs automatically before the first `generateTools()` / `generateTool()` call, with the rules of the version the document declares (OpenAPI 3.0, 3.1 and 3.2; see [OpenAPI Versions](./openapi-versions.md)). Disable with `validate: false`:
 
 ```typescript
@@ -290,6 +360,7 @@ Whatever the setting, `generator.getDiagnostics()` lists what the library notice
 - [Configuration](./configuration.md) -- All LoadOptions and GenerateOptions
 - [OpenAPI Versions](./openapi-versions.md) -- Supported versions, OpenAPI 3.2 features, diagnostics
 - [Parameter Conflicts](./parameter-conflicts.md) -- How automatic conflict resolution works
+- [SSRF Prevention](./ssrf-prevention.md) -- Base URIs, `$self`, which references are read, and the trust model
 - [Security](./security.md) -- Authentication handling
 - [Examples](./examples.md) -- Complete usage examples
 
