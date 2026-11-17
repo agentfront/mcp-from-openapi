@@ -1710,6 +1710,18 @@ __metadata:
   languageName: node
   linkType: hard
 
+"ajv-draft-04@npm:^1.0.0":
+  version: 1.0.0
+  resolution: "ajv-draft-04@npm:1.0.0"
+  peerDependencies:
+    ajv: ^8.5.0
+  peerDependenciesMeta:
+    ajv:
+      optional: true
+  checksum: 10c0/6044310bd38c17d77549fd326bd40ce1506fa10b0794540aa130180808bf94117fac8c9b448c621512bea60e4a947278f6a978e87f10d342950c15b33ddd9271
+  languageName: node
+  linkType: hard
+
 "ajv-formats@npm:^3.0.1":
   version: 3.0.1
   resolution: "ajv-formats@npm:3.0.1"
@@ -3487,6 +3499,7 @@ __metadata:
     "@types/json-schema": "npm:^7.0.15"
     "@types/node": "npm:^26.4.1"
     ajv: "npm:^8.17.0"
+    ajv-draft-04: "npm:^1.0.0"
     esbuild: "npm:^0.28.2"
     jest: "npm:^30.5.1"
     tslib: "npm:^2.8.1"

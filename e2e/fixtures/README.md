@@ -36,7 +36,7 @@ node e2e/fixtures/trim-openapi.mjs /tmp/discord-full.json e2e/fixtures/discord-t
 
 The OpenAPI Initiative's own JSON Schemas for OpenAPI 3.0, 3.1 and 3.2, plus the JSON Schema 2020-12 meta-schemas they depend on, vendored byte-for-byte and pinned by checksum. They are the source of truth for the schema-to-types parity story (every field in the official schema exists in our spec types, and our types add nothing the schema lacks) and for validating official OpenAPI documents. Unit tests never read them.
 
-[`oas/sources.json`](./oas/sources.json) is the manifest: a flat list of `{ id, version, kind, url, path, sha256 }` entries, where `path` is relative to `oas/`. The same format is meant to pin further official sources (for example OAI test documents at a fixed commit) as long as each one is a URL, a path and a checksum.
+[`oas/sources.json`](./oas/sources.json) is the manifest: a flat list of `{ id, version, kind, url, path, sha256 }` entries, where `path` is relative to `oas/`. The same format pins the OAI test documents below (kinds `document-pass` and `document-fail`, URLs at a fixed commit): each source is a URL, a path and a checksum.
 
 | File (under `oas/`) | Source | Pinned iteration | Retrieved | License | Size |
 | ------------------- | ------ | ---------------- | --------- | ------- | ---- |
@@ -69,6 +69,41 @@ The OpenAPI 3.1 and 3.2 schemas are JSON Schema 2020-12 documents and their dial
 
 The upstream repository is licensed under either the BSD 3-clause license or the Academic Free License v3.0 ([LICENSE](https://github.com/json-schema-org/json-schema-spec/blob/4e87b9141e62483383987ddbd27947f1c484b905/LICENSE) at `main` commit `4e87b9141e62483383987ddbd27947f1c484b905`, © 2022 JSON Schema Specification Authors; the `2020-12` branch carries no LICENSE file and its README says "AFL or BSD"). The files are redistributed unmodified under the BSD 3-clause option, which requires its notice to accompany them, so the text is reproduced verbatim in [NOTICES.md](./NOTICES.md).
 
+### OpenAPI Initiative test documents
+
+The OAI's own schema test documents, vendored byte-for-byte under `oas/documents/<version>/{pass,fail}/<name>.yaml` and pinned to a full commit SHA in the URL of each manifest entry (ids `oas-<version>-doc-<pass|fail>-<name>`, kinds `document-pass` / `document-fail`). OAI's own suite (`tests/schema/schema.test.mjs` on the 3.1 and 3.2 branches, `_archive_/schemas/v3.0/schema.test.mjs` on `main`) requires every `pass` document to validate against its schema and every `fail` document (3.1 and 3.2 only) to be rejected by `schema-base`. The official-documents story (`e2e/official-documents.e2e.ts`, with `e2e/helpers/oas-validate.ts`) repeats that check offline and then runs each document through our types, validator and generator. Unit tests never read them.
+
+| Files (under `oas/documents/`) | Source | Pinned commit | Commit date | Retrieved | License | Count |
+| ------------------------------ | ------ | ------------- | ----------- | --------- | ------- | ----- |
+| `3.2/pass/*.yaml`, `3.2/fail/*.yaml` | [OAI/OpenAPI-Specification](https://github.com/OAI/OpenAPI-Specification) branch `v3.2-dev`, `tests/schema/pass` and `tests/schema/fail` | `6d86f6560681d0c461cd06b3faa80814aa120fda` | 2026-11-12 | 2026-11-17 | Apache-2.0 ([upstream LICENSE](https://github.com/OAI/OpenAPI-Specification/blob/main/LICENSE)) | 37 pass, 31 fail |
+| `3.1/pass/*.yaml`, `3.1/fail/*.yaml` | same repository, branch `v3.1-dev`, `tests/schema/pass` and `tests/schema/fail` | `642ee90575f60233302ad3e82f9de83e02996532` | 2026-11-12 | 2026-11-17 | Apache-2.0 | 35 pass, 12 fail |
+| `3.0/pass/*.yaml` | same repository, branch `main`, `_archive_/schemas/v3.0/pass` (the archive has no `fail` documents) | `4f86429f134f7e48b6351563549b4502fc69de52` | 2026-10-18 | 2026-11-17 | Apache-2.0 | 6 pass |
+
+All are vendored unmodified, so no license text is reproduced (see [NOTICES.md](./NOTICES.md)). One caveat: OAI's source schemas carry `WORK-IN-PROGRESS` in their ids, and the 3.1 and 3.2 `pass/json_schema_dialect.yaml` document names that dialect, while the published schemas pinned above name the dated one. That document therefore fails the schema check as pinned; the story records it and proves it validates once the URI is replaced.
+
+To move the pin of one branch: set the new full SHA in the `url` of its entries (every entry of that version and kind carries the same one), add the entries of new files and drop those of deleted files, then run `--update` and review the diff. Entries for a folder at a commit are generated with:
+
+```bash
+SHA=6d86f6560681d0c461cd06b3faa80814aa120fda VERSION=3.2 DIR=tests/schema KIND=pass   # KIND: pass | fail
+gh api "repos/OAI/OpenAPI-Specification/git/trees/${SHA}?recursive=1" --jq '.tree[].path' \
+  | grep -E "^${DIR}/${KIND}/[^/]+\.yaml$" | sort | node -e '
+const [sha, version, kind] = process.argv.slice(1);
+const files = require("fs").readFileSync(0, "utf8").split("\n").filter(Boolean);
+console.log(JSON.stringify(files.map((file) => {
+  const name = file.split("/").pop();
+  return {
+    id: `oas-${version}-doc-${kind}-${name.replace(/\.yaml$/, "")}`,
+    version,
+    kind: `document-${kind}`,
+    url: `https://raw.githubusercontent.com/OAI/OpenAPI-Specification/${sha}/${file}`,
+    path: `documents/${version}/${kind}/${name}`,
+  };
+}), null, 2));
+' "$SHA" "$VERSION" "$KIND"
+```
+
+(`DIR` is `_archive_/schemas/v3.0` for 3.0.) Paste the printed entries into `oas/sources.json` (without `sha256`, which `--update` fills in), then run `node scripts/sync-oas-sources.mjs --update`. **When the pin moves, also update the story:** the literal document counts (`VERSIONS`) and the verdict table for FAIL documents (`VALIDATOR_VERDICTS`) in `e2e/official-documents.e2e.ts`, the pinned tools of each PASS document (`[name, method, path, readOnlyHint]`, in order, written from the document's operations under `paths`) in `e2e/expected/official-documents.json` (kept outside `oas/`, which the sync script treats as vendored upstream bytes only), and review `KNOWN_GAPS` (a gap that no longer fails, or a new failure, fails the story by design). Update the counts in the table above too.
+
 ### Regenerating and verifying
 
 [`scripts/sync-oas-sources.mjs`](https://github.com/agentfront/mcp-from-openapi/blob/main/scripts/sync-oas-sources.mjs) downloads the pinned URLs, writes the exact response bytes, and rewrites the `sha256` values in the manifest:
@@ -78,4 +113,4 @@ node scripts/sync-oas-sources.mjs --update   # re-download every source, rewrite
 node scripts/sync-oas-sources.mjs            # offline: every file exists and matches its sha256, no unlisted files
 ```
 
-To pin a newer iteration, change the entry's `url` (and its `path` only if the layout changes) in `oas/sources.json`, run `--update`, and review the diff. A redirect, a non-200 response, a body over 5 MB, or a host outside the script's allowlist (`spec.openapis.org`, `json-schema.org`, `raw.githubusercontent.com`) fails the update and writes nothing. Files are written through a temp file and a rename, and a symlink at a destination is refused; OS metadata such as `.DS_Store` is ignored by the unlisted-file check.
+To pin a newer iteration, change the entry's `url` (and its `path` only if the layout changes) in `oas/sources.json`, run `--update`, and review the diff. A redirect, a non-200 response, a body over 5 MB, or a host outside the script's allowlist (`spec.openapis.org`, `json-schema.org`, `raw.githubusercontent.com`) fails the update and writes nothing. `--update` downloads sequentially, one request per entry, and takes about 40 seconds for the full manifest. Files are written through a temp file and a rename, and a symlink at a destination is refused; OS metadata such as `.DS_Store` is ignored by the unlisted-file check.

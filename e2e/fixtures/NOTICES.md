@@ -45,6 +45,10 @@ Licensed under Apache-2.0; the license requires no notice reproduction for unmod
 
 Licensed under Apache-2.0; the license requires no notice reproduction for unmodified redistribution beyond attribution, recorded in [README.md](./README.md) with the upstream LICENSE link.
 
+## oas/documents/ — OAI/OpenAPI-Specification (commits pinned in oas/sources.json)
+
+Licensed under Apache-2.0; the license requires no notice reproduction for unmodified redistribution beyond attribution, recorded in [README.md](./README.md) with the upstream LICENSE link and the pinned commit of each branch.
+
 ## oas/schemas/json-schema-2020-12/ — json-schema-org/json-schema-spec (LICENSE at commit 4e87b91)
 
 The upstream repository is [licensed](https://github.com/json-schema-org/json-schema-spec/blob/4e87b9141e62483383987ddbd27947f1c484b905/LICENSE) under either the BSD 3-clause license or the Academic Free License v3.0. These unmodified files are redistributed under the BSD 3-clause option; its full text, copied verbatim from the upstream `LICENSE` at the commit above, follows.

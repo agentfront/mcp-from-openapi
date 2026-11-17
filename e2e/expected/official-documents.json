@@ -1,0 +1,85 @@
+{
+  "tools": {
+    "3.0": {
+      "api-with-examples": [
+        ["listVersionsv2", "get", "/", true],
+        ["getVersionDetailsv2", "get", "/v2", true]
+      ],
+      "callback-example": [["post_streams", "post", "/streams", false]],
+      "link-example": [
+        ["getRepositoriesByOwner", "get", "/2.0/repositories/{username}", true],
+        ["getRepository", "get", "/2.0/repositories/{username}/{slug}", true],
+        ["getPullRequestsByRepository", "get", "/2.0/repositories/{username}/{slug}/pullrequests", true],
+        ["getPullRequestsById", "get", "/2.0/repositories/{username}/{slug}/pullrequests/{pid}", true],
+        ["mergePullRequest", "post", "/2.0/repositories/{username}/{slug}/pullrequests/{pid}/merge", false],
+        ["getUserByName", "get", "/2.0/users/{username}", true]
+      ],
+      "petstore-expanded": [
+        ["findPets", "get", "/pets", true],
+        ["addPet", "post", "/pets", false],
+        ["find_pet_by_id", "get", "/pets/{id}", true],
+        ["deletePet", "delete", "/pets/{id}", false]
+      ],
+      "petstore": [
+        ["listPets", "get", "/pets", true],
+        ["createPets", "post", "/pets", false],
+        ["showPetById", "get", "/pets/{petId}", true]
+      ],
+      "uspto": [
+        ["list-data-sets", "get", "/", true],
+        ["list-searchable-fields", "get", "/{dataset}/{version}/fields", true],
+        ["perform-search", "post", "/{dataset}/{version}/records", false]
+      ]
+    },
+    "3.1": {
+      "link-object-examples": [
+        ["get_users_By_id", "get", "/users/{id}", true],
+        ["getUserAddress", "get", "/users/{userid}/address", true]
+      ],
+      "media-type-examples": [["put_something", "put", "/something", false]],
+      "mega": [["get", "get", "/", true]],
+      "non-oauth-scopes": [["get_users", "get", "/users", true]],
+      "operation-object-example": [["updatePetWithForm", "put", "/pets/{id}", false]],
+      "path-item-object-example": [["getPetsById", "get", "/pets/{id}", true]],
+      "path_item_servers_parameters": [
+        ["get_things", "get", "/things", true],
+        ["post_things", "post", "/things", false],
+        ["patch_things", "patch", "/things", false],
+        ["delete_things", "delete", "/things", false],
+        ["head_things", "head", "/things", true],
+        ["options_things", "options", "/things", true],
+        ["trace_things", "trace", "/things", true]
+      ],
+      "path_no_response": [["get", "get", "/", true]],
+      "paths-object-example": [["get_pets", "get", "/pets", true]],
+      "request-body-examples": [["put_something", "put", "/something", false]]
+    },
+    "3.2": {
+      "link-object-examples": [
+        ["get_users_By_id", "get", "/users/{id}", true],
+        ["getUserAddress", "get", "/users/{userid}/address", true]
+      ],
+      "media-type-examples": [["put_something", "put", "/something", false]],
+      "mega": [["get", "get", "/", true]],
+      "non-oauth-scopes": [["get_users", "get", "/users", true]],
+      "operation-object-example": [["updatePetWithForm", "put", "/pets/{id}", false]],
+      "path-item-object-example": [
+        ["getPetsById", "get", "/pets/{id}", true],
+        ["queryPetsById", "query", "/pets/{id}", true],
+        ["copyPetsById", "COPY", "/pets/{id}", false]
+      ],
+      "path_item_servers_parameters": [
+        ["get_things", "get", "/things", true],
+        ["post_things", "post", "/things", false],
+        ["patch_things", "patch", "/things", false],
+        ["delete_things", "delete", "/things", false],
+        ["head_things", "head", "/things", true],
+        ["options_things", "options", "/things", true],
+        ["trace_things", "trace", "/things", true]
+      ],
+      "path_no_response": [["get", "get", "/", true]],
+      "paths-object-example": [["get_pets", "get", "/pets", true]],
+      "request-body-examples": [["put_something", "put", "/something", false]]
+    }
+  }
+}
