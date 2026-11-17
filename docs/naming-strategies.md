@@ -108,7 +108,7 @@ By default, tools are named using the operation's `operationId` (or an extension
 {method}_{sanitized_path}
 ```
 
-For example: `GET /users/{id}` becomes `get_users_By_id`.
+For example: `GET /users/{id}` becomes `get_users_By_id`. An OpenAPI 3.2 `query` operation is named the same way (`query_search` for `QUERY /search`). An `additionalOperations` method is used as written, case included: `LINK /files/{id}` becomes `LINK_files_By_id` and `M-SEARCH /files` becomes `M-SEARCH_files` (`-` is valid in a tool name). Two keys that differ only in case (`LINK`, `Link`) are two operations with two names.
 
 Override with `toolNameGenerator` (output is still normalized as above). `conflictResolver` is optional — when omitted, the default location-prefix resolver applies. The generator also receives the full operation object as a fourth argument for tag-aware strategies:
 
@@ -129,7 +129,7 @@ const tools = await generator.generateTools({
 });
 ```
 
-Note: an `x-mcp` family `name` override arrives through the `operationId` argument, in place of the operationId.
+Note: an `x-mcp` family `name` override arrives through the `operationId` argument, in place of the operationId. The `method` argument is the canonical method: the lowercase field name for a standard method (`'get'`, `'query'`), the `additionalOperations` key as written (`'LINK'`) otherwise. `isStandardMethod(method)` tells the two kinds apart.
 
 ## dottedNaming Preset
 
@@ -144,7 +144,7 @@ const tools = await generator.generateTools({ namingStrategy: dottedNaming() });
 ```
 
 - **Namespace half**: the operation's first tag, falling back to the first path segment, then `api`. Configure with `namespaceFrom: 'tag' | 'firstPathSegment'` (default `'tag'`).
-- **Method half**: the sanitized operationId, falling back to the HTTP method plus the remaining path segments (`{param}` becomes `by_<param>`).
+- **Method half**: the sanitized operationId, falling back to the HTTP method plus the remaining path segments (`{param}` becomes `by_<param>`). A `query` operation gives `query_by_id`; an `additionalOperations` method is sanitized like the other halves, keeping its case (`LINK` gives `LINK_by_id`, `M-SEARCH` gives `M_SEARCH_by_id`) and falling back to `op` when nothing survives.
 - **Reserved namespaces** (CodeCall sandbox globals such as `console`, `JSON`, `callTool` — the full list is exported as `CODECALL_RESERVED_NAMESPACES`) get an `_` suffix; add your own via `reservedNamespaces: [...]`.
 - **Collisions**: `generateTools()` dedup appends `_<hash>` to the method half, which stays namespace-parseable. Hash truncation can remove the dot when the namespace half alone approaches the name cap (≥ 55 chars at the default 64) — the name stays MCP-valid but loses namespace binding.
 - **Digit-leading namespaces** get an `n` prefix (`3rd-party` → `n3rd_party`) — a `_` guard would be trimmed off the front of the tool name during normalization.

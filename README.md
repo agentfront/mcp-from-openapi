@@ -150,6 +150,7 @@ for (const tool of await generator.generateTools({ target: "claude" })) {
 | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
 | [Getting Started](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/getting-started.md)         | Loading specs, generating tools, building requests                |
 | [Configuration](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/configuration.md)             | LoadOptions, GenerateOptions, RefResolutionOptions                |
+| [OpenAPI Versions](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/openapi-versions.md)       | Supported versions, OpenAPI 3.2 features, diagnostics, known gaps |
 | [Parameter Conflicts](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/parameter-conflicts.md) | How conflict detection and resolution works                       |
 | [Request Builder](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/request-builder.md)         | `buildHttpRequest` — full OpenAPI parameter serialization         |
 | [Client Targets](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/client-targets.md)           | Per-client schema dialects (Claude, OpenAI, Gemini)               |

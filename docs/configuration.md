@@ -29,7 +29,7 @@ const generator = await OpenAPIToolGenerator.fromURL(url, {
 | `baseUrl`         | `string`                               | `''`    | Override server URLs from the spec                                                                                                                                                                  |
 | `headers`         | `Record<string, string>`               | `{}`    | Custom HTTP headers for URL loading. Sent only to the spec URL's origin: dropped once a redirect leaves it, and never sent to external `$ref` hosts                                                 |
 | `timeout`         | `number`                               | `30000` | HTTP request timeout in milliseconds                                                                                                                                                                |
-| `validate`        | `boolean`                              | `true`  | Validate the OpenAPI document on load                                                                                                                                                               |
+| `validate`        | `boolean`                              | `true`  | Validate the document with the rules of the version it declares, at the first `generateTools()` / `generateTool()` — see [OpenAPI Versions](./openapi-versions.md). `false` skips it; the declared version is still recorded in `getDiagnostics()` |
 | `followRedirects` | `boolean`                              | `true`  | Follow HTTP redirects when loading from URL                                                                                                                                                         |
 | `refResolution`   | `RefResolutionOptions`                 | `{}`    | Security settings for `$ref` resolution                                                                                                                                                             |
 | `secureDefaults`  | `boolean`                              | `false` | One-flag strict posture for untrusted specs: redirects off, external `$ref` resolution disabled. Explicit values win **per key** — tightening one `refResolution` knob keeps the rest of the preset |
@@ -83,7 +83,7 @@ const tools = await generator.generateTools({
 | `inferAnnotations`                  | `boolean`                                                    | `true`                           | Infer MCP tool annotations from HTTP method semantics                                      |
 | `maxToolNameLength`                 | `number`                                                     | `64`                             | Tool name length cap (clamped to MCP's 128 max); longer names get a hash suffix            |
 | `includeTags` / `excludeTags`       | `string[]`                                                   | -                                | Filter operations by OpenAPI tags                                                          |
-| `includeMethods` / `excludeMethods` | `HTTPMethod[]`                                               | -                                | Filter operations by HTTP method                                                           |
+| `includeMethods` / `excludeMethods` | `HTTPMethod[]`                                               | -                                | Filter operations by HTTP method. A standard method (`get`, `query`, ...) matches in any case (`'GET'` works); an `additionalOperations` method (`'LINK'`) matches only exactly as written in the document (`'link'` does not match `LINK`). `excludeMethods` is a denylist: see [Filtering Operations](#filtering-operations) |
 | `includePaths` / `excludePaths`     | `string[]`                                                   | -                                | Filter by path globs (`*` per segment, `**` across, `?` one char)                          |
 | `readOnlyOnly`                      | `boolean`                                                    | `false`                          | Safety switch: only operations whose effective annotations are read-only                   |
 | `target`                            | `'claude' \| 'openai' \| 'gemini' \| 'strict'`               | -                                | Per-client schema dialect transforms — see [Client Targets](./client-targets.md)           |
@@ -109,6 +109,13 @@ const tools = await generator.generateTools({
 });
 ```
 
+**Method filters and OpenAPI 3.2.** Which operations a document has depends on the version it declares: the `query` operation and `additionalOperations` exist only in a document declaring 3.2 or newer; a 3.0 or 3.1 document is read with the eight classic methods (see [OpenAPI Versions](./openapi-versions.md)). So an `excludeMethods` list written for the eight old methods cannot be bypassed by a new method in such a document. A 3.2 document is different: `additionalOperations` accepts any HTTP method token, and a method the document adds later is in no denylist. `excludeMethods` is a denylist and cannot cover methods you have not seen; where a 3.2 document can add arbitrary methods, use `includeMethods` (an allowlist) or `readOnlyOnly`, which keeps only operations whose effective annotations are read-only (an additional method is not, unless an `x-mcp` extension says so):
+
+```typescript
+// Only these methods; any other method the document adds is left out
+const tools = await generator.generateTools({ includeMethods: ["get", "query"] });
+```
+
 Spec authors can also exclude operations declaratively with `x-mcp: false` at the **root, path, or operation** level (operation wins, then path, then root — a root-level `false` flips the whole spec to opt-in). See [Annotations & Extensions](./annotations.md).
 
 The original mechanisms still apply:
@@ -129,7 +136,7 @@ const tools = await generator.generateTools({
 
 **By custom filter:**
 
-The `filterFn` receives an `OperationWithContext` -- the OpenAPI operation object extended with `path` and `method` properties:
+The `filterFn` receives an `OperationWithContext` -- the OpenAPI operation object extended with `path` and `method` properties. `method` is the canonical form: lowercase for a standard method (`"get"`, `"query"`), the key exactly as written for an `additionalOperations` operation (`"LINK"`). It only sees the operations the declared version defines:
 
 ```typescript
 // Only GET operations
@@ -179,11 +186,12 @@ Note: **schema-level** `example` keywords are always normalized to `examples` ar
 
 When `true` (default), each tool gets MCP [tool annotations](./annotations.md) derived from HTTP method semantics (RFC 9110 safety/idempotency):
 
-| Method                    | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
-| ------------------------- | -------------- | ----------------- | ---------------- | --------------- |
-| GET, HEAD, OPTIONS, TRACE | `true`         | `false`           | `true`           | `false`         |
-| PUT, DELETE               | `false`        | `true`            | `true`           | `false`         |
-| POST, PATCH               | `false`        | `true`            | `false`          | `false`         |
+| Method                           | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+| -------------------------------- | -------------- | ----------------- | ---------------- | --------------- |
+| GET, HEAD, OPTIONS, TRACE, QUERY | `true`         | `false`           | `true`           | `false`         |
+| PUT, DELETE                      | `false`        | `true`            | `true`           | `false`         |
+| POST, PATCH                      | `false`        | `true`            | `false`          | `false`         |
+| Any other method (OpenAPI 3.2 `additionalOperations`, such as LINK) | `false` | `true` | `false` | `false` |
 
 Extension overrides (`x-speakeasy-mcp`, `x-mcp`, `x-frontmcp`) are merged on top and still apply when inference is disabled. See [Annotations & Extensions](./annotations.md).
 

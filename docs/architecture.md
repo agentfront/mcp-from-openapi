@@ -8,7 +8,8 @@
 
 ```
 OpenAPIToolGenerator (Main Entry Point)
-  ├── Validator           → OpenAPI document validation
+  ├── Spec layer (src/spec) → declared version, per-version profiles, operation walk, diagnostics
+  ├── Validator           → OpenAPI document validation (rules of the declared version)
   ├── ParameterResolver   → Parameter conflict resolution & mapping
   ├── ResponseBuilder     → Output schema generation
   ├── SchemaBuilder       → Schema manipulation utilities
@@ -26,9 +27,14 @@ User Input (URL / File / String / Object)
          ↓
    OpenAPI Document
          ↓
-     Validate (optional)
+     Read declared version (detectSpecVersion)
          ↓
    Dereference $refs (optional, with SSRF protection)
+         ↓
+     Validate (optional, rules of the declared version; once per generator)
+         ↓
+     List operations (listOperations with the declared version's layout:
+     the eight classic methods; plus query and additionalOperations from 3.2)
          ↓
      Filter Operations
          ↓
@@ -53,8 +59,23 @@ User Input (URL / File / String / Object)
 - Coordinates validation, parameter resolution, response building, and metadata extraction
 - Handles SSRF protection for `$ref` resolution
 - Generates tool names (from operationId or path+method)
+- Enumerates operations through the spec layer, never by indexing a path item with a method name
+- Records what it skipped or ignored as diagnostics (`getDiagnostics()`) instead of dropping it silently
 
 **Key files:** `src/generator.ts`
+
+### Spec layer
+
+**Responsibility:** Everything that knows about OpenAPI versions. It imports nothing from the rest of the library (the compiler enforces it through `src/spec/tsconfig.json`), so it can be extracted as is. It returns diagnostics and the generator decides what each becomes.
+
+- `versions.ts`: reads the declared version (`detectSpecVersion`), holds one profile per known `major.minor` (3.0, 3.1, 3.2) with the rules the validator applies, and names the version that introduced each feature
+- `operations.ts`: the one place that knows where operations live in a Path Item (`listOperations`, `getOperation`), with own-property reads and diagnostics for what it ignores. Additional methods match exactly as written
+- `diagnostics.ts`: the `SpecDiagnostic` shape, the spec layer's codes, `diagnosticKey` (bounded de-duplication keys), and the helpers that escape and cap document text before it reaches a message or a JSON Pointer (`describeValue`, `jsonPointer`)
+- `types/`: the OpenAPI 3.0, 3.1 and 3.2 object types
+
+Which operations a document has follows its declared version (`resolveOperationLayout`: `query` and `additionalOperations` only from 3.2), and so does validation; every other construct the library understands is processed whatever version the document declares. The generator, the validator, lint and Arazzo all read operations through the same layout. See [OpenAPI Versions](./openapi-versions.md).
+
+**Key files:** `src/spec/versions.ts`, `src/spec/operations.ts`, `src/spec/diagnostics.ts`
 
 ### ParameterResolver
 
@@ -86,21 +107,25 @@ User Input (URL / File / String / Object)
 
 ### Validator
 
-**Responsibility:** Validate OpenAPI 3.0.x and 3.1.x document structure.
+**Responsibility:** Validate OpenAPI 3.0.x, 3.1.x and 3.2.x document structure with the rules of the version the document declares.
 
 **Checks (errors):**
-- OpenAPI version field present and valid
+- OpenAPI version field present and processable (Swagger 2.0 and other majors are rejected; a newer 3.x minor is accepted with a warning)
 - `info`, `info.title`, `info.version` present
 - Paths start with `/`
 - Path parameters are defined and required
-- Operations have responses
-- Parameters have name, `in`, and schema/content
+- Operations have non-empty responses (`responses` is required in 3.0 only)
+- Parameters have name, a location the declared version defines, and schema/content
+- OpenAPI 3.2 rules: at most one `in: querystring` parameter, not combined with `in: query`, using `content`; in a document declaring 3.2 or newer, `additionalOperations` is an object whose keys are HTTP method tokens other than the upper-case name of a method with its own field; method fields hold objects
 
 **Checks (warnings):**
 - No paths defined
 - No servers defined
 - No operation IDs
 - Security requirements without schemes
+- A newer 3.x minor version, both `openapi` and `swagger`, or a construct newer than the declared version (`query` and `additionalOperations` in a 3.0 or 3.1 document are not read; `in: querystring`)
+- Values the operation walk ignores (a path item that is not an object, a case variant of a standard method as an `additionalOperations` key, a `CONNECT` method)
+- Each list (`errors`, `warnings`) is capped at 1,000 entries, then one `DIAGNOSTICS_TRUNCATED` entry
 
 **Key files:** `src/validator.ts`
 
@@ -159,7 +184,12 @@ src/
   ├── schema-builder.ts      # SchemaBuilder class
   ├── validator.ts           # Validator class
   ├── types.ts               # Type definitions + utility functions
-  └── errors.ts              # Error class hierarchy
+  ├── errors.ts              # Error class hierarchy
+  └── spec/                  # Version-aware spec layer (imports nothing from outside)
+      ├── versions.ts        # Declared version, per-version profiles, feature table
+      ├── operations.ts      # listOperations / getOperation
+      ├── diagnostics.ts     # SpecDiagnostic, codes, JSON Pointer helpers
+      └── types/             # OpenAPI 3.0 / 3.1 / 3.2 object types
 ```
 
 ---

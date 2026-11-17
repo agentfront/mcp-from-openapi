@@ -32,7 +32,26 @@ async generateTools(options?: GenerateOptions): Promise<McpOpenAPITool[]>
 async generateTool(path: string, method: string, options?: GenerateOptions): Promise<McpOpenAPITool>
 getDocument(): OpenAPIDocument
 async validate(): Promise<ValidationResult>
+getDiagnostics(): SpecDiagnostic[]
+getSpecVersion(): SpecVersionInfo
 ```
+
+**`generateTool(path, method)`**: `method` is a standard method in any case (`'get'`, `'GET'`, `'query'`) or an OpenAPI 3.2 `additionalOperations` method exactly as written in the document (`'LINK'` finds `LINK`; `'link'` does not). Only the operations the declared version defines are found: `query` and `additionalOperations` exist from 3.2 on, so `generateTool('/search', 'query')` on a 3.1 document throws `Operation not found`. The tool's `metadata.method` is the canonical form: the lowercase field name of a standard method, the key as written otherwise. It throws a `GenerationError` (context `path`, `method`, `pointer`) for an operation that `generateTools()` skips with a diagnostic: a parameter in a location the library does not map, such as `in: querystring` (`UNSUPPORTED_PARAMETER_LOCATION`), or no Security Requirement that can be satisfied (`UNSATISFIABLE_SECURITY`).
+
+**`generateTools()` / `generateTool()` and validation**: with `validate: true` (the default) the first call validates the document (after dereferencing, when that is on) and later calls reuse the result. A document that fails throws a `ParseError` whose message is `Invalid OpenAPI document: <first error>` (with `(and N more; see the error's context.errors)` when there are more) and whose `context.errors` is the full `ValidationErrorDetail[]`. The quoted first error is cut at 512 characters and any control or bidirectional character in it is written as `\uXXXX`, so the message is safe to log; `context.errors` is not altered. `validate()` is separate: it validates the loaded document as it is (not dereferenced) each time it is called, returns the result instead of throwing, and records no diagnostics.
+
+**`getDiagnostics()`** returns what the generator noticed without failing, in the order it was first noticed, each finding once (a copy; changing it changes nothing). It grows as the generator works: the declared version at load, the validator's warnings at the first generation with `validate: true`, and the constructs generation skipped or ignored. Every `severity` is `'warning'` today. It keeps at most `MAX_DIAGNOSTICS` (1,000) distinct findings, then ends with one `DIAGNOSTICS_TRUNCATED` entry. See [OpenAPI Versions](./openapi-versions.md#diagnostics) for every code and the limits on quoted text and `path`.
+
+```typescript
+interface SpecDiagnostic {
+  severity: "warning" | "info";
+  code: string; // a DIAGNOSTIC_CODES value, e.g. 'FEATURE_NEWER_THAN_DECLARED_VERSION'
+  message: string;
+  path?: string; // JSON Pointer (RFC 6901) into the document; display-only when a segment was cut or escaped
+}
+```
+
+**`getSpecVersion()`** returns the declared version as `detectSpecVersion` reads it (after overlays), as a copy. `status` says whether the version can be processed and `family` which rules apply.
 
 ---
 
@@ -134,7 +153,7 @@ See [Response Schemas](./response-schemas.md) for details.
 
 ### Validator
 
-Validates OpenAPI 3.0.x and 3.1.x documents.
+Validates OpenAPI 3.0.x, 3.1.x and 3.2.x documents with the rules of the version the document declares. A newer 3.x minor version is valid with a `NEWER_OPENAPI_VERSION` warning and is checked with the 3.2 rules; Swagger 2.0, other major versions, malformed and missing versions are errors. See [OpenAPI Versions](./openapi-versions.md).
 
 ```typescript
 import { Validator } from "mcp-from-openapi";
@@ -147,6 +166,46 @@ async validate(document: object): Promise<ValidationResult>
 ```
 
 Accepts any object, like the generator's factories.
+
+#### Codes
+
+Errors (`valid: false`):
+
+| Code | Reported when |
+| --- | --- |
+| `MISSING_OPENAPI_VERSION` | The document has neither `openapi` nor `swagger` |
+| `INVALID_OPENAPI_VERSION` | The version cannot be processed: Swagger 2.0, another major version, a malformed value |
+| `MISSING_INFO`, `MISSING_TITLE`, `MISSING_VERSION` | `info`, `info.title` or `info.version` is missing |
+| `INVALID_PATH_FORMAT` | A path does not start with `/` |
+| `NO_RESPONSES` | An operation has no `responses` (required in 3.0 only) or has an empty `responses` (any version) |
+| `MISSING_PATH_PARAMETER` | A path template variable has no matching `in: path` parameter |
+| `INVALID_PARAMETER` | An entry of a `parameters` list is not an object |
+| `MISSING_PARAMETER_NAME`, `MISSING_PARAMETER_IN` | A parameter has no `name` or no `in` |
+| `INVALID_PARAMETER_IN` | `in` is not a location of the declared version (3.0 and 3.1: `path`, `query`, `header`, `cookie`; 3.2 adds `querystring`) |
+| `PATH_PARAMETER_NOT_REQUIRED` | An `in: path` parameter is not `required` |
+| `MISSING_PARAMETER_SCHEMA` | A parameter has neither `schema` nor `content` (an `in: querystring` parameter needs `content`) |
+| `MULTIPLE_QUERYSTRING_PARAMETERS` | An operation has more than one `in: querystring` parameter |
+| `QUERYSTRING_WITH_QUERY_PARAMETERS` | An operation combines an `in: querystring` parameter with `in: query` parameters |
+| `QUERYSTRING_PARAMETER_WITHOUT_CONTENT` | An `in: querystring` parameter has no `content` |
+| `OPERATION_NOT_OBJECT` | A method field, or an `additionalOperations` value, is not an object (`get: "x"`). A fixed field holding `null` is skipped without a finding |
+| `ADDITIONAL_OPERATIONS_NOT_OBJECT` | `additionalOperations` is not an object (read only when the document declares 3.2 or newer) |
+| `INVALID_METHOD_TOKEN` | An `additionalOperations` key is not an HTTP method token (RFC 9110) |
+| `DUPLICATE_FIXED_METHOD` | An `additionalOperations` key is the upper-case name of a method that has its own field (`GET`, `QUERY`) |
+
+Warnings:
+
+| Code | Reported when |
+| --- | --- |
+| `NO_PATHS`, `NO_SERVERS`, `NO_OPERATIONS`, `NO_OPERATION_ID`, `NO_SECURITY_SCHEMES` | No paths or servers, a path without operations, an operation without `operationId`, security requirements without schemes |
+| `NEWER_OPENAPI_VERSION` | The document declares a 3.x minor version newer than 3.2 |
+| `CONFLICTING_VERSION_FIELDS` | The document declares both `openapi` and `swagger` (`swagger` is ignored) |
+| `FEATURE_NEWER_THAN_DECLARED_VERSION` | A `query` operation or `additionalOperations` in a document declaring 3.0 or 3.1 (not read, so no tool and not validated), or an `in: querystring` parameter in such a document |
+| `PATH_ITEM_NOT_OBJECT` | A path item is not an object; it holds no operations |
+| `METHOD_CASE_VARIANT` | An `additionalOperations` key is another case of a method that has its own field (`post`, `Get`); the library sends such a method upper-cased, so the key is ignored |
+| `REFUSED_METHOD` | An `additionalOperations` key is `CONNECT` in any case; it is ignored |
+| `DIAGNOSTICS_TRUNCATED` | `errors` or `warnings` reached `MAX_DIAGNOSTICS` (1,000); it is the last entry of that list |
+
+The codes of earlier releases and their `path` form (the path key unescaped, cut past `LEGACY_PATH_KEY_MAX_LENGTH` (1,024) characters, as in `/paths//pets/get/operationId`) are unchanged; every newer code carries an RFC 6901 JSON Pointer (`/paths/~1pets/get`), whose segments are escaped for display and capped at 256 characters (a pointer with a cut or escaped segment does not resolve). Text quoted from the document in a message is cut and escaped. `errors` and `warnings` each keep at most `MAX_DIAGNOSTICS` entries. The messages of the version errors changed with the supported versions.
 
 ---
 
@@ -286,6 +345,142 @@ const jsonSchema = toJsonSchema(openApiSchema);
 
 ---
 
+## Operations and Versions
+
+The functions that read a document's declared version and walk the operations of a Path Item. `generateTools()`, the validator, `lintDocument` and `fromArazzo` use them, so code that walks a document the same way sees the same operations. See [OpenAPI Versions](./openapi-versions.md).
+
+### detectSpecVersion
+
+Reads the version a document declares (`openapi`, or `swagger` when there is no `openapi`). Never throws; any value is accepted. `generator.getSpecVersion()` returns the same result for the loaded document.
+
+```typescript
+detectSpecVersion(document: unknown): SpecVersionInfo
+
+interface SpecVersionInfo {
+  status: "supported" | "newer-minor" | "swagger-2.0" | "unsupported" | "malformed" | "missing";
+  field?: "openapi" | "swagger"; // where the version was read; undefined when missing
+  declared?: unknown; // the value as read; undefined when missing
+  major?: number; // unless malformed or missing
+  minor?: number;
+  family?: "3.0" | "3.1" | "3.2"; // the rules applied; set for 'supported' and 'newer-minor'
+  diagnostics: SpecDiagnostic[]; // NEWER_OPENAPI_VERSION, CONFLICTING_VERSION_FIELDS
+}
+```
+
+```typescript
+import { detectSpecVersion } from "mcp-from-openapi";
+
+detectSpecVersion({ openapi: "3.1.0" }).family; // '3.1'
+detectSpecVersion({ openapi: "3.9.0" }).status; // 'newer-minor'
+detectSpecVersion({ swagger: "2.0" }).status; // 'swagger-2.0'
+detectSpecVersion({ openapi: "3.1" }).status; // 'malformed'
+detectSpecVersion({}).status; // 'missing'
+```
+
+### SUPPORTED_SPEC_VERSIONS
+
+The versions the library reads, as `readonly string[]`: `['3.0.x', '3.1.x', '3.2.x']`.
+
+### resolveOperationLayout
+
+The one place that decides which operations of a document are read. A `supported` or `newer-minor` version gets its family's layout: `query` and `additionalOperations` only from 3.2 on. Any other status (`swagger-2.0`, `unsupported`, `malformed`, `missing`) gets the eight classic methods and no `additionalOperations`, exactly what the library read before OpenAPI 3.2 support.
+
+```typescript
+resolveOperationLayout(version: SpecVersionInfo): OperationLayout
+```
+
+```typescript
+import { detectSpecVersion, resolveOperationLayout } from "mcp-from-openapi";
+
+resolveOperationLayout(detectSpecVersion({ openapi: "3.1.0" })).additionalOperations; // false
+resolveOperationLayout(detectSpecVersion({ openapi: "3.2.0" })).additionalOperations; // true
+resolveOperationLayout(detectSpecVersion({ openapi: "3.2.0" })).fixedMethods.includes("query"); // true
+resolveOperationLayout(detectSpecVersion({})).fixedMethods.includes("query"); // false
+```
+
+Pass its result as `layout` to `listOperations` and `getOperation` to read a document the way the generator does.
+
+### listOperations / getOperation / isStandardMethod
+
+```typescript
+listOperations(pathItem: unknown, options?: ListOperationsOptions): OperationList
+getOperation(pathItem: unknown, method: string, options?: GetOperationOptions): OperationEntry | undefined
+isStandardMethod(method: unknown): boolean
+```
+
+```typescript
+type StandardMethod = "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "trace" | "query";
+
+type OperationEntry =
+  | { method: StandardMethod; operation: OperationObject; source: "fixed" }
+  | { method: string; operation: OperationObject; source: "additional" };
+
+interface OperationList {
+  operations: OperationEntry[];
+  diagnostics: SpecDiagnostic[]; // each value that was ignored, and why
+}
+
+interface OperationLayout {
+  readonly fixedMethods: readonly StandardMethod[]; // the fixed fields read
+  readonly additionalOperations: boolean; // whether `additionalOperations` is read
+}
+
+interface ListOperationsOptions {
+  layout?: OperationLayout; // default: every fixed field and `additionalOperations`, whatever the document declares
+  pointer?: string; // JSON Pointer of the path item, prefixed to diagnostics' `path`
+}
+
+interface GetOperationOptions {
+  layout?: OperationLayout;
+}
+```
+
+- `listOperations` lists the fixed fields in the order `get`, `post`, `put`, `patch`, `delete`, `head`, `options`, `trace`, `query`, then the `additionalOperations` entries sorted by key (code-unit order). A missing field is skipped silently; any other value that is ignored adds a warning diagnostic (`PATH_ITEM_NOT_OBJECT`, `OPERATION_NOT_OBJECT`, `ADDITIONAL_OPERATIONS_NOT_OBJECT`, `INVALID_METHOD_TOKEN`, `DUPLICATE_FIXED_METHOD`, `METHOD_CASE_VARIANT`, `REFUSED_METHOD`). Only the fields in the layout are read.
+- For a fixed operation `method` is the lowercase field name; for an additional one it is the key as written (it may be any HTTP token, so never use it as a key of a plain object without checking `isStandardMethod`).
+- `getOperation` finds the operation `listOperations` would list for `method`. A standard method in any case (`'GET'`) is looked up in its fixed field only. Any other method is looked up in `additionalOperations` and matched exactly as written: `'LINK'` does not find `link`, as for `generateTool`, `includeMethods` and Arazzo `operationPath`.
+- Reads are own-property reads: a path item never yields `constructor` or `__proto__` from its prototype.
+- `isStandardMethod` is true for a method that has a fixed field, in any case: `'GET'`, `'Query'` yes; `'LINK'`, a non-string no.
+
+```typescript
+import { listOperations, getOperation, isStandardMethod } from "mcp-from-openapi";
+
+const pathItem = {
+  get: { responses: {} },
+  query: { responses: {} },
+  additionalOperations: { LINK: { responses: {} }, GET: { responses: {} } },
+};
+
+const { operations, diagnostics } = listOperations(pathItem, { pointer: "/paths/~1files" });
+operations.map((o) => `${o.method} (${o.source})`); // ['get (fixed)', 'query (fixed)', 'LINK (additional)']
+diagnostics.map((d) => `${d.code} ${d.path}`); // ['DUPLICATE_FIXED_METHOD /paths/~1files/additionalOperations/GET']
+
+getOperation(pathItem, "QUERY")?.method; // 'query'
+getOperation(pathItem, "LINK")?.method; // 'LINK'
+getOperation(pathItem, "link"); // undefined: an additional method matches exactly as written
+isStandardMethod("Query"); // true
+isStandardMethod("LINK"); // false
+```
+
+### DIAGNOSTIC_CODES / MAX_DIAGNOSTICS
+
+`DIAGNOSTIC_CODES` is the one frozen registry of every code a diagnostic from `generator.getDiagnostics()` can carry (its keys equal its values); `DiagnosticCode` is the union of those strings. It holds the codes of the version and operation-walk logic (`NEWER_OPENAPI_VERSION`, `FEATURE_NEWER_THAN_DECLARED_VERSION`, `CONFLICTING_VERSION_FIELDS`, `PATH_ITEM_NOT_OBJECT`, `OPERATION_NOT_OBJECT`, `ADDITIONAL_OPERATIONS_NOT_OBJECT`, `INVALID_METHOD_TOKEN`, `DUPLICATE_FIXED_METHOD`, `METHOD_CASE_VARIANT`, `REFUSED_METHOD`), the version errors (`INVALID_OPENAPI_VERSION`, `MISSING_OPENAPI_VERSION`), the validator warnings (`NO_PATHS`, `NO_OPERATIONS`, `NO_OPERATION_ID`, `NO_SERVERS`, `NO_SECURITY_SCHEMES`), the generator's (`UNRESOLVED_SECURITY_SCHEME`, `INVALID_SECURITY_REQUIREMENT`, `UNSATISFIABLE_SECURITY`, `UNSUPPORTED_PARAMETER_LOCATION`) and `DIAGNOSTICS_TRUNCATED`. Each is described in [OpenAPI Versions](./openapi-versions.md#diagnostics).
+
+`MAX_DIAGNOSTICS` (`1000`) is the most findings one list keeps: `getDiagnostics()`, and each of a `ValidationResult`'s `errors` and `warnings`. `LEGACY_PATH_KEY_MAX_LENGTH` (`1024`) is the longest path key the historical validation paths and messages quote.
+
+```typescript
+import { DIAGNOSTIC_CODES } from "mcp-from-openapi";
+
+const unsupported = generator
+  .getDiagnostics()
+  .filter((d) => d.code === DIAGNOSTIC_CODES.UNSUPPORTED_PARAMETER_LOCATION);
+```
+
+### Types
+
+`SpecDiagnostic`, `SpecDiagnosticSeverity` (`'warning' | 'info'`), `DiagnosticCode`, `SpecVersionInfo`, `SpecVersionStatus`, `SpecVersionField`, `SpecFamily`, `StandardMethod`, `OperationEntry`, `OperationSource` (`'fixed' | 'additional'`), `OperationList`, `OperationLayout`, `ListOperationsOptions`, `GetOperationOptions`.
+
+---
+
 ## Core Types
 
 ### McpOpenAPITool
@@ -355,7 +550,7 @@ Additional metadata about the generated tool.
 ```typescript
 interface ToolMetadata {
   path: string; // OpenAPI path (e.g., '/users/{id}')
-  method: HTTPMethod; // HTTP verb
+  method: HTTPMethod; // lowercase field name ('get', 'query') or the additionalOperations key as written ('LINK')
   operationId?: string;
   operationSummary?: string; // Short description
   operationDescription?: string; // Detailed description
@@ -604,8 +799,8 @@ interface GenerateOptions {
   filterFn?: (operation: OperationWithContext) => boolean;
   includeTags?: string[]; // filter by OpenAPI tags
   excludeTags?: string[];
-  includeMethods?: HTTPMethod[]; // filter by HTTP method
-  excludeMethods?: HTTPMethod[];
+  includeMethods?: HTTPMethod[]; // filter by HTTP method; standard methods match in any case
+  excludeMethods?: HTTPMethod[]; // a denylist; additionalOperations methods match only exactly as written
   includePaths?: string[]; // path globs: * per segment, ** across, ? one char
   excludePaths?: string[];
   readOnlyOnly?: boolean; // default: false (safety switch)
@@ -670,7 +865,7 @@ Operation object extended with path and method context, used in `filterFn`.
 ```typescript
 type OperationWithContext = OperationObject & {
   path: string;
-  method: string;
+  method: string; // canonical: lowercase for a fixed field, the key as written for additionalOperations
 };
 ```
 
@@ -728,13 +923,16 @@ See [Error Handling](./error-handling.md) for usage patterns.
 ## Basic Types
 
 ```typescript
-type OpenAPIVersion = "3.0.0" | "3.0.1" | "3.0.2" | "3.0.3" | "3.1.0";
+type OpenAPIVersion = `3.0.${string}` | `3.1.${string}` | `3.2.${string}`;
 type OpenAPIDocument = OAS30.OpenAPIObject | OAS31.OpenAPIObject | OAS32.OpenAPIObject;
-type HTTPMethod =
-  "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "trace";
+type StandardMethod =
+  "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "trace" | "query";
+type HTTPMethod = StandardMethod | (string & {});
 type ParameterLocation = "path" | "query" | "header" | "cookie" | "body";
 type AuthType = "apiKey" | "http" | "oauth2" | "openIdConnect" | "mutualTLS";
 ```
+
+`OpenAPIVersion` is any `3.0.x`, `3.1.x` or `3.2.x` string (`'3.0.3'`, `'3.2.0-rc1'`); the patch is not checked, because the specification tells tooling to ignore it. `HTTPMethod` is open so that `additionalOperations` methods type-check while the standard ones autocomplete: a fixed method is its lowercase field name, an additional method is its key exactly as written (HTTP methods are case-sensitive). Use `isStandardMethod(method)` to tell them apart.
 
 ---
 

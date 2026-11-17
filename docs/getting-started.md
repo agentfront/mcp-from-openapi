@@ -187,7 +187,7 @@ Each mapper entry has:
 
 Use the mapper to construct the actual HTTP request:
 
-> **Prefer `buildHttpRequest`** — the built-in [request builder](./request-builder.md) applies the full OpenAPI serialization table (style/explode, deepObject, multipart, binary, `wholeBody`). The manual walkthrough below shows the mapper contract for custom integrations.
+> **Prefer `buildHttpRequest`** — the built-in [request builder](./request-builder.md) applies the full OpenAPI serialization table (style/explode, deepObject, multipart, binary, `wholeBody`). The manual walkthrough below shows the mapper contract for custom integrations; it upper-cases `metadata.method`, which is right for a standard method. An OpenAPI 3.2 `additionalOperations` method (`metadata.method` is its key as written, such as `LINK`) must be sent as written, and `buildHttpRequest` does that.
 
 ```typescript
 function buildRequest(tool: McpOpenAPITool, input: Record<string, any>) {
@@ -263,7 +263,7 @@ const result = await generator.validate();
 
 if (!result.valid) {
   console.error('Errors:', result.errors);
-  // [{ message: '...', path: '/paths/...', code: 'MISSING_RESPONSES' }]
+  // [{ message: '...', path: '/paths/...', code: 'NO_RESPONSES' }]
 }
 
 if (result.warnings) {
@@ -272,17 +272,20 @@ if (result.warnings) {
 }
 ```
 
-By default, validation runs automatically when loading a spec. Disable with `validate: false`:
+By default, validation runs automatically before the first `generateTools()` / `generateTool()` call, with the rules of the version the document declares (OpenAPI 3.0, 3.1 and 3.2; see [OpenAPI Versions](./openapi-versions.md)). Disable with `validate: false`:
 
 ```typescript
 const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
 ```
+
+Whatever the setting, `generator.getDiagnostics()` lists what the library noticed or could not process: a newer-than-known version, an operation it skipped, a security scheme it could not resolve. See [OpenAPI Versions](./openapi-versions.md#diagnostics).
 
 ---
 
 ## Next Steps
 
 - [Configuration](./configuration.md) -- All LoadOptions and GenerateOptions
+- [OpenAPI Versions](./openapi-versions.md) -- Supported versions, OpenAPI 3.2 features, diagnostics
 - [Parameter Conflicts](./parameter-conflicts.md) -- How automatic conflict resolution works
 - [Security](./security.md) -- Authentication handling
 - [Examples](./examples.md) -- Complete usage examples

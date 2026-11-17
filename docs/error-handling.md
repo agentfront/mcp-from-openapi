@@ -14,6 +14,7 @@ OpenAPIToolError (base)
   ├── ParseError
   ├── ValidationError
   ├── GenerationError
+  ├── RequestBuildError
   └── SchemaError
 ```
 
@@ -55,11 +56,22 @@ try {
 }
 ```
 
-Also thrown when an OpenAPI document fails validation during load (when `validate: true`):
+Also thrown when an OpenAPI document fails validation (when `validate: true`). Validation runs at the first `generateTools()` or `generateTool()`, not in the factories. The message is `Invalid OpenAPI document: <first error>`, followed by `(and N more; see the error's context.errors)` when there is more than one. The first error can quote the document, so the message cuts it at 512 characters and writes control and bidirectional characters as `\uXXXX`; `context.errors` holds every `ValidationErrorDetail` as the validator produced it (at most 1,000 of each kind, then one `DIAGNOSTICS_TRUNCATED` entry):
 
 ```typescript
-// ParseError with context.errors containing validation details
+try {
+  await generator.generateTools();
+} catch (error) {
+  if (error instanceof ParseError && error.context?.errors) {
+    for (const { code, path, message } of error.context.errors) {
+      console.error(code, path, message);
+      // e.g. 'INVALID_OPENAPI_VERSION', '/swagger', 'Swagger 2.0 documents are not supported. ...'
+    }
+  }
+}
 ```
+
+A document that declares an unsupported version (Swagger 2.0, another major, a malformed value) fails this way with `INVALID_OPENAPI_VERSION`, or `MISSING_OPENAPI_VERSION` when no version is declared; see [OpenAPI Versions](./openapi-versions.md). The same findings are available without throwing from `generator.validate()`, and what validation only warns about from `generator.getDiagnostics()`.
 
 **Context fields:** `originalError`, `errors` (when validation fails during dereference)
 
@@ -88,6 +100,12 @@ try {
 Thrown when tool generation fails for a specific operation.
 
 **Context fields:** `path`, `method`, `operationId`, `originalError`
+
+`generateTool()` also throws it for an operation that `generateTools()` skips with a diagnostic, with context `path`, `method` and `pointer` (a JSON Pointer to the cause): a parameter in a location the library does not map (today `in: querystring`, or a Swagger `in: body`; `UNSUPPORTED_PARAMETER_LOCATION`), or no Security Requirement that can be satisfied (`UNSATISFIABLE_SECURITY`, see [Security](./security.md)). `generateTools()` leaves such an operation out and records the diagnostic instead; see [OpenAPI Versions](./openapi-versions.md#diagnostics).
+
+### RequestBuildError
+
+Thrown by `buildHttpRequest()` for input it cannot turn into a request: a missing required parameter, a value that cannot be serialized, an unresolved path placeholder or server variable, a method that is not an RFC 9110 token or is `CONNECT`, and a mapper entry with an unknown `type`. Its `context` names the parameter or method concerned. See [Request Builder](./request-builder.md#errors).
 
 ### SchemaError
 

@@ -38,6 +38,7 @@ await fetch(request.url, {
 | Bodies          | JSON (incl. `+json`), `x-www-form-urlencoded`, `multipart/form-data` (real `FormData`), raw binary pass-through, text            |
 | `wholeBody`     | Non-object/union bodies sent as the entire body (never wrapped)                                                                  |
 | Security        | Values applied only when present in `input`; `bearer`/`basic` get prefixes, structured schemes (digest) pass through verbatim    |
+| Methods         | A standard method is sent upper-case (`GET`, `QUERY`); an OpenAPI 3.2 `additionalOperations` method is sent exactly as written in the document (`LINK`, `M-SEARCH`) because HTTP methods are case-sensitive. The method must be an RFC 9110 token, and `CONNECT` is refused                                    |
 | Safety          | Header-injection guards (CR/LF), path traversal-safe encoding, http(s)-only base URLs, unresolved path/server-template detection |
 
 ## Result shape
@@ -45,7 +46,7 @@ await fetch(request.url, {
 ```typescript
 interface BuiltHttpRequest {
   url: string; // base + expanded path + encoded query
-  method: string; // uppercase
+  method: string; // standard methods upper-case ('GET', 'QUERY'); additionalOperations methods as written ('LINK')
   headers: Record<string, string>; // incl. content-type and Cookie when applicable
   query: Record<string, string[]>; // query params as sent (unencoded values)
   cookies: Record<string, string>;
@@ -70,7 +71,12 @@ The tool's first server URL is used as the base, with `{variable}` templates sub
 
 ## Errors
 
-All failures throw `RequestBuildError` (with a `context` object): missing required parameters, `null` where a primitive is needed, objects in plain query slots, header injection attempts, invalid cookie names, non-http base URLs, and unresolved path placeholders.
+All failures throw `RequestBuildError` (with a `context` object): missing required parameters, `null` where a primitive is needed, objects in plain query slots, header injection attempts, invalid cookie names, non-http base URLs, unresolved path placeholders, and the cases below.
+
+- **A method that is not an RFC 9110 token** (empty, or containing a space, CR or LF): `context.method` holds the value. The method comes from a document, so nothing that could end a request line reaches the wire.
+- **`CONNECT`**, in any case: it opens a tunnel instead of sending a request, so the builder never sends it. The generator already ignores a `CONNECT` operation (`REFUSED_METHOD`); this guards tools built by hand.
+- **An unknown mapper `type`** (anything but `path`, `query`, `header`, `cookie`, `body`), checked before the entry's value is read, so an entry without a value is rejected too. `context` holds `param`, `inputKey` and `location`.
+- **A security entry whose `type` is `body` or `path`**: credentials go in a header, the query string or a cookie.
 
 ## Security values
 

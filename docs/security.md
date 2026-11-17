@@ -39,6 +39,21 @@ const response = await fetch(url, {
 });
 ```
 
+### Requirements that name an undefined scheme
+
+A Security Requirement object lists schemes that must all be satisfied together (`{ a: [], b: [] }`). If it names a scheme `components.securitySchemes` does not define (a typo, or an OpenAPI 3.2 scheme named by URI, which is not resolved yet), the object cannot be satisfied and is **dropped as a whole**, including the schemes it names that do exist. Each missing scheme records one `UNRESOLVED_SECURITY_SCHEME` diagnostic (`generator.getDiagnostics()`). A requirement that is not an object records `INVALID_SECURITY_REQUIREMENT` and is dropped. The objects that remain still apply, and an empty object (`{}`, no authentication) is kept.
+
+```yaml
+security:
+  - apiKey: []
+    missing: [] # not defined: the whole object is dropped, `apiKey` with it
+  - bearer: [] # kept: the tool's security is `bearer` alone
+```
+
+If every requirement of an operation is dropped, no way to authenticate is known, so the operation makes **no tool**: `generateTools()` leaves it out and records `UNSATISFIABLE_SECURITY`, and `generateTool()` throws a `GenerationError` (context `path`, `method`, `pointer`). A document-level `security` that cannot be satisfied therefore drops every operation that inherits it. The exception is a document that has `security` requirements but no `components.securitySchemes` at all: its tools are still generated, with empty security, and the validator's `NO_SECURITY_SCHEMES` warning applies.
+
+Requirements listed as alternatives (`security: [{ a: [] }, { b: [] }]`) are not kept as a choice: every scheme of every requirement object that can be satisfied becomes a requirement of the tool. See [OpenAPI Versions](./openapi-versions.md#diagnostics).
+
 ---
 
 ## Supported Auth Types

@@ -69,7 +69,7 @@ result.findings[0];
 
 Finding codes: `duplicate-operation-id` (error) · `missing-operation-id`, `missing-description`, `missing-success-response`, `unpaginated-list`, `deep-schema` (warnings) · `vague-description`, `missing-parameter-description`, `missing-request-example`, `wide-schema`, `long-operation-id` (info). Each carries a fix hint — in the spec or via generate options/overlays. Spec studies show a handful of line fixes routinely takes tool-call success from mediocre to near-perfect.
 
-`generator.lint()` runs after overlays and dereferencing but is **never gated by validation** — diagnostics work on exactly the imperfect specs they exist to diagnose (generation still validates).
+`generator.lint()` runs after overlays and dereferencing but is **never gated by validation** — diagnostics work on exactly the imperfect specs they exist to diagnose (generation still validates). A value it cannot read (a path item, a `parameters` list, or a parameter that is not an object) is skipped rather than throwing, and it lints the operations the declared version has: `query` and `additionalOperations` only from OpenAPI 3.2, the eight classic methods otherwise (see [OpenAPI Versions](./openapi-versions.md)).
 
 ## Trimming and descriptions
 
