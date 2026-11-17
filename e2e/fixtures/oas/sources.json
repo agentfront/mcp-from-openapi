@@ -1,0 +1,140 @@
+{
+  "sources": [
+    {
+      "id": "oas-3.0-schema",
+      "version": "3.0",
+      "kind": "schema",
+      "url": "https://spec.openapis.org/oas/3.0/schema/2024-10-18",
+      "path": "schemas/3.0/schema.json",
+      "sha256": "2385f5bbb8c37878daae73baeabe7f34b2f022a4a8c049329ee61f71796f039c"
+    },
+    {
+      "id": "oas-3.1-schema",
+      "version": "3.1",
+      "kind": "schema",
+      "url": "https://spec.openapis.org/oas/3.1/schema/2026-11-05",
+      "path": "schemas/3.1/schema.json",
+      "sha256": "4751a7777357b26b09a9a61b9addd08081de2e65cf80d3ae0df2b4cd931b2d7b"
+    },
+    {
+      "id": "oas-3.1-schema-base",
+      "version": "3.1",
+      "kind": "schema-base",
+      "url": "https://spec.openapis.org/oas/3.1/schema-base/2026-11-05",
+      "path": "schemas/3.1/schema-base.json",
+      "sha256": "1256f323406523ca05f00f873c2d6425147c0e9e62905b2afd373756cd885228"
+    },
+    {
+      "id": "oas-3.1-dialect",
+      "version": "3.1",
+      "kind": "dialect",
+      "url": "https://spec.openapis.org/oas/3.1/dialect/2024-11-10",
+      "path": "schemas/3.1/dialect.json",
+      "sha256": "647f32dfff64949d5020a28ecd1af4ffeffb1e9c695f861a52255a8004e07460"
+    },
+    {
+      "id": "oas-3.1-meta",
+      "version": "3.1",
+      "kind": "meta",
+      "url": "https://spec.openapis.org/oas/3.1/meta/2024-11-10",
+      "path": "schemas/3.1/meta.json",
+      "sha256": "80706a9a404affedbf84ac4dc1328c9ce0d2a00804cdfc4d95c0ddd0053121dd"
+    },
+    {
+      "id": "oas-3.2-schema",
+      "version": "3.2",
+      "kind": "schema",
+      "url": "https://spec.openapis.org/oas/3.2/schema/2026-11-12",
+      "path": "schemas/3.2/schema.json",
+      "sha256": "f1f7ee38d431a7bb1082e4df2288dbe1d4d3f49081b497af249c07b77737fb43"
+    },
+    {
+      "id": "oas-3.2-schema-base",
+      "version": "3.2",
+      "kind": "schema-base",
+      "url": "https://spec.openapis.org/oas/3.2/schema-base/2026-11-12",
+      "path": "schemas/3.2/schema-base.json",
+      "sha256": "8e432f0f148597960daa3aafa0c0030d8aae7538d32c217854a1e3aada595216"
+    },
+    {
+      "id": "oas-3.2-dialect",
+      "version": "3.2",
+      "kind": "dialect",
+      "url": "https://spec.openapis.org/oas/3.2/dialect/2026-02-26",
+      "path": "schemas/3.2/dialect.json",
+      "sha256": "9375b7042aa0b01848403f0a9ebf12a3425e01a9e24337ce12624f10fea73833"
+    },
+    {
+      "id": "oas-3.2-meta",
+      "version": "3.2",
+      "kind": "meta",
+      "url": "https://spec.openapis.org/oas/3.2/meta/2026-02-26",
+      "path": "schemas/3.2/meta.json",
+      "sha256": "f444d02ef7d36f30293983fad8118c823a3c70a49a8e5aa6f1afe21215e35417"
+    },
+    {
+      "id": "json-schema-2020-12-schema",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/schema",
+      "path": "schemas/json-schema-2020-12/schema.json",
+      "sha256": "41da76f5afb7ce062d248f762463a92f7ca47e4e0f905b224ba6afeef91ded0f"
+    },
+    {
+      "id": "json-schema-2020-12-meta-core",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/core",
+      "path": "schemas/json-schema-2020-12/meta/core.json",
+      "sha256": "21f79d143fab1f180245c331e5657057045b36794d41fe151e6e4fed65035299"
+    },
+    {
+      "id": "json-schema-2020-12-meta-applicator",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/applicator",
+      "path": "schemas/json-schema-2020-12/meta/applicator.json",
+      "sha256": "bf273b26f9f735b93ece78f2b61b36676e1d122ce78ab37ad5a2e45dfa1ca2b1"
+    },
+    {
+      "id": "json-schema-2020-12-meta-unevaluated",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/unevaluated",
+      "path": "schemas/json-schema-2020-12/meta/unevaluated.json",
+      "sha256": "fc99f32188da41689a9382af174dd42e8b255e4374965c157b8286556b4ab2bc"
+    },
+    {
+      "id": "json-schema-2020-12-meta-validation",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/validation",
+      "path": "schemas/json-schema-2020-12/meta/validation.json",
+      "sha256": "e921c5b79264d3689af01c1af1ffdf692e09f1c45df90a0f08eb7288c9acdeab"
+    },
+    {
+      "id": "json-schema-2020-12-meta-meta-data",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/meta-data",
+      "path": "schemas/json-schema-2020-12/meta/meta-data.json",
+      "sha256": "c664d438a84d58889c8edecd248ce2f945a4bc0e3b087323b11303dc136abfbe"
+    },
+    {
+      "id": "json-schema-2020-12-meta-format-annotation",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/format-annotation",
+      "path": "schemas/json-schema-2020-12/meta/format-annotation.json",
+      "sha256": "5c79404f831dd905c0f40fefac7c6f3e51bf3729b4a876a5c2020178d97f3bcc"
+    },
+    {
+      "id": "json-schema-2020-12-meta-content",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/content",
+      "path": "schemas/json-schema-2020-12/meta/content.json",
+      "sha256": "a10456605b2b5bb12a1b4dcfc0300f02f54d3e8bb3646bed7724583866627682"
+    }
+  ]
+}
