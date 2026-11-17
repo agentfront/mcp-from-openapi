@@ -1,0 +1,17 @@
+# A relative `$self` in a document with no retrieval URI (the story parses it from text; nothing fetched it):
+# there is nothing to resolve it against, so the library ignores it and says so with UNRESOLVABLE_SELF.
+openapi: 3.2.0
+$self: openapi.yaml
+info:
+  title: Ping
+  version: 1.0.0
+servers:
+  - url: https://api.example.com
+paths:
+  /ping:
+    get:
+      operationId: ping
+      summary: Check that the API answers
+      responses:
+        '200':
+          description: Pong

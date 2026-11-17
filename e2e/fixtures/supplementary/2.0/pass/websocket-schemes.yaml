@@ -1,0 +1,38 @@
+# `schemes` that lists a WebSocket scheme next to an HTTP one. Swagger 2.0 allows http, https, ws and wss, but every
+# operation of this API is an HTTP call, which is never sent over ws or wss. A 3.x form has one server, the https one.
+swagger: '2.0'
+info:
+  title: Quotes
+  version: 1.0.0
+host: quotes.example.com
+basePath: /stream
+schemes:
+  - wss
+  - https
+produces:
+  - application/json
+paths:
+  /quotes/{symbol}:
+    get:
+      operationId: getQuote
+      summary: The latest quote of a symbol
+      parameters:
+        - name: symbol
+          in: path
+          description: The ticker symbol
+          required: true
+          type: string
+      responses:
+        '200':
+          description: The quote
+          schema:
+            type: object
+            required:
+              - symbol
+              - price
+            properties:
+              symbol:
+                type: string
+              price:
+                type: number
+                format: double

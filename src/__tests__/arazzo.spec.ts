@@ -3,6 +3,9 @@ import { fromArazzo } from '../arazzo';
 import { collectPayloadExpressions, parseExpressionValue, parseRuntimeExpression } from '../arazzo-expressions';
 import { ArazzoError } from '../errors';
 import { OpenAPIToolGenerator } from '../generator';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as yaml from 'yaml';
 import type { OperationStepIR, NestedWorkflowStepIR } from '../arazzo-types';
 
@@ -660,6 +663,19 @@ describe('fromArazzo source and operation resolution', () => {
     );
   });
 
+  it('refuses one documentUri for every source, and takes a source loaded with its own', async () => {
+    const shared = { documentUri: 'https://example.com/pets/openapi.json' } as never;
+    await expectArazzoError(
+      fromArazzo(arazzoWith([simpleWorkflow()]), { sources: sources(), loadOptions: shared }),
+      /loadOptions\.documentUri would give every source the same URI/,
+    );
+    const pets = await OpenAPIToolGenerator.fromJSON(petstoreDoc(), {
+      documentUri: 'https://example.com/pets/openapi.json',
+    });
+    const [tool] = await fromArazzo(arazzoWith([simpleWorkflow()]), { sources: { ...sources(), pets } });
+    expect(tool).toBeDefined();
+  });
+
   it('rejects steps resolving into arazzo-typed sources', async () => {
     const doc = arazzoWith([
       simpleWorkflow({
@@ -758,6 +774,481 @@ describe('fromArazzo source and operation resolution', () => {
       /Failed to resolve GET \/missing from source "pets"/,
       '/workflows/0/steps/0',
     );
+  });
+});
+
+describe('fromArazzo operations in OpenAPI 3.2 places', () => {
+  const responses = { '200': { description: 'OK' } };
+  // JSON.parse makes `__proto__` an own key, as in a parsed document
+  const itemsDoc = (): any =>
+    JSON.parse(`{
+      "openapi": "3.2.0",
+      "info": { "title": "Items", "version": "1.0.0" },
+      "paths": {
+        "/search": { "query": { "operationId": "searchItems", "responses": ${JSON.stringify(responses)} } },
+        "/items/{id}": {
+          "get": { "operationId": "getItem", "responses": ${JSON.stringify(responses)} },
+          "additionalOperations": {
+            "LINK": { "operationId": "linkItem", "responses": ${JSON.stringify(responses)} },
+            "constructor": { "operationId": "ctorItem", "responses": ${JSON.stringify(responses)} },
+            "__proto__": { "operationId": "protoItem", "responses": ${JSON.stringify(responses)} }
+          }
+        },
+        "/a~b": {
+          "additionalOperations": { "M-SEARCH": { "operationId": "msearch", "responses": ${JSON.stringify(responses)} } }
+        }
+      }
+    }`);
+  const fakeTool = (path: string, method: string): any => ({
+    name: 'fake',
+    description: 'fake',
+    inputSchema: { type: 'object', properties: {} },
+    mapper: [],
+    metadata: { path, method },
+  });
+  const itemsGenerator = async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(itemsDoc());
+    // a stub isolates which operation a step names from generating it; the describe below runs the real generator
+    const generateTool = jest
+      .spyOn(generator, 'generateTool')
+      .mockImplementation(async (path: string, method: string) => fakeTool(path, method));
+    return { generator, generateTool };
+  };
+  const flow = (step: any): any =>
+    arazzoWith([simpleWorkflow({ inputs: undefined, outputs: undefined, steps: [{ stepId: 's', ...step }] })]);
+  const pointer = (rest: string) => `{$sourceDescriptions.pets.url}#/paths/${rest}`;
+
+  it.each([
+    ['searchItems', '/search', 'query'],
+    ['linkItem', '/items/{id}', 'LINK'],
+    ['ctorItem', '/items/{id}', 'constructor'],
+    ['protoItem', '/items/{id}', '__proto__'],
+  ])('resolves operationId %s to its path and method as written in the document', async (operationId, path, method) => {
+    const { generator, generateTool } = await itemsGenerator();
+    const [tool] = await fromArazzo(flow({ operationId }), { sources: { pets: generator } });
+
+    expect(generateTool).toHaveBeenCalledWith(path, method, expect.anything());
+    expect(tool.metadata.workflow!.steps[0]).toMatchObject({ path, method, operationId });
+  });
+
+  it('does not read operations off a prototype when indexing operationIds', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON({
+      openapi: '3.2.0',
+      info: { title: 'T', version: '1' },
+      paths: { '/p': Object.create({ get: { operationId: 'inherited', responses } }) },
+    } as any);
+
+    await expectArazzoError(
+      fromArazzo(flow({ operationId: 'inherited' }), { sources: { pets: generator } }),
+      /operationId "inherited" not found/,
+    );
+  });
+
+  it.each([
+    [pointer('~1search/query'), '/search', 'query'],
+    [pointer('~1search/QUERY'), '/search', 'query'],
+    [pointer('~1items~1{id}/additionalOperations/LINK'), '/items/{id}', 'LINK'],
+    [pointer('~1items~1{id}/additionalOperations/constructor'), '/items/{id}', 'constructor'],
+    [pointer('~1items~1{id}/additionalOperations/__proto__'), '/items/{id}', '__proto__'],
+    [pointer('~1a~0b/additionalOperations/M-SEARCH'), '/a~b', 'M-SEARCH'],
+  ])('resolves operationPath %s', async (operationPath, path, method) => {
+    const { generator, generateTool } = await itemsGenerator();
+    const [tool] = await fromArazzo(flow({ operationPath }), { sources: { pets: generator } });
+
+    expect(generateTool).toHaveBeenCalledWith(path, method, expect.anything());
+    // the generator is asked for the method exactly as the pointer spells an additional operation
+    const step = tool.metadata.workflow!.steps[0] as OperationStepIR;
+    expect(step).toMatchObject({ path, method });
+  });
+
+  it.each([
+    // RFC 6901 section 6: the fragment is percent-decoded before it is split and unescaped
+    [pointer('~1items~1{id}/additionalOperations/%4CINK'), '/items/{id}', 'LINK'],
+    [pointer('~1items~1%7Bid%7D/additionalOperations/LINK'), '/items/{id}', 'LINK'],
+    [pointer('%7E1items%7E1{id}/get'), '/items/{id}', 'get'],
+    ['{$sourceDescriptions.pets.url}#%2Fpaths%2F~1search%2Fquery', '/search', 'query'],
+    [pointer('~1a%7E0b/additionalOperations/M-SEARCH'), '/a~b', 'M-SEARCH'],
+  ])('decodes the percent-encoded operationPath %s', async (operationPath, path, method) => {
+    const { generator, generateTool } = await itemsGenerator();
+    const [tool] = await fromArazzo(flow({ operationPath }), { sources: { pets: generator } });
+
+    expect(generateTool).toHaveBeenCalledWith(path, method, expect.anything());
+    expect(tool.metadata.workflow!.steps[0]).toMatchObject({ path, method });
+  });
+
+  it('keeps a % that starts no valid escape as written, and finds nothing for an escape that is not UTF-8', async () => {
+    const { generator } = await itemsGenerator();
+    // `%zz` is not an escape: the path is read as `/50%zz` (which the document does not have)
+    await expectArazzoError(
+      fromArazzo(flow({ operationPath: pointer('~150%zz/get') }), { sources: { pets: generator } }),
+      /Failed to resolve GET \/50%zz from source "pets"/,
+    );
+
+    // `%FF` is no UTF-8 sequence: nothing is decoded, so `%4CINK` stays as written (a token, so a method name)
+    await expectArazzoError(
+      fromArazzo(flow({ operationPath: pointer('~1x%FF/additionalOperations/%4CINK') }), { sources: { pets: generator } }),
+      /Failed to resolve %4CINK \/x%FF from source "pets": Operation not found/,
+    );
+  });
+
+  it.each(['{$sourceDescriptions.pets.url}#', '{$sourceDescriptions.pets.url}#paths', '{$sourceDescriptions.pets.url}/paths'])(
+    'still requires a JSON Pointer fragment: %s',
+    async (operationPath) => {
+      const { generator } = await itemsGenerator();
+      await expectArazzoError(
+        fromArazzo(flow({ operationPath }), { sources: { pets: generator } }),
+        /requires a "#\/paths\/\.\.\." JSON Pointer after the source expression/,
+      );
+    },
+  );
+
+  it.each([
+    ['CONNECT', 'a tunnel'],
+    ['connect', 'a tunnel'],
+    ['GET', 'a fixed field'],
+    ['Post', 'a fixed field'],
+    ['QUERY', 'a fixed field'],
+    ['bad method', 'not a token'],
+    ['line\r\nbreak', 'control characters'],
+    ['', 'empty'],
+  ])('rejects the additionalOperations key %j (%s) as an unknown method', async (key, _why) => {
+    const { generator, generateTool } = await itemsGenerator();
+
+    await expectArazzoError(
+      fromArazzo(flow({ operationPath: pointer(`~1items~1{id}/additionalOperations/${key}`) }), {
+        sources: { pets: generator },
+      }),
+      /ends in unknown HTTP method ".*" under additionalOperations/,
+    );
+    expect(generateTool).not.toHaveBeenCalled();
+  });
+
+  it('escapes the offending method in the error message', async () => {
+    const { generator } = await itemsGenerator();
+    const error = await fromArazzo(flow({ operationPath: pointer('~1x/additionalOperations/a\nb') }), {
+      sources: { pets: generator },
+    }).catch((e: Error) => e);
+
+    expect((error as Error).message).toContain('"a\\nb"');
+  });
+
+  it.each(['~1x', '~1x/additionalOperations', '~1x/additionalOperations/LINK/extra', '~1x/extras/LINK', 'x'])(
+    'rejects the pointer shape #/paths/%s',
+    async (rest) => {
+      const { generator } = await itemsGenerator();
+
+      await expectArazzoError(
+        fromArazzo(flow({ operationPath: pointer(rest) }), { sources: { pets: generator } }),
+        /must have the shape #\/paths\/<path>\/<method> or #\/paths\/<path>\/additionalOperations\/<method>|unknown HTTP method/,
+      );
+    },
+  );
+
+  it('names an additional method as written when generation fails', async () => {
+    const { generator, generateTool } = await itemsGenerator();
+    generateTool.mockRejectedValue(new Error('no such operation'));
+
+    await expectArazzoError(
+      fromArazzo(flow({ operationPath: pointer('~1items~1{id}/additionalOperations/LINK') }), {
+        sources: { pets: generator },
+      }),
+      /Failed to resolve LINK \/items\/\{id\} from source "pets": no such operation/,
+    );
+  });
+
+  it('treats a query step as read-only and an additional-operation step as not', async () => {
+    const { generator } = await itemsGenerator();
+    const [safe, unsafe] = await fromArazzo(
+      arazzoWith([
+        simpleWorkflow({ workflowId: 'safe', inputs: undefined, outputs: undefined, steps: [{ stepId: 's', operationId: 'searchItems' }] }),
+        simpleWorkflow({ workflowId: 'unsafe', inputs: undefined, outputs: undefined, steps: [{ stepId: 's', operationId: 'linkItem' }] }),
+      ]),
+      { sources: { pets: generator } },
+    );
+
+    expect(safe.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+    expect(unsafe.annotations).toBeUndefined();
+  });
+
+  it('keeps a mixed workflow with an additional operation out of the read-only annotations', async () => {
+    const { generator } = await itemsGenerator();
+    const mixed = simpleWorkflow({
+      inputs: undefined,
+      outputs: undefined,
+      steps: [
+        { stepId: 'a', operationId: 'searchItems' },
+        { stepId: 'b', operationId: 'linkItem' },
+      ],
+    });
+    const [tool] = await fromArazzo(arazzoWith([mixed]), { sources: { pets: generator } });
+
+    expect(tool.annotations).toBeUndefined();
+  });
+});
+
+describe('fromArazzo through the real generator on OpenAPI 3.2 operations', () => {
+  const safeAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+  const catalogDoc = (): any => ({
+    openapi: '3.2.0',
+    info: { title: 'Catalog', version: '1.0.0' },
+    servers: [{ url: 'https://catalog.example.com' }],
+    paths: {
+      '/search': {
+        query: {
+          operationId: 'searchItems',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { type: 'object', properties: { term: { type: 'string' } }, required: ['term'] },
+              },
+            },
+          },
+          responses: {
+            '200': {
+              description: 'OK',
+              content: {
+                'application/json': {
+                  schema: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } } } },
+                },
+              },
+            },
+          },
+        },
+      },
+      '/items/{id}': {
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        additionalOperations: {
+          LINK: {
+            operationId: 'linkItem',
+            parameters: [{ name: 'Link', in: 'header', required: true, schema: { type: 'string' } }],
+            responses: { '204': { description: 'Linked' } },
+          },
+        },
+      },
+      // a tilde in the path is `~0` in a JSON Pointer
+      '/a~b': {
+        additionalOperations: { PURGE: { operationId: 'purgeCache', responses: { '204': { description: 'Purged' } } } },
+      },
+    },
+  });
+  const catalogGenerator = () => OpenAPIToolGenerator.fromJSON(catalogDoc());
+  const catalogFlow = (...steps: any[]): any =>
+    arazzoWith(
+      [
+        simpleWorkflow({
+          inputs: undefined,
+          outputs: undefined,
+          steps: steps.map((step, index) => ({ stepId: `s${index}`, ...step })),
+        }),
+      ],
+      { sourceDescriptions: [{ name: 'catalog', url: 'https://x/catalog.json' }] },
+    );
+  const pointer = (rest: string) => `{$sourceDescriptions.catalog.url}#/paths/${rest}`;
+  const stepsOf = (tool: { metadata: { workflow?: { steps: unknown[] } } }) =>
+    tool.metadata.workflow!.steps as OperationStepIR[];
+  const expectEmbeddedOperation = async (step: OperationStepIR, path: string, method: string): Promise<void> => {
+    const direct = await (await catalogGenerator()).generateTool(path, method);
+    expect(step.operation.inputSchema).toEqual(direct.inputSchema);
+    expect(step.operation.outputSchema).toEqual(direct.outputSchema);
+    expect(step.operation.mapper).toEqual(direct.mapper);
+    expect(step.operation.servers).toEqual(direct.metadata.servers);
+  };
+
+  it('resolves a step naming a query operation by operationId', async () => {
+    const [tool] = await fromArazzo(catalogFlow({ operationId: 'searchItems' }), {
+      sources: { catalog: await catalogGenerator() },
+    });
+    const [step] = stepsOf(tool);
+
+    expect(step).toMatchObject({ kind: 'operation', source: 'catalog', path: '/search', method: 'query', operationId: 'searchItems' });
+    // the request body of a query operation reaches the embedded operation
+    expect(step.operation.inputSchema.properties).toEqual({ term: { type: 'string', 'x-parameter-location': 'body' } });
+    expect(step.operation.inputSchema.required).toEqual(['term']);
+    expect(step.operation.mapper).toEqual([
+      { inputKey: 'term', type: 'body', key: 'term', required: true, serialization: { contentType: 'application/json' } },
+    ]);
+    expect(step.operation.outputSchema).toMatchObject({ type: 'array', 'x-status-code': 200 });
+    await expectEmbeddedOperation(step, '/search', 'query');
+  });
+
+  it('resolves a step naming an additionalOperations entry by operationId', async () => {
+    const [tool] = await fromArazzo(catalogFlow({ operationId: 'linkItem' }), {
+      sources: { catalog: await catalogGenerator() },
+    });
+    const [step] = stepsOf(tool);
+
+    // the method is the key as written in the document
+    expect(step).toMatchObject({ kind: 'operation', source: 'catalog', path: '/items/{id}', method: 'LINK', operationId: 'linkItem' });
+    expect(step.operation.mapper.map((entry) => [entry.inputKey, entry.type])).toEqual([
+      ['id', 'path'],
+      ['Link', 'header'],
+    ]);
+    expect(step.operation.outputSchema).toMatchObject({ type: 'null', 'x-status-code': 204 });
+    await expectEmbeddedOperation(step, '/items/{id}', 'LINK');
+  });
+
+  it.each([
+    ['an additionalOperations method as written', '~1items~1{id}/additionalOperations/LINK', '/items/{id}', 'LINK'],
+    ['a path holding a tilde, written ~0', '~1a~0b/additionalOperations/PURGE', '/a~b', 'PURGE'],
+    ['the query field', '~1search/query', '/search', 'query'],
+    ['the query field in upper case', '~1search/QUERY', '/search', 'query'],
+  ])('resolves an operationPath naming %s', async (_label, rest, path, method) => {
+    const [tool] = await fromArazzo(catalogFlow({ operationPath: pointer(rest) }), {
+      sources: { catalog: await catalogGenerator() },
+    });
+    const [step] = stepsOf(tool);
+
+    // the step records the method as the document spells it, and no operationId a pointer does not give
+    expect(step).toMatchObject({ kind: 'operation', source: 'catalog', path, method });
+    expect(step.operationId).toBeUndefined();
+    await expectEmbeddedOperation(step, path, method);
+  });
+
+  it.each([
+    ['LINK written in lower case', '~1items~1{id}/additionalOperations/link', 'link', '\\/items\\/\\{id\\}'],
+    ['PURGE written in mixed case', '~1a~0b/additionalOperations/Purge', 'Purge', '\\/a~b'],
+  ])('does not resolve an operationPath naming %s', async (_label, rest, method, path) => {
+    // pointers and method filters are exact: `link` is not the `LINK` key
+    await expectArazzoError(
+      fromArazzo(catalogFlow({ operationPath: pointer(rest) }), { sources: { catalog: await catalogGenerator() } }),
+      new RegExp(`Failed to resolve ${method} ${path} from source "catalog": Operation not found: ${method} ${path}`),
+      '/workflows/0/steps/0',
+    );
+  });
+
+  it('infers read-only for a workflow of query steps only', async () => {
+    const [byId, byPointer, both] = await fromArazzo(
+      arazzoWith(
+        [
+          simpleWorkflow({ workflowId: 'byId', inputs: undefined, outputs: undefined, steps: [{ stepId: 's', operationId: 'searchItems' }] }),
+          simpleWorkflow({ workflowId: 'byPointer', inputs: undefined, outputs: undefined, steps: [{ stepId: 's', operationPath: pointer('~1search/query') }] }),
+          simpleWorkflow({
+            workflowId: 'both',
+            inputs: undefined,
+            outputs: undefined,
+            steps: [
+              { stepId: 'a', operationId: 'searchItems' },
+              { stepId: 'b', operationPath: pointer('~1search/query') },
+            ],
+          }),
+        ],
+        { sourceDescriptions: [{ name: 'catalog', url: 'https://x/catalog.json' }] },
+      ),
+      { sources: { catalog: await catalogGenerator() } },
+    );
+
+    expect(byId.annotations).toEqual(safeAnnotations);
+    expect(byPointer.annotations).toEqual(safeAnnotations);
+    expect(both.annotations).toEqual(safeAnnotations);
+  });
+
+  it('does not infer read-only for a workflow containing an additionalOperations method', async () => {
+    const [byId, byPointer, mixed] = await fromArazzo(
+      arazzoWith(
+        [
+          simpleWorkflow({ workflowId: 'byId', inputs: undefined, outputs: undefined, steps: [{ stepId: 's', operationId: 'linkItem' }] }),
+          simpleWorkflow({ workflowId: 'byPointer', inputs: undefined, outputs: undefined, steps: [{ stepId: 's', operationPath: pointer('~1items~1{id}/additionalOperations/LINK') }] }),
+          simpleWorkflow({
+            workflowId: 'mixed',
+            inputs: undefined,
+            outputs: undefined,
+            steps: [
+              { stepId: 'a', operationId: 'searchItems' },
+              { stepId: 'b', operationId: 'linkItem' },
+            ],
+          }),
+        ],
+        { sourceDescriptions: [{ name: 'catalog', url: 'https://x/catalog.json' }] },
+      ),
+      { sources: { catalog: await catalogGenerator() } },
+    );
+
+    expect(byId.annotations).toBeUndefined();
+    expect(byPointer.annotations).toBeUndefined();
+    expect(mixed.annotations).toBeUndefined();
+  });
+
+  it('names the additional method as written when the document has no such operation', async () => {
+    await expectArazzoError(
+      fromArazzo(catalogFlow({ operationPath: pointer('~1items~1{id}/additionalOperations/PURGE') }), {
+        sources: { catalog: await catalogGenerator() },
+      }),
+      /Failed to resolve PURGE \/items\/\{id\} from source "catalog": Operation not found: PURGE \/items\/\{id\}/,
+      '/workflows/0/steps/0',
+    );
+  });
+});
+
+describe('fromArazzo operations follow the declared version', () => {
+  const responses = { '200': { description: 'OK' } };
+  const catalog = (openapi: unknown): any => ({
+    ...(openapi === undefined ? {} : { openapi }),
+    info: { title: 'Catalog', version: '1.0.0' },
+    paths: {
+      '/search': { get: { operationId: 'readSearch', responses }, query: { operationId: 'searchItems', responses } },
+      '/items/{id}': {
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        additionalOperations: { LINK: { operationId: 'linkItem', responses } },
+      },
+    },
+  });
+  const generatorFor = (openapi: unknown) => OpenAPIToolGenerator.fromJSON(catalog(openapi), { validate: false });
+  const flow = (step: any): any =>
+    arazzoWith(
+      [simpleWorkflow({ inputs: undefined, outputs: undefined, steps: [{ stepId: 's', ...step }] })],
+      { sourceDescriptions: [{ name: 'catalog', url: 'https://x/catalog.json' }] },
+    );
+  const pointer = (rest: string) => `{$sourceDescriptions.catalog.url}#/paths/${rest}`;
+  const run = async (openapi: unknown, step: any) =>
+    fromArazzo(flow(step), { sources: { catalog: await generatorFor(openapi) } });
+
+  it.each(['3.2.0', '3.2.1', '3.3.0'])('resolves query and additionalOperations in a document declaring %s', async (openapi) => {
+    for (const [step, method] of [
+      [{ operationId: 'searchItems' }, 'query'],
+      [{ operationId: 'linkItem' }, 'LINK'],
+      [{ operationPath: pointer('~1search/query') }, 'query'],
+      [{ operationPath: pointer('~1items~1{id}/additionalOperations/LINK') }, 'LINK'],
+    ] as const) {
+      const [tool] = await run(openapi, step);
+
+      expect((tool.metadata.workflow!.steps[0] as OperationStepIR).method).toBe(method);
+    }
+  });
+
+  it.each(['3.0.0', '3.0.3', '3.1.0', '3.1.1'])(
+    'finds neither a query nor an additionalOperations operationId in a document declaring %s',
+    async (openapi) => {
+      await expectArazzoError(run(openapi, { operationId: 'searchItems' }), /operationId "searchItems" not found/);
+      await expectArazzoError(run(openapi, { operationId: 'linkItem' }), /operationId "linkItem" not found/);
+      // the fixed methods of the same document are still found
+      const [tool] = await run(openapi, { operationId: 'readSearch' });
+      expect((tool.metadata.workflow!.steps[0] as OperationStepIR).method).toBe('get');
+    },
+  );
+
+  it.each(['3.0.0', '3.1.0'])('does not resolve a query or additionalOperations operationPath in %s', async (openapi) => {
+    await expectArazzoError(
+      run(openapi, { operationPath: pointer('~1search/query') }),
+      /Failed to resolve QUERY \/search from source "catalog": .*not found/i,
+      '/workflows/0/steps/0',
+    );
+    await expectArazzoError(
+      run(openapi, { operationPath: pointer('~1items~1{id}/additionalOperations/LINK') }),
+      /Failed to resolve LINK \/items\/\{id\} from source "catalog": .*not found/i,
+      '/workflows/0/steps/0',
+    );
+  });
+
+  it.each([
+    ['no version', undefined],
+    ['a malformed version', 'banana'],
+    ['a version that is not a string', 3.2],
+  ])('reads only the eight historical methods when the document has %s', async (_label, openapi) => {
+    await expectArazzoError(run(openapi, { operationId: 'searchItems' }), /operationId "searchItems" not found/);
+    await expectArazzoError(run(openapi, { operationId: 'linkItem' }), /operationId "linkItem" not found/);
+    const [tool] = await run(openapi, { operationId: 'readSearch' });
+    expect((tool.metadata.workflow!.steps[0] as OperationStepIR).method).toBe('get');
   });
 });
 
@@ -1430,5 +1921,295 @@ describe('fromArazzo location-less parameters through resolution', () => {
       { components: { parameters: { p: { name: 'dup', value: 1 } as any } } },
     );
     await expectArazzoError(fromArazzo(dupInless, { sources: sources() }), /Duplicate parameter "dup"/);
+  });
+});
+
+describe('fromArazzo over a source that references other documents', () => {
+  const ok = { '200': { description: 'OK' } };
+  const allowFile = { refResolution: { allowedProtocols: ['file'] } };
+
+  /** A description in several files: a path item and an operation that are each a `$ref` to a sibling file. */
+  const files = (): Record<string, unknown> => ({
+    'openapi.json': {
+      openapi: '3.0.0',
+      info: { title: 'Pets', version: '1.0.0' },
+      servers: [{ url: 'https://pets.example.com' }],
+      paths: {
+        '/pets': { $ref: 'paths/pets.json' },
+        '/pets/{petId}': { get: { $ref: 'operations/get-pet.json' } },
+      },
+    },
+    'paths/pets.json': { get: { operationId: 'listPets', responses: ok } },
+    'operations/get-pet.json': {
+      operationId: 'getPet',
+      parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+      responses: ok,
+    },
+  });
+
+  /** Runs `run` with `tree` written under a fresh temp directory, removed afterwards (that directory only). */
+  const withFiles = async (tree: Record<string, unknown>, run: (dir: string) => Promise<void>): Promise<void> => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-from-openapi-arazzo-'));
+    try {
+      for (const [name, content] of Object.entries(tree)) {
+        const file = path.join(dir, name);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify(content));
+      }
+      await run(dir);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  const workflowOf = (...steps: any[]): any => arazzoWith([simpleWorkflow({ outputs: undefined, steps })]);
+  const rejection = async (promise: Promise<unknown>): Promise<ArazzoError> => {
+    try {
+      await promise;
+    } catch (error) {
+      return error as ArazzoError;
+    }
+    throw new Error('expected a rejection');
+  };
+
+  it('resolves operationIds of a multi-file generator without generating tools first', async () => {
+    await withFiles(files(), async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      // Not dereferenced yet: the path item and the operation are still the references that name their files
+      expect(generator.getDocument().paths['/pets']).toEqual({ $ref: 'paths/pets.json' });
+
+      const doc = workflowOf(
+        { stepId: 'list', operationId: 'listPets' },
+        { stepId: 'read', operationId: '$sourceDescriptions.pets.getPet', parameters: [{ name: 'petId', in: 'path', value: 'x' }] },
+      );
+      const [tool] = await fromArazzo(doc, { sources: { pets: generator } });
+
+      const [list, read] = tool.metadata.workflow!.steps as OperationStepIR[];
+      expect([list.source, list.path, list.method, list.operationId]).toEqual(['pets', '/pets', 'get', 'listPets']);
+      expect([read.source, read.path, read.method, read.operationId]).toEqual(['pets', '/pets/{petId}', 'get', 'getPet']);
+      // The operations as the referenced files describe them
+      expect(list.operation.mapper).toEqual([]);
+      expect(read.operation.mapper).toEqual([expect.objectContaining({ inputKey: 'petId', type: 'path' })]);
+      // The generator is left dereferenced, the state generation reuses
+      expect(generator.getDocument().paths['/pets']).toEqual({ get: expect.objectContaining({ operationId: 'listPets' }) });
+    });
+  });
+
+  it('resolves operationPaths of a multi-file generator without generating tools first', async () => {
+    await withFiles(files(), async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      const doc = workflowOf(
+        { stepId: 'list', operationPath: '{$sourceDescriptions.pets.url}#/paths/~1pets/get' },
+        {
+          stepId: 'read',
+          operationPath: '{$sourceDescriptions.pets.url}#/paths/~1pets~1{petId}/get',
+          parameters: [{ name: 'petId', in: 'path', value: 'x' }],
+        },
+      );
+      const [tool] = await fromArazzo(doc, { sources: { pets: generator } });
+
+      const [list, read] = tool.metadata.workflow!.steps as OperationStepIR[];
+      expect([list.path, list.method, list.operation.mapper]).toEqual(['/pets', 'get', []]);
+      expect([read.path, read.method, read.operation.mapper.map((entry) => entry.inputKey)]).toEqual([
+        '/pets/{petId}',
+        'get',
+        ['petId'],
+      ]);
+    });
+  });
+
+  it('builds the same workflow as when the generator generated its tools first', async () => {
+    await withFiles(files(), async (dir) => {
+      const doc = workflowOf({ stepId: 'list', operationId: 'listPets' });
+      const fresh = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      const generated = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      await generated.generateTools();
+
+      expect(await fromArazzo(doc, { sources: { pets: fresh } })).toEqual(
+        await fromArazzo(doc, { sources: { pets: generated } }),
+      );
+    });
+  });
+
+  it('reads each file once, however the source is used afterwards', async () => {
+    await withFiles(files(), async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      const validate = jest.spyOn(generator, 'validate');
+      await fromArazzo(workflowOf({ stepId: 'list', operationId: 'listPets' }), { sources: { pets: generator } });
+      expect(validate).toHaveBeenCalledTimes(1);
+
+      // Dereferenced now: indexing it again needs nothing
+      await fromArazzo(workflowOf({ stepId: 'list', operationId: 'listPets' }), { sources: { pets: generator } });
+      expect(validate).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('leaves a source without a path item or operation reference as it is, without validating it', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(petstoreDoc());
+    const validate = jest.spyOn(generator, 'validate');
+
+    await fromArazzo(arazzoWith([simpleWorkflow()]), { sources: { pets: generator, orders: ordersDoc() } });
+
+    expect(validate).not.toHaveBeenCalled();
+  });
+
+  it('does not read what a generator that does not dereference holds, and finds none of its operations', async () => {
+    await withFiles(files(), async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), {
+        ...allowFile,
+        dereference: false,
+      });
+      await expectArazzoError(
+        fromArazzo(workflowOf({ stepId: 'list', operationId: 'listPets' }), { sources: { pets: generator } }),
+        /operationId "listPets" not found in any supplied source \(pets\)/,
+      );
+    });
+  });
+
+  it('names the reference that cannot be read, not a missing operation', async () => {
+    const tree = files();
+    delete tree['paths/pets.json'];
+    await withFiles(tree, async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      const error = await rejection(
+        fromArazzo(workflowOf({ stepId: 'list', operationId: 'listPets' }), { sources: { pets: generator } }),
+      );
+
+      expect(error).toBeInstanceOf(ArazzoError);
+      expect(error.message).toMatch(/^Failed to dereference source "pets": /);
+      expect(error.message).toContain('paths/pets.json');
+      expect(error.message).not.toMatch(/not found in any supplied source/);
+      expect(error.path).toBe('/sourceDescriptions/0');
+      expect(error.context).toMatchObject({ source: 'pets', sourcePath: '/paths/~1pets' });
+      // The generator reports the same reference when it generates
+      await expect(generator.generateTools()).rejects.toThrow(error.message.replace(/^Failed to dereference source "pets": /, ''));
+    });
+  });
+
+  it('names a reference that cannot be read in a file the source references', async () => {
+    const tree = files();
+    tree['paths/pets.json'] = { get: { operationId: 'listPets', responses: { '200': { $ref: '../responses/missing.json' } } } };
+    await withFiles(tree, async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      const error = await rejection(
+        fromArazzo(workflowOf({ stepId: 'list', operationId: 'listPets' }), { sources: { pets: generator } }),
+      );
+
+      expect(error).toBeInstanceOf(ArazzoError);
+      expect(error.message).toMatch(/^Failed to dereference source "pets": /);
+      expect(error.message).toContain('responses/missing.json');
+      // Not in the source's own document: no JSON Pointer into it
+      expect(error.context).toEqual({ path: '/sourceDescriptions/0', source: 'pets' });
+    });
+  });
+
+  it('names the rule that refuses a reference of a raw source, at the source that holds it', async () => {
+    const raw = { ...ordersDoc(), paths: { '/orders': { $ref: './orders/paths.json' } } };
+    const doc = arazzoWith([simpleWorkflow({ outputs: undefined, steps: [{ stepId: 's', operationId: 'getOrder' }] })]);
+    const error = await rejection(fromArazzo(doc, { sources: { pets: petstoreDoc(), orders: raw } }));
+
+    expect(error).toBeInstanceOf(ArazzoError);
+    expect(error.message).toMatch(/^Failed to dereference source "orders": Cannot read \$ref "\.\/orders\/paths\.json"/);
+    expect(error.path).toBe('/sourceDescriptions/1');
+    expect(error.context).toMatchObject({ source: 'orders', sourcePath: '/paths/~1orders' });
+  });
+
+  it('cuts a long source name in that message', async () => {
+    const name = `orders${'x'.repeat(200)}`;
+    const raw = { ...ordersDoc(), paths: { '/orders': { $ref: './orders/paths.json' } } };
+    const doc = arazzoWith([simpleWorkflow({ outputs: undefined, steps: [{ stepId: 's', operationId: 'getOrder' }] })], {
+      sourceDescriptions: [
+        { name: 'pets', url: 'https://x/pets.json' },
+        { name, url: 'https://x/orders.json' },
+      ],
+    });
+    const error = await rejection(fromArazzo(doc, { sources: { pets: petstoreDoc(), [name]: raw } }));
+
+    expect(error.message).toMatch(new RegExp(`^Failed to dereference source "${name.slice(0, 64)}\\.\\.\\.": Cannot read`));
+    expect(error.context).toMatchObject({ source: name });
+  });
+
+  it('indexes a document that dereferences but that validation would reject, leaving the rejection to generation', async () => {
+    const tree = files();
+    (tree['openapi.json'] as any).info = undefined;
+    await withFiles(tree, async (dir) => {
+      const generator = await OpenAPIToolGenerator.fromFile(path.join(dir, 'openapi.json'), allowFile);
+      await expectArazzoError(
+        fromArazzo(workflowOf({ stepId: 'list', operationId: 'listPets' }), { sources: { pets: generator } }),
+        /Failed to resolve GET \/pets from source "pets": Invalid OpenAPI document/,
+      );
+    });
+  });
+});
+
+describe('fromArazzo over a Swagger 2.0 source', () => {
+  /** The pets API of `petstoreDoc`, written in Swagger 2.0, with a `trace` operation 2.0 does not have. */
+  const swaggerPets = (): any => ({
+    swagger: '2.0',
+    info: { title: 'Pets', version: '1.0.0' },
+    host: 'pets.example.com',
+    schemes: ['https'],
+    securityDefinitions: { petAuth: { type: 'apiKey', name: 'X-Key', in: 'header' } },
+    paths: {
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          security: [{ petAuth: [] }],
+          parameters: [{ name: 'pet', in: 'body', schema: { type: 'object', properties: { name: { type: 'string' } } } }],
+          responses: { '201': { description: 'Created' } },
+        },
+        trace: { operationId: 'tracePets', responses: { '200': { description: 'OK' } } },
+      },
+      '/pets/{petId}': {
+        get: {
+          operationId: 'getPet',
+          parameters: [{ name: 'petId', in: 'path', required: true, type: 'string' }],
+          responses: { '200': { description: 'OK', schema: { type: 'object', properties: { id: { type: 'string' } } } } },
+        },
+      },
+    },
+  });
+  const flow = (steps: any[]): any => arazzoWith([simpleWorkflow({ outputs: undefined, steps })]);
+
+  it('finds its operations by operationId and by pointer, and builds them from the converted document', async () => {
+    const doc = flow([
+      { stepId: 'read', operationId: 'getPet', parameters: [{ name: 'petId', in: 'path', value: '$inputs.petId' }] },
+      { stepId: 'create', operationPath: '{$sourceDescriptions.pets.url}#/paths/~1pets/post', requestBody: { payload: { name: 'x' } } },
+    ]);
+    const [tool] = await fromArazzo(doc, { sources: { pets: swaggerPets() } });
+    const [read, create] = tool.metadata.workflow!.steps as OperationStepIR[];
+    expect([read.path, read.method, read.operationId]).toEqual(['/pets/{petId}', 'get', 'getPet']);
+    expect([create.path, create.method]).toEqual(['/pets', 'post']);
+    // The same operation, read from the API written in OpenAPI 3.0
+    const direct = await (await OpenAPIToolGenerator.fromJSON(petstoreDoc())).generateTool('/pets/{petId}', 'get');
+    expect(read.operation.inputSchema).toEqual(direct.inputSchema);
+    expect(read.operation.servers).toEqual([{ url: 'https://pets.example.com' }]);
+    expect(create.operation.mapper.map((m) => [m.key, m.type])).toEqual([
+      ['name', 'body'],
+      ['X-Key', 'header'],
+    ]);
+  });
+
+  it('does not index an operation Swagger 2.0 does not have', async () => {
+    await expectArazzoError(
+      fromArazzo(flow([{ stepId: 't', operationId: 'tracePets' }]), { sources: { pets: swaggerPets() } }),
+      /operationId "tracePets" not found in any supplied source/,
+    );
+    await expectArazzoError(
+      fromArazzo(flow([{ stepId: 't', operationPath: '{$sourceDescriptions.pets.url}#/paths/~1pets/trace' }]), {
+        sources: { pets: swaggerPets() },
+      }),
+      /Failed to resolve TRACE \/pets from source "pets": Operation not found: TRACE \/pets/,
+    );
+  });
+
+  it('reports a source loaded with dereference: false through the step that needs it', async () => {
+    await expectArazzoError(
+      fromArazzo(flow([{ stepId: 'read', operationId: 'getPet' }]), {
+        sources: { pets: swaggerPets() },
+        loadOptions: { dereference: false },
+      }),
+      /Failed to resolve GET \/pets\/\{petId\} from source "pets": A Swagger 2.0 document needs LoadOptions.dereference: true/,
+    );
   });
 });

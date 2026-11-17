@@ -1,10 +1,23 @@
-import type { HTTPMethod, OpenAPIDocument, OperationObject, ParameterObject } from './types';
+import type { ParameterObject } from './types';
 import { isReferenceObject } from './types';
+import { analyzeParameters } from './parameter-resolver';
+import {
+  MAX_CONVERSION_ENTRIES,
+  detectSpecVersion,
+  isSpecObject,
+  isSwagger2,
+  listOperations,
+  ownProperty,
+  resolveOperationLayout,
+  upgradeSwagger2,
+  wireMethod,
+} from './spec';
 
 export type LintSeverity = 'error' | 'warning' | 'info';
 
 /**
- * One agent-readiness finding. `path` names the operation (`GET /users`);
+ * One agent-readiness finding. `path` names the operation (`GET /users`), or
+ * is empty for a finding about the whole document;
  * `hint` says how to fix it — in the spec or via generate options/overlays.
  */
 export interface LintFinding {
@@ -21,8 +34,6 @@ export interface LintResult {
   findings: LintFinding[];
   counts: { error: number; warning: number; info: number };
 }
-
-const METHODS: HTTPMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
 
 /** Query-parameter names that read as pagination controls (shared with response hints) */
 export const PAGINATION_PARAM = /^(page|limit|offset|cursor|per_page|pagesize|page_size|after|before)$/i;
@@ -155,33 +166,66 @@ function hasAnyExample(content: Record<string, unknown> | undefined): boolean {
 }
 
 /**
+ * The Parameter Objects of a `parameters` value. A document being linted may
+ * be imperfect, so anything that is not an array of objects is skipped, as is
+ * each entry that is not an object or is a Reference Object.
+ */
+function readParameters(value: unknown): ParameterObject[] {
+  return Array.isArray(value)
+    ? value.filter((param): param is ParameterObject => isSpecObject(param) && !isReferenceObject(param))
+    : [];
+}
+
+/**
  * Lint an OpenAPI document for agent-readiness: the spec-quality gaps that
  * measurably degrade tool-calling accuracy (missing operationIds, absent or
  * vague descriptions, unpaginated list endpoints, oversized schemas, missing
  * examples). Small spec fixes routinely take tool-call success rates from
  * mediocre to near-perfect — each finding carries a concrete hint.
+ *
+ * Meant for imperfect documents: a value that cannot be read (a path item, a
+ * `parameters` list, a parameter that is not an object, ...) is skipped
+ * rather than failing. It lints the operations the generator generates: the
+ * ones the declared version has (`query` and `additionalOperations` from
+ * OpenAPI 3.2; the eight historical methods when the version is older,
+ * missing or malformed).
+ *
+ * A Swagger 2.0 document is converted to OpenAPI 3.0 first (`upgradeSwagger2`,
+ * whose diagnostics are not reported here), so its findings are those of the
+ * tools it generates; pass it dereferenced, as `generator.lint()` does: a
+ * `$ref` left in it is not followed. A conversion abandoned at
+ * `MAX_CONVERSION_ENTRIES` leaves no operation to lint: the result is one
+ * `swagger-conversion-too-large` error about the whole document (path `''`),
+ * so it never reads as a clean document (`generator.lint()` throws the
+ * `ParseError` generation throws instead).
  */
-export function lintDocument(document: OpenAPIDocument): LintResult {
+export function lintDocument(document: object): LintResult {
+  if (isSwagger2(document)) {
+    const upgraded = upgradeSwagger2(document);
+    if (upgraded.tooLarge) return lintResult([conversionTooLarge()]);
+    return lintDocument(upgraded.document);
+  }
   const findings: LintFinding[] = [];
   const operationIds = new Map<string, string[]>();
 
-  const paths = document.paths ?? {};
-  for (const [pathStr, pathItem] of Object.entries(paths).sort(([a], [b]) => (a < b ? -1 : 1))) {
-    if (!pathItem || '$ref' in pathItem) continue;
+  const layout = resolveOperationLayout(detectSpecVersion(document));
+  const paths = ownProperty(document, 'paths');
+  for (const [pathStr, pathItem] of Object.entries(isSpecObject(paths) ? paths : {}).sort(([a], [b]) =>
+    a < b ? -1 : 1,
+  )) {
+    if (!isSpecObject(pathItem) || '$ref' in pathItem) continue;
 
     // Path-item-level parameters apply to every operation (the generator
     // merges them the same way) — lint must see them too.
-    const pathLevelParameters = ((pathItem as Record<string, unknown>)['parameters'] as unknown[] | undefined ?? []).filter(
-      (param): param is ParameterObject => !isReferenceObject(param),
-    );
+    const pathLevelParameters = readParameters(ownProperty(pathItem, 'parameters'));
 
-    for (const method of METHODS) {
-      const operation = pathItem[method] as OperationObject | undefined;
-      if (!operation) continue;
-      const label = `${method.toUpperCase()} ${pathStr}`;
+    for (const { method, operation } of listOperations(pathItem, { layout }).operations) {
+      const wire = wireMethod(method);
+      const label = `${wire} ${pathStr}`;
 
       // operationId presence + duplicates
-      if (!operation.operationId) {
+      const operationId = typeof operation.operationId === 'string' ? operation.operationId : '';
+      if (!operationId) {
         findings.push({
           severity: 'warning',
           code: 'missing-operation-id',
@@ -190,14 +234,14 @@ export function lintDocument(document: OpenAPIDocument): LintResult {
           hint: 'Add a short, action-oriented operationId (it becomes the tool name).',
         });
       } else {
-        const existing = operationIds.get(operation.operationId) ?? [];
+        const existing = operationIds.get(operationId) ?? [];
         existing.push(label);
-        operationIds.set(operation.operationId, existing);
-        if (operation.operationId.length > 64) {
+        operationIds.set(operationId, existing);
+        if (operationId.length > 64) {
           findings.push({
             severity: 'info',
             code: 'long-operation-id',
-            message: `operationId '${operation.operationId.slice(0, 40)}…' exceeds 64 characters and will be truncated with a hash suffix.`,
+            message: `operationId '${operationId.slice(0, 40)}…' exceeds 64 characters and will be truncated with a hash suffix.`,
             path: label,
             hint: 'Shorten the operationId below 64 characters to keep tool names readable.',
           });
@@ -224,11 +268,14 @@ export function lintDocument(document: OpenAPIDocument): LintResult {
         });
       }
 
-      // parameter descriptions (path-level + operation-level, like generation)
-      const parameters = [
-        ...pathLevelParameters,
-        ...(operation.parameters ?? []).filter((param): param is ParameterObject => !isReferenceObject(param)),
-      ];
+      // parameter descriptions: the parameters that apply, merged exactly as
+      // generation merges them (an operation parameter overrides the
+      // path-level one with the same name and location)
+      const parameters = readParameters(
+        analyzeParameters(pathLevelParameters, readParameters(ownProperty(operation, 'parameters'))).effective.map(
+          (slot) => slot.parameter,
+        ),
+      );
       const undescribed = parameters.filter((param) => !param.description).map((param) => param.name);
       if (undescribed.length > 0) {
         findings.push({
@@ -270,13 +317,14 @@ export function lintDocument(document: OpenAPIDocument): LintResult {
         }
       }
 
-      if (method === 'get' && responseShape.hasArray) {
+      // GET and QUERY are the safe reads
+      if ((method === 'get' || method === 'query') && responseShape.hasArray) {
         const hasPagination = parameters.some((param) => param.in === 'query' && PAGINATION_PARAM.test(param.name));
         if (!hasPagination) {
           findings.push({
             severity: 'warning',
             code: 'unpaginated-list',
-            message: 'GET returns an array but declares no pagination parameter — responses can blow past client result limits (Claude Code caps tool results at 25K tokens).',
+            message: `${wire} returns an array but declares no pagination parameter — responses can blow past client result limits (Claude Code caps tool results at 25K tokens).`,
             path: label,
             hint: 'Add limit/cursor/page parameters, or shape responses at the server.',
           });
@@ -344,6 +392,25 @@ export function lintDocument(document: OpenAPIDocument): LintResult {
     }
   }
 
+  return lintResult(findings);
+}
+
+/** The finding for a Swagger 2.0 document whose conversion was abandoned: nothing of it could be linted. */
+function conversionTooLarge(): LintFinding {
+  return {
+    severity: 'error',
+    code: 'swagger-conversion-too-large',
+    message:
+      `The Swagger 2.0 document cannot be converted to OpenAPI 3.0: it needs more than ${MAX_CONVERSION_ENTRIES} media ` +
+      'type, encoding, header and form property entries (MAX_CONVERSION_ENTRIES), as its `consumes`, `produces` and ' +
+      'path-level parameters apply to every operation. No operation was linted, and no tool can be generated from it.',
+    path: '',
+    hint: 'Shorten the root `consumes`/`produces` lists (or give the operations their own), or convert the document to OpenAPI 3 first.',
+  };
+}
+
+/** Sorts the findings (errors first, then warnings, then infos; by path, then code) and counts them. */
+function lintResult(findings: LintFinding[]): LintResult {
   const rank: Record<LintSeverity, number> = { error: 0, warning: 1, info: 2 };
   findings.sort(
     (a, b) => rank[a.severity] - rank[b.severity] || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0) || (a.code < b.code ? -1 : 1),

@@ -2,14 +2,19 @@
  * Tests for annotation inference and x-mcp extension family overrides
  */
 
-import { inferAnnotationsFromMethod, extractExtensionOverrides, extractExtensionSettings } from '../annotations';
+import {
+  inferAnnotationsFromMethod,
+  extractExtensionOverrides,
+  extractExtensionSettings,
+  resolveExtensionEnabled,
+} from '../annotations';
 import { SchemaError } from '../errors';
 import type { HTTPMethod, OperationObject } from '../types';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 describe('inferAnnotationsFromMethod', () => {
-  it.each(['get', 'head', 'options', 'trace'] as HTTPMethod[])(
+  it.each(['get', 'head', 'options', 'trace', 'query'] as HTTPMethod[])(
     'should mark %s as read-only, idempotent, non-destructive',
     (method) => {
       expect(inferAnnotationsFromMethod(method)).toEqual({
@@ -37,6 +42,59 @@ describe('inferAnnotationsFromMethod', () => {
       idempotentHint: false,
       openWorldHint: false,
     });
+  });
+
+  it.each([
+    ['GET', 'get'],
+    ['Head', 'head'],
+    ['QUERY', 'query'],
+    ['Query', 'query'],
+    ['PUT', 'put'],
+    ['Delete', 'delete'],
+    ['POST', 'post'],
+    ['Patch', 'patch'],
+  ] as Array<[HTTPMethod, HTTPMethod]>)('matches the standard method %s in any case', (method, lowercase) => {
+    expect(inferAnnotationsFromMethod(method)).toEqual(inferAnnotationsFromMethod(lowercase));
+  });
+
+  // an additionalOperations method has unknown semantics: the conservative POST profile
+  it.each(['LINK', 'link', 'PURGE', 'Mixed-Case', 'constructor', '__proto__', 'toString'] as HTTPMethod[])(
+    'gives the additional method %s the POST profile',
+    (method) => {
+      expect(inferAnnotationsFromMethod(method)).toEqual({
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      });
+    },
+  );
+
+  it.each([undefined, null, 42, {}, ''] as unknown as HTTPMethod[])(
+    'gives the non-method value %p the POST profile instead of undefined',
+    (method) => {
+      expect(inferAnnotationsFromMethod(method)).toEqual(inferAnnotationsFromMethod('post'));
+    },
+  );
+});
+
+describe('resolveExtensionEnabled', () => {
+  it('reads the object form of x-mcp at the document and path item levels', () => {
+    const operation = { responses: {} };
+
+    expect(resolveExtensionEnabled({ 'x-mcp': { enabled: false } }, {}, operation)).toBe(false);
+    expect(resolveExtensionEnabled({ 'x-mcp': { enabled: false } }, { 'x-mcp': { enabled: true } }, operation)).toBe(true);
+    expect(resolveExtensionEnabled({}, { 'x-mcp': { enabled: false } }, operation)).toBe(false);
+  });
+
+  it('reads the boolean form of x-mcp at every level', () => {
+    expect(resolveExtensionEnabled({ 'x-mcp': false }, {}, { responses: {} })).toBe(false);
+    expect(resolveExtensionEnabled({ 'x-mcp': false }, { 'x-mcp': true }, { responses: {} })).toBe(true);
+    expect(resolveExtensionEnabled({ 'x-mcp': true }, {}, { 'x-mcp': false })).toBe(false);
+  });
+
+  it('ignores an x-mcp value that is neither a boolean nor an object with a boolean enabled', () => {
+    expect(resolveExtensionEnabled({ 'x-mcp': { enabled: 'no' } }, { 'x-mcp': 'off' }, { responses: {} })).toBe(true);
   });
 });
 

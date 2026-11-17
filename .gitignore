@@ -44,3 +44,6 @@ temp/
 .pnp.*
 yarn-debug.log*
 .yarn/install-state.gz
+
+# Local real-world spec corpus (downloaded by scripts/spec-corpus/download.mjs; never committed)
+/.spec-corpus/

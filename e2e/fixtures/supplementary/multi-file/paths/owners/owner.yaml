@@ -1,0 +1,14 @@
+get:
+  operationId: getOwner
+  summary: Get an owner
+  parameters:
+    - $ref: ../../parameters/OwnerId.yaml
+  responses:
+    '200':
+      description: The owner
+      content:
+        application/json:
+          schema:
+            $ref: ../../schemas/Owner.yaml
+    '404':
+      $ref: ../../responses/NotFound.yaml

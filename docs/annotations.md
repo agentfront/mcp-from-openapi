@@ -28,9 +28,12 @@ By default (`inferAnnotations: true`), annotations are derived from the HTTP met
 
 | Method | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
 |--------|---------------|-------------------|------------------|-----------------|
-| GET, HEAD, OPTIONS, TRACE | `true` | `false` | `true` | `false` |
+| GET, HEAD, OPTIONS, TRACE, QUERY | `true` | `false` | `true` | `false` |
 | PUT, DELETE | `false` | `true` | `true` | `false` |
 | POST, PATCH | `false` | `true` | `false` | `false` |
+| Any other method | `false` | `true` | `false` | `false` |
+
+`QUERY` is the OpenAPI 3.2 `query` operation: a safe, idempotent request that carries a body. "Any other method" is an `additionalOperations` method (`LINK`, `PURGE`, ...), whose semantics the library cannot know, so it gets the conservative `POST` profile. A standard method is matched in any case (`inferAnnotationsFromMethod('GET')` and `('get')` agree). `readOnlyOnly: true` follows these annotations, so it keeps `query` tools and drops `additionalOperations` ones unless an extension marks them read-only (`query` and `additionalOperations` exist only in a document declaring OpenAPI 3.2 or newer; see [OpenAPI Versions](./openapi-versions.md)). That makes `readOnlyOnly` a safer filter than an `excludeMethods` denylist for a 3.2 document that can add arbitrary methods.
 
 `openWorldHint` is always `false`: tools generated from a spec target one known API backend — a closed world.
 

@@ -1,0 +1,15 @@
+type: object
+description: The members needed to catalogue a book
+required:
+  - title
+  - isbn
+properties:
+  title:
+    type: string
+  isbn:
+    type: string
+    pattern: ^[0-9-]{10,17}$
+  authors:
+    type: array
+    items:
+      type: string

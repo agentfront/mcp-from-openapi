@@ -1,0 +1,66 @@
+# A Path Item's parameters, overridden at operation level by name and location.
+#  - `filter` (query): the operation's JSON `content` parameter replaces the path-level `schema` one.
+#  - `X-Trace-Id` (header): the operation's `x-trace-id` replaces it, header names being case-insensitive.
+#  - `Page` (query): names are case-sensitive, so the operation's `page` does not replace it.
+openapi: 3.0.3
+info:
+  title: Ledger
+  version: 1.0.0
+servers:
+  - url: https://ledger.example.com
+paths:
+  /accounts/{accountId}/ledger:
+    parameters:
+      - name: accountId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: filter
+        in: query
+        schema:
+          type: string
+      - name: X-Trace-Id
+        in: header
+        content:
+          text/plain:
+            schema:
+              type: string
+      - name: Page
+        in: query
+        content:
+          application/json:
+            schema:
+              type: integer
+    get:
+      operationId: getLedger
+      summary: Read the ledger of an account
+      parameters:
+        - name: filter
+          in: query
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  from:
+                    type: string
+                  to:
+                    type: string
+        - name: x-trace-id
+          in: header
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: The ledger entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object

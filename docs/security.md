@@ -39,6 +39,47 @@ const response = await fetch(url, {
 });
 ```
 
+### Requirements that name an undefined scheme
+
+A Security Requirement object lists schemes that must all be satisfied together (`{ a: [], b: [] }`). If it names a scheme `components.securitySchemes` does not define (for a Swagger 2.0 document, whose `securityDefinitions` become `components.securitySchemes` in the conversion, one that `securityDefinitions` does not define or the conversion could not convert, such as an `oauth2` with an unknown `flow`: `SWAGGER_UNSUPPORTED_SECURITY_SCHEME`) (a typo, or a scheme named by URI that is not one of this document's, see [below](#schemes-named-by-uri-openapi-32)), the object cannot be satisfied and is **dropped as a whole**, including the schemes it names that do exist. Each missing scheme records one `UNRESOLVED_SECURITY_SCHEME` diagnostic (`generator.getDiagnostics()`). A requirement that is not an object records `INVALID_SECURITY_REQUIREMENT` and is dropped. The objects that remain still apply, and an empty object (`{}`, no authentication) is kept.
+
+```yaml
+security:
+  - apiKey: []
+    missing: [] # not defined: the whole object is dropped, `apiKey` with it
+  - bearer: [] # kept: the tool's security is `bearer` alone
+```
+
+If every requirement of an operation is dropped, no way to authenticate is known, so the operation makes **no tool**: `generateTools()` leaves it out and records `UNSATISFIABLE_SECURITY`, and `generateTool()` throws a `GenerationError` (context `path`, `method`, `pointer`). A document-level `security` that cannot be satisfied therefore drops every operation that inherits it. The exception is a document that has `security` requirements but defines no schemes at all (no `components.securitySchemes`; for Swagger 2.0, no `securityDefinitions`): its tools are still generated, with empty security, and the validator's `NO_SECURITY_SCHEMES` warning applies. A defined map counts as schemes even when it is empty, or when none of its entries could be converted: a Swagger 2.0 document with `securityDefinitions` always converts to a `components.securitySchemes` (`{}` when nothing converted), so an operation that requires a scheme the conversion could not make (an unknown `type`, or an `oauth2` with an unknown `flow`: `SWAGGER_UNSUPPORTED_SECURITY_SCHEME`) is skipped with `UNSATISFIABLE_SECURITY`, whether or not other schemes exist. An operation that lists another requirement naming a scheme that did convert (`security: [{ weird: [] }, { key: [] }]`) is still generated, with that requirement alone.
+
+Requirements listed as alternatives (`security: [{ a: [] }, { b: [] }]`) are not kept as a choice: every scheme of every requirement object that can be satisfied becomes a requirement of the tool. See [OpenAPI Versions](./openapi-versions.md#diagnostics).
+
+### Schemes named by URI (OpenAPI 3.2)
+
+In a document declaring 3.2 or newer, a key of a Security Requirement may be the URI of a Security Scheme Object instead of a component name. The library resolves a URI that names a scheme of this same document:
+
+```yaml
+openapi: 3.2.0
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-Key
+security:
+  - "#/components/securitySchemes/ApiKey": []
+```
+
+The tool's `metadata.security` holds the scheme under its component name (`scheme: 'ApiKey'`, `type: 'apiKey'`, `in: 'header'`, `name: 'X-Key'`), the same as if the requirement had said `ApiKey: []`. The rules:
+
+- **A component name wins.** A key that is the name of a component is always that component, even when it looks like a URI. Only another key is read as a URI.
+- **A key with `:`, `/` or `#` is a URI reference.** It resolves against the document's URIs (the URL or file it was loaded from or `documentUri`, and `$self`: see [SSRF Prevention](./ssrf-prevention.md#base-uris-and-relative-references)) and names a scheme of this document when it is the document's own URI, by either of them, with the fragment `/components/securitySchemes/<name>`. The fragment is percent-decoded and read as a JSON Pointer, so `#/components/securitySchemes/my~1key` names the scheme `my/key`. A fragment-only key (`#/components/securitySchemes/ApiKey`) works with or without a URI; any other form needs one.
+- **Another document's scheme is not read.** `https://other.example/openapi.json#/components/securitySchemes/ApiKey` names a scheme in a document the library does not fetch for security: nothing is requested, the object is dropped, and `UNRESOLVED_SECURITY_SCHEME` says `names a scheme in another document, which is not read` (the URL it resolved to is not quoted: it can be a local path).
+- **`./foo` is never the component `foo`.** It is a reference to the document `foo` next to this one, so it is dropped even when a component `foo` exists. Write `foo`, or `#/components/securitySchemes/foo`.
+- **The URI and the name can both appear.** In one requirement object they count as one scheme, with the scopes of both.
+- **In a 3.0 or 3.1 document there are no URI keys.** The key is an undefined name; the diagnostic adds `(a scheme named by URI needs OpenAPI 3.2 or later)`.
+- **Anything else is reported with its reason**: a URI whose fragment is not under `/components/securitySchemes`, one that is not valid percent-encoding, or a relative reference in a document with no base URI (the message says to load it with `fromURL` or `fromFile`, or to pass `documentUri`).
+
 ---
 
 ## Supported Auth Types

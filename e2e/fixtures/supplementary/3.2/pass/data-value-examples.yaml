@@ -1,0 +1,70 @@
+# Example Objects with `dataValue` and `serializedValue` (OpenAPI 3.2).
+openapi: 3.2.0
+info:
+  title: Pets
+  version: 1.0.0
+servers:
+  - url: https://pets.example.com
+paths:
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      summary: Fetch a pet
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: integer
+          examples:
+            first:
+              summary: The first pet
+              dataValue: 1
+              serializedValue: '1'
+      responses:
+        '200':
+          description: The pet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pet'
+              examples:
+                fido:
+                  $ref: '#/components/examples/Fido'
+  /pets:
+    post:
+      operationId: createPet
+      summary: Add a pet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Pet'
+            examples:
+              rex:
+                summary: A dog
+                dataValue:
+                  name: Rex
+                  tag: dog
+                serializedValue: '{"name":"Rex","tag":"dog"}'
+      responses:
+        '201':
+          description: Created
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        tag:
+          type: string
+  examples:
+    Fido:
+      summary: A cat named Fido
+      dataValue:
+        name: Fido
+        tag: cat
+      serializedValue: '{"name":"Fido","tag":"cat"}'

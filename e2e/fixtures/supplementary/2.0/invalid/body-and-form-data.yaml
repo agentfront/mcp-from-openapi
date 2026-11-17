@@ -1,0 +1,39 @@
+# Invalid by the 2.0 text, not by the official schema: "Since form parameters are sent in the payload, they cannot be
+# declared together with a body parameter for the same operation." One operation declares both a body parameter and
+# formData parameters. OpenAPI 3.x has one request body, so a 3.x form cannot hold both.
+swagger: '2.0'
+info:
+  title: Mixed Intake
+  version: 1.0.0
+host: mixed.example.com
+schemes:
+  - https
+consumes:
+  - application/json
+  - application/x-www-form-urlencoded
+produces:
+  - application/json
+paths:
+  /submissions:
+    post:
+      operationId: submit
+      summary: Submit
+      parameters:
+        - name: submission
+          in: body
+          required: true
+          schema:
+            type: object
+            properties:
+              text:
+                type: string
+        - name: author
+          in: formData
+          required: true
+          type: string
+        - name: lang
+          in: formData
+          type: string
+      responses:
+        '202':
+          description: Accepted

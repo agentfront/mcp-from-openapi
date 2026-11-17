@@ -1,0 +1,426 @@
+{
+  "tools": {
+    "2.0": {
+      "collection-format-locations": [
+        [
+          "listShelfItems",
+          "get",
+          "/shelves/{shelfIds}/items",
+          true,
+          {
+            "arrays": {
+              "path:shelfIds": "simple/false",
+              "query:words": "spaceDelimited/false",
+              "query:labels": "form/false",
+              "header:X-Colours": "simple/false"
+            }
+          }
+        ]
+      ],
+      "collection-format-tsv": [
+        [
+          "listRows",
+          "get",
+          "/rows",
+          true,
+          {"arrays": {"query:columns": "form/false", "header:X-Sheet-Ids": "simple/false"}}
+        ]
+      ],
+      "file-response": [["downloadReport", "get", "/reports/{reportId}/download", true]],
+      "file-upload-consumes": [
+        [
+          "uploadAvatar",
+          "post",
+          "/avatars",
+          false,
+          {"body": {"offered": ["multipart/form-data"], "sent": "multipart/form-data", "binary": ["avatar"]}}
+        ],
+        [
+          "uploadScan",
+          "post",
+          "/scans",
+          false,
+          {"body": {"offered": ["multipart/form-data"], "sent": "multipart/form-data", "binary": ["scan"]}}
+        ]
+      ],
+      "global-body-two-consumes": [
+        [
+          "registerPet",
+          "post",
+          "/pets",
+          false,
+          {"body": {"offered": ["application/json"], "sent": "application/json"}}
+        ],
+        [
+          "importPet",
+          "post",
+          "/pets/import",
+          false,
+          {"body": {"offered": ["application/xml"], "sent": "application/xml"}}
+        ]
+      ],
+      "global-response-produces-override": [
+        ["getRecord", "get", "/records/{recordId}", true],
+        ["exportRecord", "get", "/records/{recordId}/export", true]
+      ],
+      "no-host": [
+        ["listNotes", "get", "/notes", true],
+        [
+          "createNote",
+          "post",
+          "/notes",
+          false,
+          {"body": {"offered": ["application/json"], "sent": "application/json"}}
+        ]
+      ],
+      "two-schemes": [["getNow", "get", "/now", true]],
+      "websocket-schemes": [["getQuote", "get", "/quotes/{symbol}", true]],
+      "x-nullable": [
+        ["getProfile", "get", "/profiles/{profileId}", true],
+        [
+          "replaceProfile",
+          "put",
+          "/profiles/{profileId}",
+          false,
+          {"body": {"offered": ["application/json"], "sent": "application/json"}}
+        ]
+      ]
+    },
+    "3.0": {
+      "parameter-content": [
+        [
+          "listReports",
+          "get",
+          "/reports",
+          true,
+          {"parameterContentTypes": {"query:filter": "application/json", "header:X-Client-Info": "application/json"}}
+        ]
+      ],
+      "parameter-override": [
+        [
+          "getLedger",
+          "get",
+          "/accounts/{accountId}/ledger",
+          true,
+          {"parameterContentTypes": {"query:filter": "application/json", "query:Page": "application/json"}}
+        ]
+      ]
+    },
+    "3.1": {
+      "parameter-content": [
+        [
+          "listReports",
+          "get",
+          "/reports",
+          true,
+          {"parameterContentTypes": {"query:filter": "application/json", "header:X-Client-Info": "application/json"}}
+        ]
+      ],
+      "parameter-override": [
+        [
+          "getLedger",
+          "get",
+          "/accounts/{accountId}/ledger",
+          true,
+          {"parameterContentTypes": {"query:filter": "application/json", "query:Page": "application/json"}}
+        ]
+      ]
+    },
+    "3.2": {
+      "cookie-style": [["getPreferences", "get", "/preferences", true]],
+      "data-value-examples": [["createPet", "post", "/pets", false], ["getPet", "get", "/pets/{petId}", true]],
+      "event-stream": [["streamOrderEvents", "get", "/orders/events", true, {"responseStream": "text/event-stream"}]],
+      "jsonl-stream": [["tailLogs", "get", "/logs", true, {"responseStream": "application/jsonl"}]],
+      "multi-media-response": [["getPrices", "get", "/prices", true, {"responseStream": "text/event-stream"}]],
+      "named-servers": [["getStatus", "get", "/status", true, {"serverNames": ["production", "staging"]}]],
+      "parameter-content": [
+        [
+          "getReport",
+          "get",
+          "/reports/{selector}",
+          true,
+          {
+            "parameterContentTypes": {
+              "path:selector": "text/plain",
+              "query:filter": "application/json",
+              "header:X-Report-Options": "application/json",
+              "header:X-Note": "text/plain",
+              "cookie:locale-hint": "text/plain",
+              "header:X-Context": "application/json"
+            }
+          }
+        ]
+      ],
+      "parameter-override": [
+        [
+          "getLedger",
+          "get",
+          "/accounts/{accountId}/ledger",
+          true,
+          {"parameterContentTypes": {"query:filter": "application/json", "query:Page": "application/json"}}
+        ]
+      ],
+      "query-and-additional-operations": [
+        ["listCollections", "get", "/collections", true],
+        ["createCollection", "post", "/collections", false],
+        ["getDocument", "get", "/documents/{id}", true],
+        ["queryDocument", "query", "/documents/{id}", true],
+        ["linkDocument", "LINK", "/documents/{id}", false],
+        ["purgeDocument", "PURGE", "/documents/{id}", false]
+      ],
+      "querystring-form": [
+        [
+          "searchPets",
+          "get",
+          "/pets/search",
+          true,
+          {"wholeQuery": {"key": "criteria", "contentType": "application/x-www-form-urlencoded"}}
+        ]
+      ],
+      "querystring-json": [
+        [
+          "listFeatures",
+          "get",
+          "/tenants/{tenant}/features",
+          true,
+          {"wholeQuery": {"key": "geo", "contentType": "application/json"}}
+        ]
+      ],
+      "response-summary": [["getHealth", "get", "/health", true]],
+      "security-scheme-uri": [["listPets", "get", "/pets", true], ["getPet", "get", "/pets/{petId}", true]],
+      "self-refused": [["ping", "get", "/ping", true]],
+      "self-relative": [["ping", "get", "/ping", true]],
+      "self-uri": [["getPet", "get", "/pets/{petId}", true]],
+      "stream-media-types": [
+        ["exportEvents", "get", "/events/export", true, {"responseStream": "text/event-stream"}],
+        ["exportPrices", "get", "/prices/export", true, {"responseStream": "application/jsonl"}],
+        ["exportTicks", "get", "/ticks/export", true, {"responseStream": "application/vnd.example.tick-stream+json"}]
+      ],
+      "cookie-json-content": [
+        [
+          "getVisitor",
+          "get",
+          "/visitor",
+          true,
+          {
+            "parameterContentTypes": {
+              "cookie:session-options": "application/json",
+              "cookie:visit-count": "application/json",
+              "cookie:banner-seen": "application/json"
+            }
+          }
+        ]
+      ],
+      "security-query-credential": [
+        [
+          "searchForm",
+          "get",
+          "/v1/search-form",
+          true,
+          {"wholeQuery": {"key": "criteria", "contentType": "application/x-www-form-urlencoded"}}
+        ],
+        [
+          "searchJson",
+          "get",
+          "/v1/search-json",
+          true,
+          {"wholeQuery": {"key": "criteria", "contentType": "application/json"}}
+        ],
+        [
+          "searchJsonHeaderKey",
+          "get",
+          "/v1/search-json-header-key",
+          true,
+          {"wholeQuery": {"key": "criteria", "contentType": "application/json"}}
+        ]
+      ]
+    }
+  },
+  "servers": {
+    "2.0": {
+      "body-and-form-data": ["https://mixed.example.com"],
+      "collection-format-locations": ["https://shelf.example.com"],
+      "collection-format-tsv": ["https://sheets.example.com"],
+      "file-response": ["https://reports.example.com"],
+      "file-upload-consumes": ["https://uploads.example.com"],
+      "global-body-two-consumes": ["https://intake.example.com/api"],
+      "global-response-produces-override": ["https://archive.example.com"],
+      "no-host": ["/v2"],
+      "path-parameter-not-required": ["https://lookup.example.com"],
+      "two-schemes": ["https://clock.example.com:8443/time", "http://clock.example.com:8443/time"],
+      "websocket-schemes": ["https://quotes.example.com/stream"],
+      "x-nullable": ["https://profiles.example.com"]
+    }
+  },
+  "diagnostics": {
+    "2.0": {
+      "collection-format-tsv": [
+        "SWAGGER_UNSUPPORTED_COLLECTION_FORMAT at /paths/~1rows/get/parameters/0/collectionFormat",
+        "SWAGGER_UNSUPPORTED_COLLECTION_FORMAT at /paths/~1rows/get/parameters/1/collectionFormat"
+      ],
+      "file-upload-consumes": ["SWAGGER_FORM_MEDIA_TYPE_ADDED at /paths/~1scans/post"],
+      "no-host": ["SWAGGER_RELATIVE_SERVER_URL at /host"],
+      "websocket-schemes": ["SWAGGER_NOT_CONVERTED at /schemes"]
+    },
+    "3.2": {
+      "cookie-json-content": ["COOKIE_CONTENT_NOT_SENDABLE at /paths/~1visitor/get/parameters/0"],
+      "security-query-credential": ["QUERYSTRING_WITH_QUERY_CREDENTIAL at /paths/~1v1~1search-json/get/parameters/0"],
+      "security-scheme-uri": [
+        "UNRESOLVED_SECURITY_SCHEME at /paths/~1pets/get/security/1/https:~1~1example.com~1other~1openapi.yaml#~1components~1securitySchemes~1bearerAuth"
+      ],
+      "self-refused": ["REFUSED_SELF at /$self"],
+      "self-relative": ["UNRESOLVABLE_SELF at /$self"]
+    }
+  },
+  "securitySchemes": {
+    "3.2": {
+      "security-scheme-uri": {"listPets": ["apiKeyAuth:apiKey"], "getPet": ["bearerAuth:http"]}
+    }
+  },
+  "inputTypes": {
+    "2.0": {
+      "x-nullable": {
+        "replaceProfile": {
+          "name": "string",
+          "nickname": ["string", "null"],
+          "birthYear": ["integer", "null"],
+          "address": ["object", "null"],
+          "aliases": ["array", "null"]
+        }
+      }
+    },
+    "3.2": {
+      "self-uri": {"getPet": {"petId": "integer", "expand": "string"}},
+      "parameter-content": {
+        "getReport": {
+          "selector": "string",
+          "filter": "object",
+          "X-Report-Options": "object",
+          "X-Note": "string",
+          "locale-hint": "string",
+          "X-Context": "untyped"
+        }
+      },
+      "parameter-override": {
+        "getLedger": {
+          "filter": "object",
+          "X-Trace-Id": null,
+          "x-trace-id": "string",
+          "Page": "integer",
+          "page": "integer"
+        }
+      }
+    },
+    "3.1": {
+      "parameter-override": {
+        "getLedger": {
+          "filter": "object",
+          "X-Trace-Id": null,
+          "x-trace-id": "string",
+          "Page": "integer",
+          "page": "integer"
+        }
+      }
+    },
+    "3.0": {
+      "parameter-override": {
+        "getLedger": {
+          "filter": "object",
+          "X-Trace-Id": null,
+          "x-trace-id": "string",
+          "Page": "integer",
+          "page": "integer"
+        }
+      }
+    }
+  },
+  "invalid": {
+    "2.0": {
+      "body-and-form-data": {
+        "officialSchema": "accepts",
+        "validator": {
+          "valid": false,
+          "findings": ["error SWAGGER_BODY_AND_FORM_DATA at /paths/~1submissions/post/parameters"]
+        },
+        "tools": [
+          [
+            "submit",
+            "post",
+            "/submissions",
+            false,
+            {
+              "body": {
+                "offered": ["application/json", "application/x-www-form-urlencoded"],
+                "sent": "application/json"
+              }
+            }
+          ]
+        ],
+        "diagnostics": ["SWAGGER_BODY_AND_FORM_DATA at /paths/~1submissions/post/parameters"],
+        "inputTypes": {"submit": {"text": "string", "author": null, "lang": null}}
+      },
+      "path-parameter-not-required": {
+        "validator": {
+          "valid": false,
+          "findings": ["error PATH_PARAMETER_NOT_REQUIRED at /paths//things/{thingId}/get/parameters/0/required"]
+        },
+        "tools": [["getThing", "get", "/things/{thingId}", true]],
+        "diagnostics": ["SWAGGER_INVALID_VALUE at /paths/~1things~1{thingId}/get/parameters/0/required"],
+        "inputTypes": {"getThing": {"thingId": "string"}}
+      }
+    },
+    "3.1": {
+      "self": {
+        "validator": {"valid": true, "findings": ["warning FEATURE_NEWER_THAN_DECLARED_VERSION at /$self"]},
+        "tools": [["ping", "get", "/ping", true]],
+        "diagnostics": ["FEATURE_NEWER_THAN_DECLARED_VERSION at /$self"]
+      },
+      "query-and-additional-operations": {
+        "validator": {
+          "valid": true,
+          "findings": [
+            "warning FEATURE_NEWER_THAN_DECLARED_VERSION at /paths/~1documents~1{id}/query",
+            "warning FEATURE_NEWER_THAN_DECLARED_VERSION at /paths/~1documents~1{id}/additionalOperations"
+          ]
+        },
+        "tools": [["getDocument", "get", "/documents/{id}", true]],
+        "diagnostics": [
+          "FEATURE_NEWER_THAN_DECLARED_VERSION at /paths/~1documents~1{id}/query",
+          "FEATURE_NEWER_THAN_DECLARED_VERSION at /paths/~1documents~1{id}/additionalOperations"
+        ]
+      },
+      "querystring-parameter": {
+        "validator": {
+          "valid": true,
+          "findings": ["warning FEATURE_NEWER_THAN_DECLARED_VERSION at /paths/~1pets~1search/get/parameters/0/in"]
+        },
+        "tools": [
+          [
+            "searchPets",
+            "get",
+            "/pets/search",
+            true,
+            {"wholeQuery": {"key": "criteria", "contentType": "application/x-www-form-urlencoded"}}
+          ]
+        ],
+        "diagnostics": []
+      }
+    },
+    "3.2": {
+      "self-fragment": {
+        "validator": {"valid": false, "findings": ["error INVALID_SELF at /$self"]},
+        "tools": [["ping", "get", "/ping", true]],
+        "diagnostics": ["INVALID_SELF at /$self"]
+      },
+      "parameter-schema-and-content": {
+        "validator": {
+          "valid": true,
+          "findings": ["warning INVALID_PARAMETER_CONTENT at /paths/~1reports/get/parameters/0"]
+        },
+        "tools": [["listReports", "get", "/reports", true]],
+        "diagnostics": ["INVALID_PARAMETER_CONTENT at /paths/~1reports/get/parameters/0"],
+        "inputTypes": {"listReports": {"filter": "string"}}
+      }
+    }
+  }
+}

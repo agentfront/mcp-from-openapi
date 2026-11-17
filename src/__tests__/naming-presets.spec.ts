@@ -69,6 +69,37 @@ describe('dottedNaming', () => {
     expect(nameFor('/users', 'delete', undefined, { tags: ['admin'] })).toBe('admin.delete_users');
   });
 
+  it('names a query operation like the other standard methods', () => {
+    expect(nameFor('/users', 'query', undefined)).toBe('users.query');
+    expect(nameFor('/users/{id}/posts', 'query', undefined)).toBe('users.query_by_id_posts');
+    expect(nameFor('/users', 'query', undefined, { tags: ['admin'] })).toBe('admin.query_users');
+  });
+
+  it.each([
+    ['LINK', 'users.LINK', 'admin.LINK_users'],
+    ['link', 'users.link', 'admin.link_users'],
+    ['M-SEARCH', 'users.M_SEARCH', 'admin.M_SEARCH_users'],
+    ["a!#$%&'*+.^_`|~-b", 'users.a_b', 'admin.a_b_users'],
+    ['2PC', 'users._2PC', 'admin._2PC_users'],
+    ['__proto__', 'users.proto', 'admin.proto_users'],
+    ['constructor', 'users.constructor', 'admin.constructor_users'],
+  ])('sanitizes the additional method %s into the method half', (method, bare, tagged) => {
+    expect(nameFor('/users', method, undefined)).toBe(bare);
+    expect(nameFor('/users', method, undefined, { tags: ['admin'] })).toBe(tagged);
+    expectBindable(bare);
+    expectBindable(tagged);
+  });
+
+  it('falls back to op when no character of the method survives', () => {
+    expect(nameFor('/users', '~', undefined)).toBe('users.op');
+    expect(nameFor('/users', '-_-', undefined, { tags: ['admin'] })).toBe('admin.op_users');
+  });
+
+  it('keeps the operationId as the method half whatever the method', () => {
+    expect(nameFor('/users', 'query', 'searchUsers')).toBe('users.searchUsers');
+    expect(nameFor('/users', 'LINK', 'linkUsers')).toBe('users.linkUsers');
+  });
+
   it('produces bindable two-segment names across shapes', () => {
     const cases: Array<[string, HTTPMethod, string | undefined, Partial<OperationObject> | undefined]> = [
       ['/a-b/{c}', 'post', undefined, undefined],

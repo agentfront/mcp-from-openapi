@@ -9,6 +9,7 @@
  * wrap the type themselves.
  */
 import type { JsonSchema } from './types';
+import { isNeverSchema } from './types';
 
 /** TypeScript rendering of one tool's call contract. */
 export interface ToolTypeScriptInfo {
@@ -164,6 +165,10 @@ function typeExpr(schema: unknown, ctx: PrintContext, depth: number, indent: str
   }
   if (!isSchemaRecord(schema)) {
     return 'unknown';
+  }
+  // `{ not: {} }` (a `false` schema, after conversion) accepts no value, whatever else it says
+  if (isNeverSchema(schema)) {
+    return 'never';
   }
   if (ctx.stack.has(schema)) {
     return 'unknown';
@@ -325,7 +330,8 @@ function objectExpr(r: SchemaRecord, ctx: PrintContext, depth: number, indent: s
  * Mirrors the printer's branch order.
  */
 function isPlainObjectBody(schema: unknown): boolean {
-  if (!isSchemaRecord(schema) || schema['$ref'] !== undefined) {
+  // A schema that accepts no value prints as `never` whatever else it says (`typeExpr`)
+  if (!isSchemaRecord(schema) || schema['$ref'] !== undefined || isNeverSchema(schema)) {
     return false;
   }
   if (('const' in schema && literalOf(schema['const']) !== 'unknown') || Array.isArray(schema['enum'])) {

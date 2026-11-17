@@ -1,0 +1,14 @@
+openapi: 3.2.0
+info:
+  title: Pet Registry (several files)
+  version: 1.0.0
+  description: One API described over several files. The path items, parameters, schemas and responses are siblings of this file, in subfolders.
+servers:
+  - url: https://api.example.com/v1
+paths:
+  /pets:
+    $ref: ./paths/pets.yaml
+  /pets/{petId}:
+    $ref: ./paths/pets-by-id.yaml
+  /owners/{ownerId}:
+    $ref: ./paths/owners/owner.yaml

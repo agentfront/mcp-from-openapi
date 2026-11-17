@@ -1,0 +1,54 @@
+# No `host` (and no `schemes`): the API is served from wherever this description was retrieved, under `basePath`.
+# A 3.x form has one relative server, `/v2`, resolved against the address of the document.
+swagger: '2.0'
+info:
+  title: Relative Notes
+  version: 1.0.0
+basePath: /v2
+consumes:
+  - application/json
+produces:
+  - application/json
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      summary: List notes
+      parameters:
+        - name: q
+          in: query
+          description: Text to search for
+          type: string
+      responses:
+        '200':
+          description: The notes
+          schema:
+            type: array
+            items:
+              $ref: '#/definitions/Note'
+    post:
+      operationId: createNote
+      summary: Add a note
+      parameters:
+        - name: note
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/Note'
+      responses:
+        '201':
+          description: The note was added
+          schema:
+            $ref: '#/definitions/Note'
+definitions:
+  Note:
+    type: object
+    required:
+      - text
+    properties:
+      id:
+        type: integer
+        format: int64
+        readOnly: true
+      text:
+        type: string

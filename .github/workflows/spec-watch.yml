@@ -1,0 +1,217 @@
+name: Spec watch
+
+# Once a week, ask whether OAI has published something newer than the sources pinned in
+# e2e/fixtures/oas/sources.json (a schema iteration, an OpenAPI version, moved test documents, a release tag, a
+# development branch, a followed branch that is gone), and keep ONE open issue up to date with what was found.
+# Runbook: docs/maintaining-openapi-support.md.
+#
+# The `check` job only reads: its token is read-only and the fetched text never reaches a shell command line. It is
+# handed to the `report` job as one JSON value in an environment variable (the script keeps it under 48 KiB; an
+# environment variable holds 128 KiB at most), and the issue text is built from it by jq.
+#
+# Every step that decides something fails closed: a failed command stops the step (set -e), and an empty report or an
+# empty issue text is an error, never an empty issue.
+
+on:
+  schedule:
+    - cron: "23 6 * * 3"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the issue text in the job summary instead of opening or updating the issue"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spec-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: "Look for newer sources"
+    # Forks have nothing to report to.
+    if: github.repository == 'agentfront/mcp-from-openapi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      newer: ${{ steps.latest.outputs.newer }}
+      report: ${{ steps.latest.outputs.report }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The script uses only Node built-ins, so there is nothing to install.
+      - name: Setup Node (no dependencies)
+        uses: ./.github/actions/setup-node-yarn
+        with:
+          node-version: 24.x
+          cache: ""
+          install: "false"
+
+      # Exit 0: nothing is newer. Exit 3: something is newer (the report is on stdout). Anything else is a failure
+      # (network, rate limit, changed page): the job fails instead of reporting "nothing newer".
+      - name: Compare the pinned sources with upstream
+        id: latest
+        env:
+          # Read-only calls to a public repository; the token only lifts the unauthenticated rate limit that
+          # GitHub-hosted runners share.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/report.json"
+          if node scripts/sync-oas-sources.mjs --latest --json > "$report"; then code=0; else code=$?; fi
+          case "$code" in
+            0) newer=false ;;
+            3) newer=true ;;
+            *) echo "::error::sync-oas-sources.mjs --latest failed (exit $code)"; exit 1 ;;
+          esac
+          # What the report job is handed must be the report the script promises, and agree with its exit code.
+          if ! jq -e --argjson newer "$newer" 'type == "object" and .newer == $newer and (.findings | type == "array")' "$report" > /dev/null; then
+            echo "::error::the output of sync-oas-sources.mjs --latest --json is not a report that agrees with exit code $code"
+            exit 1
+          fi
+          # Compact: a single line, so it is one name=value output. A command substitution inside `echo` would hide a
+          # failed jq, so it is assigned first.
+          compact="$(jq -c . "$report")"
+          if [ -z "$compact" ]; then echo "::error::the compacted report is empty"; exit 1; fi
+          # The script caps the report far below this; it is a net for the environment variable of the report job.
+          size="$(printf '%s' "$compact" | wc -c | tr -d ' ')"
+          if [ "$size" -gt 100000 ]; then echo "::error::the report is $size bytes, more than an environment variable should carry"; exit 1; fi
+          echo "newer=$newer" >> "$GITHUB_OUTPUT"
+          if [ "$newer" = true ]; then echo "report=$compact" >> "$GITHUB_OUTPUT"; fi
+          {
+            echo '### Pinned sources against upstream'
+            echo
+            echo '```json'
+            jq . "$report"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  report:
+    name: "Open or update the issue"
+    needs: check
+    if: github.repository == 'agentfront/mcp-from-openapi' && needs.check.outputs.newer == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Only this job may write, and only issues (and the one label it finds them by). It checks nothing out.
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      # Untrusted text (branch and file names from upstream): only ever read as data, by jq.
+      REPORT: ${{ needs.check.outputs.report }}
+    steps:
+      - name: Write the issue text
+        run: |
+          set -euo pipefail
+          # An empty or malformed report is an error: jq would otherwise print nothing and succeed.
+          if ! jq -e 'type == "object" and .newer == true and (.findings | type == "array")' <<< "$REPORT" > /dev/null; then
+            echo "::error::the report handed over by the check job is empty or malformed"
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/issue.jq" <<'JQ'
+          # Upstream text goes inside code spans, stripped of what could close one or start a new line.
+          def code: "`" + (tostring | gsub("[`\r\n]"; "'")) + "`";
+          def url: if test("^https://[A-Za-z0-9._/:-]+$") then . else code end;
+          def of($type): [.findings[] | select(.type == $type)];
+          def names($g): ($g.names | map(code) | join(", ")) + (if $g.count > ($g.names | length) then ", ..." else "" end);
+          def group($label; $g): if $g.count > 0 then "\($label) \($g.count) (\(names($g)))" else empty end;
+          def section($title; $items): if ($items | length) > 0 then [$title, ""] + $items + [""] else [] end;
+
+          ([
+            "Something upstream is newer than what [`e2e/fixtures/oas/sources.json`](https://github.com/agentfront/mcp-from-openapi/blob/main/e2e/fixtures/oas/sources.json) pins. Nothing is broken: a pin may need to move, or a new version may need support. Steps: [Maintaining OpenAPI support](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/maintaining-openapi-support.md). Reproduce with `node scripts/sync-oas-sources.mjs --latest`.",
+            ""
+          ]
+          + section("## Published schema iterations"; of("schema-iteration") | map(
+              "- \(.id | code): pinned \(.pinned | code), latest \(.latest | code)" + (if (.newer | length) > 1 then " (\(.newer | length) newer)" else "" end) + "\n  \(.url | url)"))
+          + section("## OpenAPI versions with no pinned sources"; of("unpinned-version") | map(
+              "- \(.version | code): \(.evidence | map(code) | join(", "))"))
+          + section("## OAI test documents (branch head moved and the pinned folders differ)"; of("documents-changed") | map(
+              "- \(.version | code) on \(.ref | code): \(.pinned[0:7] | code) -> \(.head[0:7] | code)\n  \(.compare | url)"
+              + ([.folders[] | "\n  - \(.folder | code): " + (if .status == "removed" then "no longer exists at the branch head" else ([group("added"; .added), group("removed"; .removed), group("modified"; .modified)] | if length == 0 then "the tree differs (file modes)" else join("; ") end) end)] | join(""))))
+          + section("## Followed branches that no longer exist"; of("branch-gone") | map(
+              "- \(.ref | code) (\(.version | code)): pinned at \(.pinned[0:7] | code). Name its successor in `upstream.documents[].ref` of the manifest, or drop `ref` to freeze the pin."))
+          + section("## OAI release tags newer than any pinned version"; of("release-tag") | map(
+              "- \(.tag | code)" + (if .prerelease then " (pre-release)" else "" end)))
+          + section("## Development branches of versions with no pinned sources"; of("dev-branch") | map(
+              "- \(.branch | code): no \(.version | code) source is pinned"))
+          + (if .omitted then ["and \(.omitted | to_entries | map("\(.value) more \(.key | code) findings") | join(", ")), not listed: the report is capped. They appear once the ones above are resolved.", ""] else [] end)
+          + ["Close this issue once the pins are moved (a development branch can instead be acknowledged in `upstream.acknowledgedBranches` of the manifest); the weekly run opens a new one only if something is still newer."]
+          ) | join("\n")
+          # GitHub keeps 65,536 characters of an issue: cut at a line end, and say so.
+          | if length > 60000 then (.[0:59000] | sub("\n[^\n]*$"; "")) + "\n\n... (the text was cut here; run `node scripts/sync-oas-sources.mjs --latest` for the rest)" else . end
+          JQ
+          jq -r -f "$RUNNER_TEMP/issue.jq" <<< "$REPORT" > "$RUNNER_TEMP/issue.md"
+          # Never an empty issue.
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/issue.md"; then
+            echo "::error::the issue text is empty"
+            exit 1
+          fi
+
+      - name: Show the issue text
+        run: |
+          set -euo pipefail
+          {
+            echo '### Issue text'
+            echo
+            cat "$RUNNER_TEMP/issue.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # One open issue of this workflow: opened when there is none, its text replaced when the findings changed. The
+      # workflow's own issue is the open one that is (1) written by the workflow's identity (the GitHub Actions bot, so
+      # nobody else can pose as it), (2) carries the label the workflow puts on it, (3) has exactly this title. Anything
+      # else with the same title is somebody else's issue and is left alone. The label is looked up server-side and
+      # every page of the answer is read, so the issue is found however many other issues are open.
+      - name: Open or update the issue
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          set -euo pipefail
+          title="OpenAPI sources: newer versions available"
+          label="spec-watch"
+          author="github-actions[bot]"
+          body="$RUNNER_TEMP/issue.md"
+
+          # Never create or edit an issue with an empty body.
+          if ! grep -q '[^[:space:]]' "$body"; then echo "::error::refusing to write an empty issue"; exit 1; fi
+
+          # Only a missing label (HTTP 404) is "not there"; any other failure stops the step.
+          label_exists() {
+            local answer
+            if answer="$(gh api "repos/$GH_REPO/labels/$label" --silent 2>&1)"; then return 0; fi
+            case "$answer" in
+              *"HTTP 404"*) return 1 ;;
+              *) echo "::error::cannot look up the label $label: $answer"; exit 1 ;;
+            esac
+          }
+          # Made once by the workflow itself with the permission it already has (issues: write); a concurrent creation
+          # is fine as long as the label is there afterwards.
+          if ! label_exists; then
+            gh label create "$label" --color 0E8A16 --description "Opened and kept up to date by the Spec watch workflow" || true
+            label_exists || { echo "::error::the label $label could not be created"; exit 1; }
+          fi
+
+          existing="$(gh api --paginate "repos/$GH_REPO/issues?state=open&labels=$label&per_page=100" \
+            | jq -cs --arg title "$title" --arg author "$author" --arg label "$label" '
+                [.[][]
+                  | select(.pull_request == null and .title == $title and .user.login == $author and .user.type == "Bot"
+                           and ([.labels[].name] | index($label) != null))]
+                | sort_by(.number) | first // empty')"
+
+          if [ -z "$existing" ]; then
+            gh issue create --title "$title" --body-file "$body" --label "$label"
+          else
+            number="$(jq -r '.number' <<< "$existing")"
+            case "$number" in ''|*[!0-9]*) echo "::error::unexpected issue number: $number"; exit 1 ;; esac
+            if [ "$(jq -r '.body' <<< "$existing")" = "$(cat "$body")" ]; then
+              echo "Issue #$number is up to date."
+            else
+              gh issue edit "$number" --body-file "$body"
+            fi
+          fi

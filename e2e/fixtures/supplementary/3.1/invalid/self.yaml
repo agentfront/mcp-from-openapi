@@ -1,0 +1,19 @@
+# DELIBERATELY INVALID: `$self` is an OpenAPI 3.2 field, and the official 3.1 schema rejects it. The library reads
+# `$self` only in a document that declares 3.2 or later: here it is ignored (references would resolve as if it were
+# absent) and reported with a FEATURE_NEWER_THAN_DECLARED_VERSION diagnostic; the document stays valid for the
+# library.
+openapi: 3.1.1
+$self: https://example.com/ping/openapi.yaml
+info:
+  title: Ping
+  version: 1.0.0
+servers:
+  - url: https://api.example.com
+paths:
+  /ping:
+    get:
+      operationId: ping
+      summary: Check that the API answers
+      responses:
+        '200':
+          description: Pong

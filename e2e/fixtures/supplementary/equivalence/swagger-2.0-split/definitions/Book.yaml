@@ -1,0 +1,22 @@
+description: A printed book
+allOf:
+  - $ref: CatalogItem.yaml
+  - type: object
+    required:
+      - id
+      - isbn
+      - status
+    properties:
+      id:
+        type: integer
+        format: int64
+        readOnly: true
+      isbn:
+        type: string
+        pattern: ^[0-9-]{10,17}$
+      authors:
+        type: array
+        items:
+          type: string
+      status:
+        $ref: BookStatus.yaml

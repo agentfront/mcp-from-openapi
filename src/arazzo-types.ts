@@ -271,6 +271,11 @@ export interface OperationStepIR extends StepIRBase {
   source: string;
   /** OpenAPI path in that source. */
   path: string;
+  /**
+   * The operation's method: the lowercase field name for a fixed operation
+   * (`get`, `query`), the `additionalOperations` key as written (`LINK`)
+   * otherwise: the `metadata.method` of the tool generated for the step.
+   */
   method: HTTPMethod;
   operationId?: string;
   operation: StepOperationIR;

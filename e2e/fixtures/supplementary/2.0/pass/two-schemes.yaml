@@ -1,0 +1,35 @@
+# `schemes` with two entries and a `host` with a port: a 3.x form has one server per scheme, in the order written
+# (`https://clock.example.com:8443/time` then `http://clock.example.com:8443/time`).
+swagger: '2.0'
+info:
+  title: Clock
+  version: 1.0.0
+host: clock.example.com:8443
+basePath: /time
+schemes:
+  - https
+  - http
+produces:
+  - application/json
+paths:
+  /now:
+    get:
+      operationId: getNow
+      summary: The current time
+      parameters:
+        - name: zone
+          in: query
+          description: An IANA time zone name
+          type: string
+          default: UTC
+      responses:
+        '200':
+          description: The time
+          schema:
+            type: object
+            required:
+              - iso
+            properties:
+              iso:
+                type: string
+                format: date-time

@@ -1,0 +1,76 @@
+# `x-nullable`, the vendor extension 2.0 tools use to say a value may be null (2.0 has no way to). The OpenAPI 3.0 form
+# is `nullable: true` and the 3.1 form a type list with `null`. `x-nullable: false` says the opposite and means no change.
+swagger: '2.0'
+info:
+  title: Profiles
+  version: 1.0.0
+host: profiles.example.com
+schemes:
+  - https
+consumes:
+  - application/json
+produces:
+  - application/json
+paths:
+  /profiles/{profileId}:
+    get:
+      operationId: getProfile
+      summary: Get a profile
+      parameters:
+        - name: profileId
+          in: path
+          required: true
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: The profile
+          schema:
+            $ref: '#/definitions/Profile'
+    put:
+      operationId: replaceProfile
+      summary: Replace a profile
+      parameters:
+        - name: profileId
+          in: path
+          required: true
+          type: integer
+          format: int64
+        - name: profile
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/Profile'
+      responses:
+        '200':
+          description: The profile after the change
+          schema:
+            $ref: '#/definitions/Profile'
+definitions:
+  Profile:
+    type: object
+    required:
+      - name
+    properties:
+      name:
+        type: string
+        x-nullable: false
+      nickname:
+        type: string
+        x-nullable: true
+      birthYear:
+        type: integer
+        format: int32
+        x-nullable: true
+      address:
+        type: object
+        x-nullable: true
+        properties:
+          city:
+            type: string
+      aliases:
+        type: array
+        x-nullable: true
+        items:
+          type: string
+          x-nullable: true

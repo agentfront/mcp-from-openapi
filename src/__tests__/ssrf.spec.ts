@@ -5,6 +5,7 @@ import { createLoopbackServer, type LoopbackHandler } from './helpers/loopback';
 import {
   assertUrlSafe,
   safeFetch,
+  safeFetchWithFinalUrl,
   isBlockedAddress,
   isBlockedHostname,
   decodeIpv4MappedIpv6,
@@ -373,6 +374,77 @@ describe('ssrf: assertUrlSafe', () => {
 
   it('rejects invalid URLs', async () => {
     await expect(assertUrlSafe('not a url', OPEN, lookupTo())).rejects.toThrow(SsrfError);
+  });
+});
+
+describe('ssrf: safeFetchWithFinalUrl', () => {
+  it('reports the URL itself when there is no redirect', async () => {
+    const fetchImpl = jest.fn(async () => mockResponse({ status: 200, body: '{}' }));
+    const result = await safeFetchWithFinalUrl('https://api.example.com/openapi.json', {
+      ssrf: OPEN,
+      fetchImpl,
+      lookup: lookupTo('93.184.216.34'),
+    });
+    expect(result.url).toBe('https://api.example.com/openapi.json');
+    expect(result.response.status).toBe(200);
+  });
+
+  it('reports the last hop after redirects, relative ones resolved', async () => {
+    const fetchImpl = jest
+      .fn()
+      .mockResolvedValueOnce(mockResponse({ status: 301, location: 'https://cdn.example.com/v1/spec.json' }))
+      .mockResolvedValueOnce(mockResponse({ status: 302, location: '../v2/./spec.json?x=1' }))
+      .mockResolvedValueOnce(mockResponse({ status: 200, body: '{}' }));
+    const result = await safeFetchWithFinalUrl('https://api.example.com/openapi.json', {
+      ssrf: OPEN,
+      fetchImpl,
+      lookup: lookupTo('93.184.216.34'),
+    });
+    expect(result.url).toBe('https://cdn.example.com/v2/spec.json?x=1');
+    expect(fetchImpl.mock.calls.map((call) => call[0])).toEqual([
+      'https://api.example.com/openapi.json',
+      'https://cdn.example.com/v1/spec.json',
+      'https://cdn.example.com/v2/spec.json?x=1',
+    ]);
+  });
+
+  it('reports the URL of a redirect it does not follow, or one without a location', async () => {
+    const unfollowed = await safeFetchWithFinalUrl('https://api.example.com/a.json', {
+      ssrf: OPEN,
+      followRedirects: false,
+      fetchImpl: jest.fn(async () => mockResponse({ status: 302, location: 'https://cdn.example.com/b.json' })),
+      lookup: lookupTo('93.184.216.34'),
+    });
+    expect([unfollowed.url, unfollowed.response.status]).toEqual(['https://api.example.com/a.json', 302]);
+    const noLocation = await safeFetchWithFinalUrl('https://api.example.com/a.json', {
+      ssrf: OPEN,
+      fetchImpl: jest.fn(async () => mockResponse({ status: 302 })),
+      lookup: lookupTo('93.184.216.34'),
+    });
+    expect(noLocation.url).toBe('https://api.example.com/a.json');
+  });
+
+  it('reports the final hop over the pinned Node transport', async () => {
+    const previous = serverHandler;
+    serverHandler = (req, res) => {
+      if (req.url === '/start') {
+        res.writeHead(302, { location: '/end.json' });
+        res.end();
+      } else {
+        res.writeHead(200);
+        res.end('{}');
+      }
+    };
+    try {
+      const result = await safeFetchWithFinalUrl(`http://127.0.0.1:${serverPort}/start`, {
+        ssrf: { ...OPEN, allowInternalIPs: true },
+      });
+      expect(result.url).toBe(`http://127.0.0.1:${serverPort}/end.json`);
+      // A Node-built Response has no URL of its own
+      expect(result.response.url).toBe('');
+    } finally {
+      serverHandler = previous;
+    }
   });
 });
 

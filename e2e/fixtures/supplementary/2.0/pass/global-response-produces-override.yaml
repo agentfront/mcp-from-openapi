@@ -1,0 +1,69 @@
+# A global response (`#/responses/Problem`) referenced by an operation that overrides `produces`. In 2.0 a response has
+# no media type of its own: `Problem`'s schema is served in whichever media types the operation produces, `text/csv`
+# for `exportRecord`. A 3.x global response names its media types, and it can only take the document's `produces`
+# (`application/json`), so a 3.x form of `exportRecord` answers its `default` in JSON, not in CSV.
+swagger: '2.0'
+info:
+  title: Archive
+  version: 1.0.0
+host: archive.example.com
+schemes:
+  - https
+produces:
+  - application/json
+responses:
+  Problem:
+    description: Something went wrong
+    schema:
+      $ref: '#/definitions/Problem'
+paths:
+  /records/{recordId}:
+    get:
+      operationId: getRecord
+      summary: Get a record
+      parameters:
+        - name: recordId
+          in: path
+          required: true
+          type: string
+      responses:
+        '200':
+          description: The record
+          schema:
+            type: object
+            properties:
+              id:
+                type: string
+              title:
+                type: string
+        default:
+          $ref: '#/responses/Problem'
+  /records/{recordId}/export:
+    get:
+      operationId: exportRecord
+      summary: Export a record
+      produces:
+        - text/csv
+      parameters:
+        - name: recordId
+          in: path
+          required: true
+          type: string
+      responses:
+        '200':
+          description: The record as CSV
+          schema:
+            type: string
+        default:
+          $ref: '#/responses/Problem'
+definitions:
+  Problem:
+    type: object
+    required:
+      - title
+    properties:
+      title:
+        type: string
+      status:
+        type: integer
+        format: int32

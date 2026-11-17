@@ -1,0 +1,17 @@
+# A `$self` the library does not use as a base: its scheme is not http, https or file, so it is ignored and the
+# document has no base URI, and says so with REFUSED_SELF.
+openapi: 3.2.0
+$self: ftp://example.com/ping/openapi.yaml
+info:
+  title: Ping
+  version: 1.0.0
+servers:
+  - url: https://api.example.com
+paths:
+  /ping:
+    get:
+      operationId: ping
+      summary: Check that the API answers
+      responses:
+        '200':
+          description: Pong

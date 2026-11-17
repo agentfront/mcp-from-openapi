@@ -6,16 +6,242 @@ import type {
   ParameterMapper,
   ParameterObject,
   RequestBodyObject,
+  MediaTypeObject,
   NamingStrategy,
   ParameterLocation,
-  SchemaObject,
+  SchemaOrBoolean,
   ReferenceObject,
   SecurityRequirement,
   SecurityParameterInfo,
   SecuritySchemeObject,
   SchemaConversionOptions,
 } from './types';
-import { toJsonSchema, isReferenceObject } from './types';
+import { toJsonSchema, isReferenceObject, isPresentSchema } from './types';
+import { diagnosticKey, isSpecObject, ownProperty } from './spec';
+import { GenerationError } from './errors';
+import { classifyMediaType } from './media-type';
+
+/**
+ * Request media types in order of preference: the one a request body is read
+ * in, and the one a parameter's `content` is read in when it (wrongly) lists
+ * several. Any other media type comes after these, in document order.
+ */
+const REQUEST_MEDIA_TYPE_PREFERENCES: readonly string[] = Object.freeze([
+  'application/json',
+  'application/x-www-form-urlencoded',
+  'multipart/form-data',
+  'application/xml',
+  'text/plain',
+]);
+
+/**
+ * The media type of a `content` map that is read: the first of
+ * `REQUEST_MEDIA_TYPE_PREFERENCES` present (with a value), else the first key;
+ * `undefined` for an empty map. Internal (not part of the public barrel).
+ */
+export function selectRequestMediaType(content: Record<string, unknown>): string | undefined {
+  for (const preference of REQUEST_MEDIA_TYPE_PREFERENCES) {
+    if (ownProperty(content, preference)) return preference;
+  }
+  return Object.keys(content)[0];
+}
+
+/**
+ * A parameter's `content`, as generation reads it:
+ *
+ * - `absent`: no `content` (missing, or `null`);
+ * - `invalid`: `content` is not a map (a string, an array, ...);
+ * - `empty`: a map without any media type;
+ * - `media`: the media type read — the only one or, of several (`count` > 1,
+ *   which OpenAPI forbids), the one `selectRequestMediaType` picks — with its
+ *   Media Type Object (`undefined` when that is not an object).
+ */
+export type ParameterContent =
+  | { kind: 'absent' }
+  | { kind: 'invalid'; value: unknown }
+  | { kind: 'empty' }
+  | { kind: 'media'; mediaType: string; media: Record<string, unknown> | undefined; count: number };
+
+/** Reads a parameter's `content` (see `ParameterContent`). Internal. */
+export function readParameterContent(parameter: unknown): ParameterContent {
+  const content = ownProperty(parameter, 'content');
+  if (content === undefined || content === null) return { kind: 'absent' };
+  if (!isSpecObject(content)) return { kind: 'invalid', value: content };
+  const count = Object.keys(content).length;
+  if (count === 0) return { kind: 'empty' };
+  const mediaType = selectRequestMediaType(content)!;
+  const media = ownProperty(content, mediaType);
+  return { kind: 'media', mediaType, media: isSpecObject(media) ? media : undefined, count };
+}
+
+/** A parameter of a path item's (`path`) or an operation's (`operation`) `parameters`, at `index`. */
+export interface ParameterSlot {
+  parameter: unknown;
+  level: 'path' | 'operation';
+  index: number;
+}
+
+/** A querystring rule an operation's parameters break (OpenAPI 3.2 `in: querystring`). */
+export interface QuerystringProblem {
+  code: 'MULTIPLE_QUERYSTRING_PARAMETERS' | 'QUERYSTRING_WITH_QUERY_PARAMETERS' | 'QUERYSTRING_PARAMETER_WITHOUT_CONTENT';
+  /**
+   * The parameter concerned: the second querystring parameter, or the only
+   * one (with query parameters, or without usable `content`)
+   */
+  slot: ParameterSlot;
+  /** How many querystring parameters apply */
+  querystrings: number;
+}
+
+/** How an operation's parameters combine with its path item's. Internal. */
+export interface ParameterAnalysis {
+  /**
+   * The parameters that apply, in order: the path item's that the operation
+   * does not override, then the operation's. An operation-level parameter
+   * overrides a path-level one with the same `name` and `in` (OpenAPI
+   * Operation Object `parameters`), and within one list the last of several
+   * with the same `name` and `in` is kept. Header names match in any case
+   * (`X-Id` and `x-id`), so the operation's spelling is the one sent. A
+   * parameter without a string
+   * `name` and `in` (a Reference Object left by `dereference: false`, a
+   * malformed entry) is never merged: it is kept where it is.
+   */
+  effective: ParameterSlot[];
+  /** Each parameter dropped because a later one in its own list has the same `name` and `in`. */
+  duplicates: Array<{ dropped: ParameterSlot; kept: ParameterSlot }>;
+  /** The querystring rule the parameters that apply break, if any. */
+  querystring?: QuerystringProblem;
+}
+
+/**
+ * The identity of a parameter (`name` and `in`), bounded in length;
+ * `undefined` when it has none. A header name is compared without regard to
+ * case, as HTTP header names are case-insensitive (RFC 9110 section 5.1):
+ * `X-Id` and `x-id` are one header.
+ */
+function parameterIdentity(parameter: unknown): string | undefined {
+  if (!isSpecObject(parameter) || isReferenceObject(parameter)) return undefined;
+  const name = parameter['name'];
+  const location = parameter['in'];
+  if (typeof name !== 'string' || typeof location !== 'string') return undefined;
+  const key = location === 'header' ? name.toLowerCase() : name;
+  // Bounded: a set of long strings of one length hashes into one bucket
+  return diagnosticKey({ severity: 'info', code: '', message: JSON.stringify([location, key]) });
+}
+
+/**
+ * Whether a media type is JSON: `application/json`, or `application/` + one or
+ * more characters + `+json` (`application/problem+json`), parameters and case
+ * ignored. `text/json` is not: the same rule `buildHttpRequest` writes JSON
+ * text by (`classifyMediaType`). Internal.
+ */
+export function isJsonMediaType(mediaType: string): boolean {
+  return classifyMediaType(mediaType) === 'json';
+}
+
+/**
+ * The input schema of a parameter defined with `content` whose media type
+ * declares no schema, by the media type's class (`classifyMediaType`, which
+ * `buildHttpRequest` serializes by): unconstrained (`{}`) for JSON, whose text
+ * can encode any value; an object for a form, which is built from one; a
+ * string otherwise, as the value is sent as written.
+ */
+function schemaWithoutMediaSchema(mediaType: string): JsonSchema {
+  switch (classifyMediaType(mediaType)) {
+    case 'json':
+      return {};
+    case 'form':
+      return { type: 'object' };
+    default:
+      return { type: 'string' };
+  }
+}
+
+/**
+ * What a `content` parameter's value becomes when its media type declares no
+ * schema, for a diagnostic: the reading `schemaWithoutMediaSchema` gives.
+ * Internal.
+ */
+export function describeContentWithoutSchema(mediaType: string): string {
+  switch (classifyMediaType(mediaType)) {
+    case 'json':
+      return 'the value is unconstrained';
+    case 'form':
+      return 'the value is read as an object';
+    default:
+      return 'the value is read as a string';
+  }
+}
+
+/** A parameter's `in`, when it is a Parameter Object. */
+function parameterLocation(parameter: unknown): unknown {
+  return isSpecObject(parameter) && !isReferenceObject(parameter) ? parameter['in'] : undefined;
+}
+
+/**
+ * Combines a path item's parameters with an operation's (see
+ * `ParameterAnalysis`). Shared by the resolver and the generator, which reads
+ * the lists as the document holds them to point its diagnostics at them.
+ * Internal.
+ */
+export function analyzeParameters(pathLevel: Iterable<unknown>, operationLevel: Iterable<unknown>): ParameterAnalysis {
+  const slots: ParameterSlot[] = [];
+  let index = 0;
+  for (const parameter of pathLevel) slots.push({ parameter, level: 'path', index: index++ });
+  index = 0;
+  for (const parameter of operationLevel) slots.push({ parameter, level: 'operation', index: index++ });
+
+  // The last slot of each identity is the one that applies
+  const identities = slots.map((slot) => parameterIdentity(slot.parameter));
+  const last = new Map<string, number>();
+  identities.forEach((identity, position) => {
+    if (identity !== undefined) last.set(identity, position);
+  });
+  const lastInLevel = new Map<string, number>();
+  const effective: ParameterSlot[] = [];
+  const duplicates: ParameterAnalysis['duplicates'] = [];
+  // Backwards, so a duplicate finds the later slot of its own list that replaces it
+  for (let position = slots.length - 1; position >= 0; position--) {
+    const slot = slots[position];
+    const identity = identities[position];
+    if (identity === undefined || last.get(identity) === position) {
+      effective.push(slot);
+      if (identity !== undefined) lastInLevel.set(`${slot.level}:${identity}`, position);
+      continue;
+    }
+    const sameLevel = lastInLevel.get(`${slot.level}:${identity}`);
+    if (sameLevel !== undefined) {
+      duplicates.push({ dropped: slot, kept: slots[sameLevel] });
+    } else {
+      // Overridden by the operation; a path-level duplicate before it is reported against this one
+      lastInLevel.set(`${slot.level}:${identity}`, position);
+    }
+  }
+  effective.reverse();
+  duplicates.reverse();
+
+  return { effective, duplicates, querystring: querystringProblem(effective) };
+}
+
+/**
+ * The OpenAPI 3.2 rules on `in: querystring`, over the parameters that
+ * apply: at most one, never together with `in: query` parameters, and
+ * defined with `content` (a media type). A mapper breaking one could not be
+ * serialized.
+ */
+function querystringProblem(effective: ParameterSlot[]): QuerystringProblem | undefined {
+  const querystrings = effective.filter((slot) => parameterLocation(slot.parameter) === 'querystring');
+  if (querystrings.length === 0) return undefined;
+  const count = querystrings.length;
+  if (count > 1) return { code: 'MULTIPLE_QUERYSTRING_PARAMETERS', slot: querystrings[1], querystrings: count };
+  if (effective.some((slot) => parameterLocation(slot.parameter) === 'query')) {
+    return { code: 'QUERYSTRING_WITH_QUERY_PARAMETERS', slot: querystrings[0], querystrings: count };
+  }
+  if (readParameterContent(querystrings[0].parameter).kind !== 'media') {
+    return { code: 'QUERYSTRING_PARAMETER_WITHOUT_CONTENT', slot: querystrings[0], querystrings: count };
+  }
+  return undefined;
+}
 
 /**
  * Options controlling parameter resolution behavior
@@ -72,7 +298,36 @@ export class ParameterResolver {
   }
 
   /**
-   * Resolve all parameters for an operation
+   * Resolve all parameters for an operation.
+   *
+   * - The operation's parameters are merged with the path item's
+   *   (`pathParameters`): an operation-level parameter overrides the
+   *   path-level one with the same `name` and `in` (a header name in any
+   *   case), and of several with the same `name` and `in` in one list the
+   *   last is used (see `analyzeParameters`). Parameters with one name in
+   *   different locations all stay, their input keys renamed by the naming
+   *   strategy's `conflictResolver`.
+   * - A parameter defined with `content` (a media type) instead of `schema`
+   *   takes its input schema from the media type's `schema`; when the media
+   *   type has none, it is unconstrained for a JSON media type
+   *   (`application/json`, `application/*+json`), an object for
+   *   `application/x-www-form-urlencoded` and a string otherwise (the
+   *   classes `classifyMediaType` gives, which `buildHttpRequest`
+   *   serializes by). Its mapper entry carries
+   *   `serialization.contentType` (and the media type's `encoding`) and no
+   *   `style` / `explode` / `allowReserved`. Its input property is annotated
+   *   `x-parameter-content-type: <media type>`. A parameter with both keeps
+   *   reading `schema`.
+   * - An OpenAPI 3.2 `in: querystring` parameter becomes a `type: 'query'`
+   *   mapper entry with `wholeQuery: true` (its value is the whole query
+   *   string, serialized in its `content` media type); its input property is
+   *   annotated `x-parameter-location: 'query'` and
+   *   `x-parameter-whole-query: true`.
+   *
+   * @throws GenerationError when the parameters break a querystring rule:
+   *   more than one `in: querystring`, one together with `in: query`
+   *   parameters, or one without `content` (`OpenAPIToolGenerator` skips
+   *   such an operation with a diagnostic before calling this)
    */
   resolve(
     operation: any,
@@ -83,7 +338,15 @@ export class ParameterResolver {
     inputSchema: JsonSchema;
     mapper: ParameterMapper[];
   } {
-    const allParameters: ParameterObject[] = [...(pathParameters ?? []), ...(operation.parameters ?? [])];
+    const analysis = analyzeParameters(pathParameters ?? [], operation.parameters ?? []);
+    if (analysis.querystring) {
+      const { code, querystrings } = analysis.querystring;
+      throw new GenerationError(
+        `The parameters break an OpenAPI rule on in: querystring (${code}; ${querystrings} querystring ` +
+          `parameter(s)): at most one, never with in: query parameters, and defined with content`,
+        { code },
+      );
+    }
 
     const requestBody = operation.requestBody as RequestBodyObject | undefined;
 
@@ -91,37 +354,31 @@ export class ParameterResolver {
     const parametersByName = new Map<string, ParameterInfo[]>();
 
     // Process standard parameters
-    allParameters.forEach((param) => {
-      const info: ParameterInfo = {
-        name: param.name,
-        location: param.in as ParameterLocation,
-        required: param.required ?? param.in === 'path',
-        schema: param.schema ?? { type: 'string' },
-        description: param.description,
-        style: param.style,
-        explode: param.explode,
-        allowReserved: param.allowReserved,
-        deprecated: param.deprecated,
-        examples: this.includeExamples ? collectExampleValues(param.example, param.examples) : undefined,
-      };
+    for (const { parameter } of analysis.effective) {
+      const param = parameter as ParameterObject;
+      const info = this.parameterInfo(param);
 
       if (!parametersByName.has(param.name)) {
         parametersByName.set(param.name, []);
       }
       parametersByName.get(param.name)!.push(info);
-    });
+    }
 
     // Process request body
     if (requestBody?.content) {
       const contentType = this.selectContentType(requestBody.content);
-      const mediaType = requestBody.content[contentType];
+      // 3.2 also allows a Reference Object here; like the rest of generation, read it as resolved
+      const mediaType = requestBody.content[contentType] as MediaTypeObject | undefined;
 
-      if (mediaType?.schema) {
+      // A media type with only `itemSchema` (a streamed body) is not read; the
+      // generator records UNSUPPORTED_STREAMING_REQUEST_BODY for it. A boolean
+      // schema is read: `true` is any body, `false` none
+      if (mediaType && isPresentSchema(mediaType.schema)) {
         const mediaExamples = this.includeExamples
           ? collectExampleValues(mediaType.example, mediaType.examples)
           : undefined;
         /* c8 ignore next -- both sides of ?? tested: true by required body tests, false by optional body tests */
-        this.extractBodyParameters(mediaType.schema, parametersByName, requestBody.required ?? false, contentType, mediaExamples, mediaType.encoding);
+        this.extractBodyParameters(mediaType.schema!, parametersByName, requestBody.required ?? false, contentType, mediaExamples, mediaType.encoding);
       }
     }
 
@@ -131,50 +388,18 @@ export class ParameterResolver {
     const mapper: ParameterMapper[] = [];
 
     for (const [originalName, params] of parametersByName.entries()) {
-      if (params.length === 1) {
-        // No conflict
-        const param = params[0];
-        const inputKey = originalName;
+      // A name used once keeps it; one used in several locations is renamed
+      params.forEach((param, index) => {
+        const inputKey =
+          params.length === 1 ? originalName : this.namingStrategy.conflictResolver(originalName, param.location, index);
 
         properties[inputKey] = this.buildParameterSchema(param);
         if (param.required) {
           required.push(inputKey);
         }
 
-        mapper.push({
-          inputKey,
-          type: param.location,
-          key: originalName,
-          required: param.required,
-          style: param.style,
-          explode: param.explode,
-          allowReserved: param.allowReserved,
-          serialization: param.serialization,
-          ...(param.wholeBody && { wholeBody: true }),
-        });
-      } else {
-        // Conflict - need to resolve
-        params.forEach((param, index) => {
-          const inputKey = this.namingStrategy.conflictResolver(originalName, param.location, index);
-
-          properties[inputKey] = this.buildParameterSchema(param);
-          if (param.required) {
-            required.push(inputKey);
-          }
-
-          mapper.push({
-            inputKey,
-            type: param.location,
-            key: originalName,
-            required: param.required,
-            style: param.style,
-            explode: param.explode,
-            allowReserved: param.allowReserved,
-            serialization: param.serialization,
-            ...(param.wholeBody && { wholeBody: true }),
-          });
-        });
-      }
+        mapper.push(mapperEntry(inputKey, originalName, param));
+      });
     }
 
     // Process security requirements
@@ -199,10 +424,66 @@ export class ParameterResolver {
   }
 
   /**
+   * What one Parameter Object contributes: read from `schema` (with its
+   * `style`, `explode`, `allowReserved`), or from `content` when it has no
+   * `schema` or is in the query string, as a whole
+   */
+  private parameterInfo(param: ParameterObject): ParameterInfo {
+    const wholeQuery = param.in === 'querystring';
+    // `schema` wins when a parameter (wrongly) has both, as it always has; a
+    // querystring parameter is defined by its content alone
+    const content =
+      wholeQuery || param.schema === undefined || param.schema === null
+        ? readParameterContent(param)
+        : ({ kind: 'absent' } as const);
+
+    if (content.kind !== 'media') {
+      return {
+        name: param.name,
+        location: param.in as ParameterLocation,
+        required: param.required ?? param.in === 'path',
+        schema: param.schema ?? { type: 'string' },
+        description: param.description,
+        style: param.style,
+        explode: param.explode,
+        allowReserved: param.allowReserved,
+        deprecated: param.deprecated,
+        examples: this.includeExamples ? collectExampleValues(param.example, param.examples) : undefined,
+      };
+    }
+
+    // Serialized in a media type: style, explode and allowReserved do not apply
+    const { mediaType: contentType, media } = content;
+    const mediaSchema = ownProperty(media, 'schema');
+    const encoding = ownProperty(media, 'encoding');
+    return {
+      name: param.name,
+      // The whole query string is a query entry (ParameterLocation is unchanged)
+      location: wholeQuery ? 'query' : (param.in as ParameterLocation),
+      required: param.required ?? param.in === 'path',
+      // No schema (or no Media Type Object): unconstrained for JSON, an object for a form, else a string
+      schema: (mediaSchema ?? schemaWithoutMediaSchema(contentType)) as SchemaOrBoolean,
+      description: param.description,
+      deprecated: param.deprecated,
+      // The parameter's own example(s) first, else the media type's
+      examples: this.includeExamples
+        ? (collectExampleValues(param.example, param.examples) ??
+          collectExampleValues(ownProperty(media, 'example'), ownProperty(media, 'examples') as Record<string, unknown>))
+        : undefined,
+      contentType,
+      ...(wholeQuery && { wholeQuery: true }),
+      serialization: {
+        contentType,
+        ...(isSpecObject(encoding) && Object.keys(encoding).length > 0 && { encoding }),
+      },
+    };
+  }
+
+  /**
    * Extract parameters from request body schema
    */
   private extractBodyParameters(
-    schema: SchemaObject | ReferenceObject,
+    schema: SchemaOrBoolean | ReferenceObject,
     parametersByName: Map<string, ParameterInfo[]>,
     required: boolean,
     contentType: string,
@@ -210,7 +491,9 @@ export class ParameterResolver {
     encoding?: Record<string, any>,
     prefix = '',
   ): void {
-    if (!schema || typeof schema !== 'object') return;
+    // A boolean schema is a whole body: `true` any value (`{}`), `false` none
+    // (`{ not: {} }`, so a required one cannot be satisfied, as the document says)
+    if (typeof schema !== 'boolean' && (!schema || typeof schema !== 'object')) return;
 
     // Convert to JsonSchema for processing
     const jsonSchema = toJsonSchema(schema, this.schemaConversion);
@@ -227,6 +510,9 @@ export class ParameterResolver {
         const fullName = prefix ? `${prefix}.${propName}` : propName;
         const isRequired = required && requiredFields.has(propName);
 
+        // Always an object: conversion turns every subschema into one (a
+        // boolean `false` property into `{ not: {} }`, which keeps it as an
+        // input that accepts no value)
         if (typeof propSchema === 'object') {
           const propEncoding = encoding?.[propName];
           // Distribute media-type-level whole-body examples onto the
@@ -304,7 +590,8 @@ export class ParameterResolver {
       schema['deprecated'] = true;
     }
 
-    // Add parameter metadata
+    // Add parameter metadata. `x-parameter-location` is the mapper type
+    // (`query` for a whole-query parameter)
     (schema as any)['x-parameter-location'] = param.location;
     if (param.location === 'header') {
       // Original wire header name (conflict renames only change the inputKey)
@@ -316,6 +603,15 @@ export class ParameterResolver {
     if (param.explode !== undefined) {
       (schema as any)['x-parameter-explode'] = param.explode;
     }
+    // A parameter defined with `content`: the media type its value is
+    // serialized in (and, for `in: querystring`, that the value is the whole
+    // query string)
+    if (param.contentType !== undefined) {
+      (schema as any)['x-parameter-content-type'] = param.contentType;
+    }
+    if (param.wholeQuery) {
+      (schema as any)['x-parameter-whole-query'] = true;
+    }
 
     return schema;
   }
@@ -324,25 +620,11 @@ export class ParameterResolver {
    * Select the most appropriate content type
    */
   private selectContentType(content: Record<string, any>): string {
-    // Preference order
-    const preferences = [
-      'application/json',
-      'application/x-www-form-urlencoded',
-      'multipart/form-data',
-      'application/xml',
-      'text/plain',
-    ];
-
-    for (const pref of preferences) {
-      if (content[pref]) return pref;
-    }
-
-    // Fallback to first available
-    const firstKey = Object.keys(content)[0];
-    if (!firstKey) {
+    const contentType = selectRequestMediaType(content);
+    if (!contentType) {
       throw new Error('No content type available in request body');
     }
-    return firstKey;
+    return contentType;
   }
 
   /**
@@ -455,7 +737,7 @@ interface ParameterInfo {
   name: string;
   location: ParameterLocation;
   required: boolean;
-  schema: SchemaObject | ReferenceObject | JsonSchema;
+  schema: SchemaOrBoolean | ReferenceObject | JsonSchema;
   description?: string;
   style?: string;
   explode?: boolean;
@@ -463,11 +745,33 @@ interface ParameterInfo {
   deprecated?: boolean;
   examples?: unknown[];
   wholeBody?: boolean;
+  /** The value is the whole query string (OpenAPI 3.2 `in: querystring`) */
+  wholeQuery?: boolean;
+  /** The media type of a parameter defined with `content`, whose value is serialized in it */
+  contentType?: string;
   serialization?: {
     contentType?: string;
     encoding?: Record<string, any>;
     binary?: boolean;
   };
+}
+
+/**
+ * The mapper entry of one input property. A parameter defined with `content`
+ * gets no `style`, `explode` or `allowReserved`: OpenAPI says they do not
+ * apply to it.
+ */
+function mapperEntry(inputKey: string, originalName: string, param: ParameterInfo): ParameterMapper {
+  const entry: ParameterMapper = { inputKey, type: param.location, key: originalName, required: param.required };
+  if (param.contentType === undefined) {
+    entry.style = param.style;
+    entry.explode = param.explode;
+    entry.allowReserved = param.allowReserved;
+  }
+  entry.serialization = param.serialization;
+  if (param.wholeBody) entry.wholeBody = true;
+  if (param.wholeQuery) entry.wholeQuery = true;
+  return entry;
 }
 
 /**
@@ -587,7 +891,7 @@ function flattenObjectBody(schema: JsonSchema): FlattenedObjectBody | undefined 
  * and `contentMediaType` is an embedded *string* payload, not a file part.
  */
 function isBinarySchema(schema: JsonSchema): boolean {
-  /* c8 ignore next -- defensive: callers guard with `typeof === 'object'` before invoking */
+  /* c8 ignore next -- defensive: callers pass toJsonSchema results, which are always objects */
   if (!schema || typeof schema !== 'object') return false;
   const record = schema as Record<string, unknown>;
   if (record['format'] === 'binary') return true;
@@ -605,6 +909,11 @@ function isBinarySchema(schema: JsonSchema): boolean {
  * skipped because example refs are not dereferenced into values here.
  * Returns undefined when nothing usable is present.
  *
+ * Of an Example Object, the data form is used: OpenAPI 3.2 `dataValue` when
+ * present, else `value`. `serializedValue` and `externalValue` hold the
+ * serialized form (or a link to it), not data, so an example with only those
+ * is left out.
+ *
  * Internal helper shared with ResponseBuilder (not part of the public barrel).
  */
 export function collectExampleValues(
@@ -614,7 +923,10 @@ export function collectExampleValues(
   if (examples && !Array.isArray(examples)) {
     const values = Object.values(examples)
       .filter((entry) => entry !== null && typeof entry === 'object' && !isReferenceObject(entry))
-      .map((entry) => (entry as { value?: unknown }).value)
+      .map((entry) => {
+        const dataValue = ownProperty(entry, 'dataValue');
+        return dataValue !== undefined ? dataValue : (entry as { value?: unknown }).value;
+      })
       .filter((value) => value !== undefined);
     if (values.length > 0) {
       return values;

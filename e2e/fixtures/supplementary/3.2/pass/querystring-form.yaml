@@ -1,0 +1,58 @@
+# One operation whose whole query string is an application/x-www-form-urlencoded value (`in: querystring`).
+openapi: 3.2.0
+info:
+  title: Pet shop search
+  version: 1.0.0
+servers:
+  - url: https://api.petshop.example/v1
+paths:
+  /pets/search:
+    get:
+      operationId: searchPets
+      summary: Search the pets for sale
+      parameters:
+        - name: criteria
+          in: querystring
+          required: true
+          description: The search criteria, serialized as the whole query string (`species=cat&tags=calm,small&limit=20`).
+          content:
+            application/x-www-form-urlencoded:
+              schema:
+                type: object
+                properties:
+                  species:
+                    type: string
+                    enum: [cat, dog, bird]
+                  tags:
+                    type: array
+                    items:
+                      type: string
+                  limit:
+                    type: integer
+                    minimum: 1
+                    maximum: 100
+              encoding:
+                tags:
+                  style: form
+                  explode: false
+      responses:
+        '200':
+          description: The pets that match
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Pet'
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        species:
+          type: string

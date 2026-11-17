@@ -1,0 +1,40 @@
+# `collectionFormat: tsv` (tab separated) in a query parameter and in a header. OpenAPI 3.x has no style for it
+# (the styles are form, spaceDelimited, pipeDelimited, simple, ...), so a 3.x form cannot say it.
+swagger: '2.0'
+info:
+  title: Sheets
+  version: 1.0.0
+host: sheets.example.com
+schemes:
+  - https
+produces:
+  - application/json
+paths:
+  /rows:
+    get:
+      operationId: listRows
+      summary: List rows
+      parameters:
+        - name: columns
+          in: query
+          description: Columns to return, separated by tabs
+          type: array
+          items:
+            type: string
+          collectionFormat: tsv
+        - name: X-Sheet-Ids
+          in: header
+          description: Sheets to read, separated by tabs
+          type: array
+          items:
+            type: integer
+          collectionFormat: tsv
+      responses:
+        '200':
+          description: The rows
+          schema:
+            type: array
+            items:
+              type: object
+              additionalProperties:
+                type: string

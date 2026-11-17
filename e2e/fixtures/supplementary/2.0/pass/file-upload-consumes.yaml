@@ -1,0 +1,49 @@
+# A `type: file` parameter and the `consumes` of its operation. Swagger 2.0 says the `consumes` of such an operation
+# MUST be multipart/form-data, application/x-www-form-urlencoded, or both. A file's bytes can only travel in a multipart
+# part, so a 3.x form offers multipart/form-data only: for `uploadAvatar` (urlencoded listed first, multipart second) it
+# leaves the urlencoded one out, and for `uploadScan` (urlencoded only) it puts multipart in its place.
+swagger: '2.0'
+info:
+  title: Uploads
+  version: 1.0.0
+host: uploads.example.com
+schemes:
+  - https
+produces:
+  - application/json
+paths:
+  /avatars:
+    post:
+      operationId: uploadAvatar
+      summary: Upload an avatar
+      consumes:
+        - application/x-www-form-urlencoded
+        - multipart/form-data
+      parameters:
+        - name: avatar
+          in: formData
+          description: The image
+          required: true
+          type: file
+        - name: caption
+          in: formData
+          description: A short caption
+          type: string
+      responses:
+        '201':
+          description: The avatar was stored
+  /scans:
+    post:
+      operationId: uploadScan
+      summary: Upload a scanned document
+      consumes:
+        - application/x-www-form-urlencoded
+      parameters:
+        - name: scan
+          in: formData
+          description: The scanned document
+          required: true
+          type: file
+      responses:
+        '201':
+          description: The scan was stored

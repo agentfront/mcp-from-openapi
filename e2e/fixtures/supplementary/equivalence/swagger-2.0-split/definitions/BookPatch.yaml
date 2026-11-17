@@ -1,0 +1,11 @@
+type: object
+description: A JSON merge patch for a book
+properties:
+  title:
+    type: string
+  authors:
+    type: array
+    items:
+      type: string
+  status:
+    $ref: BookStatus.yaml

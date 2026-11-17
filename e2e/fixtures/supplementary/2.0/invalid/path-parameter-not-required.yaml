@@ -1,0 +1,30 @@
+# Invalid by the official schema: a path parameter must say `required: true` (the schema allows no other value for
+# `in: path`). Real descriptions often leave it out, so a reader meets it. The library has to decide whether the path
+# parameter is still sent, and what the 3.x form holds (a 3.0 path parameter must be required).
+swagger: '2.0'
+info:
+  title: Lenient Lookup
+  version: 1.0.0
+host: lookup.example.com
+schemes:
+  - https
+produces:
+  - application/json
+paths:
+  /things/{thingId}:
+    get:
+      operationId: getThing
+      summary: Get a thing
+      parameters:
+        - name: thingId
+          in: path
+          description: Identifier of the thing
+          type: string
+      responses:
+        '200':
+          description: The thing
+          schema:
+            type: object
+            properties:
+              id:
+                type: string

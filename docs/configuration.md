@@ -25,14 +25,15 @@ const generator = await OpenAPIToolGenerator.fromURL(url, {
 
 | Option            | Type                                   | Default | Description                                                                                                                                                                                         |
 | ----------------- | -------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dereference`     | `boolean`                              | `true`  | Resolve all `$ref` pointers in the spec                                                                                                                                                             |
-| `baseUrl`         | `string`                               | `''`    | Override server URLs from the spec                                                                                                                                                                  |
+| `dereference`     | `boolean`                              | `true`  | Resolve all `$ref` pointers in the spec. A Swagger 2.0 document needs it: it is converted to OpenAPI 3.0 once dereferenced, so `false` is refused (`DEREFERENCE_REQUIRED`: `generateTools()`, `generateTool()` and `lint()` throw a `ParseError`, `validate()` returns the error). To read no other document, keep it `true` and use `secureDefaults` or `refResolution.allowedProtocols: []` |
+| `baseUrl`         | `string`                               | `''`    | Override server URLs from the spec (each server keeps its `name` and `description`)                                                                                                                 |
+| `documentUri`     | `string`                               | -       | Where the document was retrieved from: what its relative `$ref`s are read against, and one of the URIs that name it. An absolute `http`, `https` or `file` URI of at most 2,048 characters without user information, fragment or (for `file:`) host, else `LoadError` before anything is fetched or read. Replaces the URL or file `fromURL` / `fromFile` read. Not `baseUrl`: it never changes `servers` of an OpenAPI 3 document; for a Swagger 2.0 document with no `host` it is where the server's host and scheme come from. See [Document URI](#document-uri) |
 | `headers`         | `Record<string, string>`               | `{}`    | Custom HTTP headers for URL loading. Sent only to the spec URL's origin: dropped once a redirect leaves it, and never sent to external `$ref` hosts                                                 |
 | `timeout`         | `number`                               | `30000` | HTTP request timeout in milliseconds                                                                                                                                                                |
-| `validate`        | `boolean`                              | `true`  | Validate the OpenAPI document on load                                                                                                                                                               |
+| `validate`        | `boolean`                              | `true`  | Validate the document with the rules of the version it declares, at the first `generateTools()` / `generateTool()` — see [OpenAPI Versions](./openapi-versions.md). `false` skips it; the declared version is still read when the document is loaded: `getSpecVersion()` reports it, and a version the library cannot process or one newer than 3.2 is also recorded in `getDiagnostics()`. A Swagger 2.0 document is converted either way, and the conversion's `SWAGGER_*` findings are recorded. `generator.validate()` is not affected by this option: it always validates, and dereferences first when the document has a `$ref` that does not start with `#` |
 | `followRedirects` | `boolean`                              | `true`  | Follow HTTP redirects when loading from URL                                                                                                                                                         |
-| `refResolution`   | `RefResolutionOptions`                 | `{}`    | Security settings for `$ref` resolution                                                                                                                                                             |
-| `secureDefaults`  | `boolean`                              | `false` | One-flag strict posture for untrusted specs: redirects off, external `$ref` resolution disabled. Explicit values win **per key** — tightening one `refResolution` knob keeps the rest of the preset |
+| `refResolution`   | `RefResolutionOptions`                 | `{}`    | Security settings for `$ref` resolution |
+| `secureDefaults`  | `boolean`                              | `false` | One-flag strict posture for untrusted specs: redirects off, external `$ref` resolution disabled (a reference to the document's own URI is not external: it is still resolved, without a fetch). Explicit values win **per key** — tightening one `refResolution` knob keeps the rest of the preset |
 | `overlays`        | `OverlayDocument \| OverlayDocument[]` | -       | OpenAPI Overlay 1.0 docs applied before dereferencing/validation — see [Curation](./curation.md)                                                                                                    |
 
 ### RefResolutionOptions
@@ -41,12 +42,38 @@ Controls how external `$ref` pointers are resolved during dereferencing. See [SS
 
 | Option             | Type       | Default             | Description                         |
 | ------------------ | ---------- | ------------------- | ----------------------------------- |
-| `allowedProtocols` | `string[]` | `['http', 'https']` | Protocols allowed for external refs |
+| `allowedProtocols` | `string[]` | `['http', 'https']` | Protocols allowed for external refs. A relative `$ref` is checked as the absolute URL it resolves to, and a local path counts as `file`: a multi-file spec on disk needs `file`, which lets the document read any file the process can read (see [Trust Model](./ssrf-prevention.md#trust-model)) |
 | `allowedHosts`     | `string[]` | `[]` (all allowed)  | Whitelist specific hostnames        |
 | `blockedHosts`     | `string[]` | `[]`                | Additional hostnames to block       |
 | `allowInternalIPs` | `boolean`  | `false`             | Disable built-in SSRF protection    |
 
 Host entries match case-insensitively and ignore trailing root dots and IPv6 brackets: `['internal.corp']` also blocks `internal.corp.` and `INTERNAL.CORP`.
+
+A `$ref` that no resolver may read fails with a `ParseError` that names the reference, its base, the rule that refused it and the option that would allow it, and carries them in `error.context`: see [When a Reference Cannot Be Read](./ssrf-prevention.md#when-a-reference-cannot-be-read).
+
+### Document URI
+
+A relative `$ref` (`./schemas/pet.json`) is read against the document's **retrieval URI**:
+
+| Loaded with | Retrieval URI |
+| --- | --- |
+| `fromURL` | The final URL after redirects, without user information or fragment |
+| `fromFile` | The file's `file:` URL |
+| `documentUri`, any factory | `documentUri` |
+| `fromJSON`, `fromYAML` without `documentUri` | None: relative references resolve against an absolute `$self` of a 3.2 document, else against the process working directory, as in earlier releases |
+
+```typescript
+const generator = await OpenAPIToolGenerator.fromJSON(spec, {
+  documentUri: "file:///tmp/petstore/openapi.json",
+  refResolution: { allowedProtocols: ["file"] },
+});
+```
+
+For a Swagger 2.0 document the retrieval URI has a second use: when the document has no `host`, an `http` or `https` retrieval URI supplies the server's host and (without `schemes`) its scheme. A `file:` URL, which `fromFile` records, supplies neither, so such a document keeps a relative server URL (`SWAGGER_RELATIVE_SERVER_URL`); see [Servers](./openapi-versions.md#servers-host-basepath-and-schemes).
+
+`$self` (OpenAPI 3.2) names the document but never moves where its references are read from, whenever a retrieval URI exists (see [The `$self` Field](./ssrf-prevention.md#the-self-field)). A `$ref` to the document's own URI (its retrieval URI or `$self`) is resolved from the document, with no fetch, also under `secureDefaults`.
+
+The base changes which URL a relative reference becomes, never which URLs may be read: the result passes `allowedProtocols`, `allowedHosts`, `blockedHosts` and the internal-address check like an absolute reference. A `documentUri`, a `$self` and a retrieval URI each have at most 2,048 characters. `documentUri` is checked first, so a bad value costs no request and no file read. The messages, the limits and what counts as the same document are in [SSRF Prevention](./ssrf-prevention.md#base-uris-and-relative-references).
 
 ---
 
@@ -73,7 +100,7 @@ const tools = await generator.generateTools({
 | `excludeOperations`                 | `string[]`                                                   | -                                | Exclude these operation IDs                                                                |
 | `filterFn`                          | `(op: OperationWithContext) => boolean`                      | -                                | Custom filter function                                                                     |
 | `namingStrategy`                    | `NamingStrategy`                                             | -                                | Custom naming for conflicts and tool names                                                 |
-| `preferredStatusCodes`              | `number[]`                                                   | `[200, 201, 204, 202, 203, 206]` | Preferred response codes (in order)                                                        |
+| `preferredStatusCodes`              | `number[]`                                                   | `[200, 201, 204, 202, 203, 206]` | Preferred response codes (in order) for `includeAllResponses: false`; also picks the streamed response when several stream. A range key (`2XX`) is the fallback for codes the document does not list: see [includeAllResponses](#includeallresponses) |
 | `includeDeprecated`                 | `boolean`                                                    | `false`                          | Include deprecated operations                                                              |
 | `includeAllResponses`               | `boolean`                                                    | `true`                           | Include all status codes as oneOf union                                                    |
 | `maxSchemaDepth`                    | `number`                                                     | `10`                             | Maximum schema nesting depth; deeper structures are truncated with a note                  |
@@ -83,7 +110,7 @@ const tools = await generator.generateTools({
 | `inferAnnotations`                  | `boolean`                                                    | `true`                           | Infer MCP tool annotations from HTTP method semantics                                      |
 | `maxToolNameLength`                 | `number`                                                     | `64`                             | Tool name length cap (clamped to MCP's 128 max); longer names get a hash suffix            |
 | `includeTags` / `excludeTags`       | `string[]`                                                   | -                                | Filter operations by OpenAPI tags                                                          |
-| `includeMethods` / `excludeMethods` | `HTTPMethod[]`                                               | -                                | Filter operations by HTTP method                                                           |
+| `includeMethods` / `excludeMethods` | `HTTPMethod[]`                                               | -                                | Filter operations by HTTP method. A standard method (`get`, `query`, ...) matches in any case (`'GET'` works); an `additionalOperations` method (`'LINK'`) matches only exactly as written in the document (`'link'` does not match `LINK`). `excludeMethods` is a denylist: see [Filtering Operations](#filtering-operations) |
 | `includePaths` / `excludePaths`     | `string[]`                                                   | -                                | Filter by path globs (`*` per segment, `**` across, `?` one char)                          |
 | `readOnlyOnly`                      | `boolean`                                                    | `false`                          | Safety switch: only operations whose effective annotations are read-only                   |
 | `target`                            | `'claude' \| 'openai' \| 'gemini' \| 'strict'`               | -                                | Per-client schema dialect transforms — see [Client Targets](./client-targets.md)           |
@@ -109,6 +136,13 @@ const tools = await generator.generateTools({
 });
 ```
 
+**Method filters and OpenAPI 3.2.** Which operations a document has depends on the version it declares: the `query` operation and `additionalOperations` exist only in a document declaring 3.2 or newer; a 3.0 or 3.1 document is read with the eight classic methods (see [OpenAPI Versions](./openapi-versions.md)). So an `excludeMethods` list written for the eight old methods cannot be bypassed by a new method in such a document. A 3.2 document is different: `additionalOperations` accepts any HTTP method token, and a method the document adds later is in no denylist. `excludeMethods` is a denylist and cannot cover methods you have not seen; where a 3.2 document can add arbitrary methods, use `includeMethods` (an allowlist) or `readOnlyOnly`, which keeps only operations whose effective annotations are read-only (an additional method is not, unless an `x-mcp` extension says so):
+
+```typescript
+// Only these methods; any other method the document adds is left out
+const tools = await generator.generateTools({ includeMethods: ["get", "query"] });
+```
+
 Spec authors can also exclude operations declaratively with `x-mcp: false` at the **root, path, or operation** level (operation wins, then path, then root — a root-level `false` flips the whole spec to opt-in). See [Annotations & Extensions](./annotations.md).
 
 The original mechanisms still apply:
@@ -129,7 +163,7 @@ const tools = await generator.generateTools({
 
 **By custom filter:**
 
-The `filterFn` receives an `OperationWithContext` -- the OpenAPI operation object extended with `path` and `method` properties:
+The `filterFn` receives an `OperationWithContext` -- the OpenAPI operation object extended with `path` and `method` properties. `method` is the canonical form: lowercase for a standard method (`"get"`, `"query"`), the key exactly as written for an `additionalOperations` operation (`"LINK"`). It only sees the operations the declared version defines:
 
 ```typescript
 // Only GET operations
@@ -150,7 +184,7 @@ const tools = await generator.generateTools({
 
 ### maxSchemaDepth
 
-Input and output schemas are bounded to `maxSchemaDepth` levels of nesting (default `10`, minimum `1` — values below 1 are clamped so the root schema always keeps its properties). Nodes at the limit keep their scalar keywords (`type`, `description`, `format`, ...) but have child schemas stripped and `[Truncated: nested schema exceeds maxSchemaDepth]` appended to their description. Truncation covers all JSON Schema 2020-12 structural keywords (`properties`, `patternProperties`, `$defs`, `prefixItems`, `if`/`then`/`else`, `dependentSchemas`, compositions, ...). This keeps pathological or deeply recursive schemas from flooding an agent's context window.
+Input, output and streamed-response item schemas are bounded to `maxSchemaDepth` levels of nesting (default `10`, minimum `1` — values below 1 are clamped so the root schema always keeps its properties). Nodes at the limit keep their scalar keywords (`type`, `description`, `format`, ...) but have child schemas stripped and `[Truncated: nested schema exceeds maxSchemaDepth]` appended to their description. Truncation covers all JSON Schema 2020-12 structural keywords (`properties`, `patternProperties`, `$defs`, `prefixItems`, `if`/`then`/`else`, `dependentSchemas`, compositions, ...). This keeps pathological or deeply recursive schemas from flooding an agent's context window.
 
 The bound is applied while schemas are converted, not only afterwards: conversion stops descending once it is past `maxSchemaDepth`, and a schema reused through `$ref` (a pagination envelope, a money or address type) is converted once and reused for its other occurrences. Generation cost therefore follows the size of the output, not the number of paths through the spec — a few-KB spec whose schemas each reference the same child twice, chained dozens of levels deep, generates in milliseconds instead of minutes.
 
@@ -160,7 +194,7 @@ No step before truncation recurses once per level of nesting: dereferencing, con
 
 The emitted schemas still spell every occurrence of a shared schema out, so a small spec can describe an enormous tree — for example, five properties per level that all reference the next level keep 5^10 nodes after depth truncation. `maxSchemaNodes` (default `100000`) caps several things for each tool. Past the budget, generating that tool fails with a `SchemaError` that names the option; `generateTools()` skips the tool with a warning, like any other per-tool failure.
 
-- Each generated input/output schema: every JSON value in it counts — each schema object, each keyword's value, and everything inside those (`default`, `examples`, `enum`, `required`, `x-*`, ...). A schema with thousands of keywords, reached through many references, therefore cannot expand past the budget.
+- Each generated input/output schema (and a streamed response's item schema): every JSON value in it counts — each schema object, each keyword's value, and everything inside those (`default`, `examples`, `enum`, `required`, `x-*`, ...). A schema with thousands of keywords, reached through many references, therefore cannot expand past the budget.
 - The conversion work for each parameter, request body, and emitted response: one node per schema visited, plus one per keyword of each schema converted (a schema on a cycle is converted once per path). With `includeAllResponses: false`, the responses left out are never converted.
 - The `x-mcp`/`x-frontmcp` meta copied into a tool's `_meta` (see [Modern MCP fields](./modern-mcp-fields.md)), and the other values a tool takes from the spec: its title, `metadata`, and the objects in its `mapper`.
 - With a client [`target`](./client-targets.md), the inlining of local `$ref`s: a definition is inlined once per `$ref` to it, and every value of the result counts.
@@ -171,7 +205,7 @@ For scale, at the default depth: every tool of the full GitHub REST spec generat
 
 ### includeExamples
 
-When `true`, OpenAPI **parameter-level** and **media-type-level** `example`/`examples` values are copied into the generated schemas as JSON Schema `examples` arrays. They override schema-level examples where both exist (matching OpenAPI precedence). The `examples` map wins over the singular `example`; `$ref` example entries are skipped. For flattened object bodies, object-valued media-type examples are distributed onto the matching properties (`example: { name: 'Ada' }` → `name.examples: ['Ada']`).
+When `true`, OpenAPI **parameter-level** and **media-type-level** `example`/`examples` values are copied into the generated schemas as JSON Schema `examples` arrays. They override schema-level examples where both exist (matching OpenAPI precedence). The `examples` map wins over the singular `example`; `$ref` example entries are skipped. Of an Example Object, the data form is used: OpenAPI 3.2 `dataValue` when present, otherwise `value`; an example that has only `serializedValue` or `externalValue` is left out, since neither is data. A parameter defined with `content` takes its own `example`/`examples` first, then those of its media type. For flattened object bodies, object-valued media-type examples are distributed onto the matching properties (`example: { name: 'Ada' }` → `name.examples: ['Ada']`).
 
 Note: **schema-level** `example` keywords are always normalized to `examples` arrays by `toJsonSchema()`, regardless of this option — this option only controls the additional parameter/media-type sources.
 
@@ -179,11 +213,12 @@ Note: **schema-level** `example` keywords are always normalized to `examples` ar
 
 When `true` (default), each tool gets MCP [tool annotations](./annotations.md) derived from HTTP method semantics (RFC 9110 safety/idempotency):
 
-| Method                    | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
-| ------------------------- | -------------- | ----------------- | ---------------- | --------------- |
-| GET, HEAD, OPTIONS, TRACE | `true`         | `false`           | `true`           | `false`         |
-| PUT, DELETE               | `false`        | `true`            | `true`           | `false`         |
-| POST, PATCH               | `false`        | `true`            | `false`          | `false`         |
+| Method                           | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+| -------------------------------- | -------------- | ----------------- | ---------------- | --------------- |
+| GET, HEAD, OPTIONS, TRACE, QUERY | `true`         | `false`           | `true`           | `false`         |
+| PUT, DELETE                      | `false`        | `true`            | `true`           | `false`         |
+| POST, PATCH                      | `false`        | `true`            | `false`          | `false`         |
+| Any other method (OpenAPI 3.2 `additionalOperations`, such as LINK) | `false` | `true` | `false` | `false` |
 
 Extension overrides (`x-speakeasy-mcp`, `x-mcp`, `x-frontmcp`) are merged on top and still apply when inference is disabled. See [Annotations & Extensions](./annotations.md).
 
@@ -203,7 +238,17 @@ When set to a **string array**, only the named schemes appear in the `inputSchem
 
 When `true` (default), the output schema is a `oneOf` union of all response status codes. Each variant includes an `x-status-code` annotation.
 
-When `false`, only the single preferred status code schema is used (based on `preferredStatusCodes` order).
+When `false`, only the single preferred response is used. It is the first of these that finds a response with a schema:
+
+1. an explicit status code in `preferredStatusCodes`, in its order;
+2. any explicit 2xx code;
+3. a range key (`2XX`, any case in the document) covering a code in `preferredStatusCodes`, in its order, else the `2XX` range;
+4. any explicit 3xx code, else the `3XX` range;
+5. the first response with a schema (`default` only when nothing else has one).
+
+An explicit code beats a range of its own class for 2xx (rule 2 precedes every range rule), for a code listed in `preferredStatusCodes` (rule 1), and for 3xx while no range covers a code of `preferredStatusCodes`: with responses `299` and `2XX` the answer is 299, although `2XX` covers the preferred 200. In the other classes a range covering a code of `preferredStatusCodes` wins (rule 3): with `499` and `4XX` and `preferredStatusCodes: [404]` the answer is `4XX`. A range key keeps its name in the output: `x-status-code` is `'2XX'` and `metadata.responseStatusRanges` lists it (`metadata.responseStatusCodes` holds only numbers). See [Response Schemas](./response-schemas.md#selection-priority).
+
+A streamed response (OpenAPI 3.2 `itemSchema`) is not part of the union either way: it is reported in `metadata.responseStream`. The response is chosen by the same status code preference (ranges included; its `statusCode` is then `'2XX'`); within it, the stream's media type is the first one with `itemSchema` in document order, independent of the media type the output schema comes from. See [Response Schemas](./response-schemas.md#streaming-responses).
 
 ---
 

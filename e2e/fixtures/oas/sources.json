@@ -1,0 +1,1260 @@
+{
+  "upstream": {
+    "repository": "OAI/OpenAPI-Specification",
+    "documents": [
+      {
+        "commit": "6d86f6560681d0c461cd06b3faa80814aa120fda",
+        "version": "3.2",
+        "ref": "v3.2-dev",
+        "folders": [
+          "tests/schema/pass",
+          "tests/schema/fail"
+        ]
+      },
+      {
+        "commit": "642ee90575f60233302ad3e82f9de83e02996532",
+        "version": "3.1",
+        "ref": "v3.1-dev",
+        "folders": [
+          "tests/schema/pass",
+          "tests/schema/fail"
+        ]
+      },
+      {
+        "commit": "4f86429f134f7e48b6351563549b4502fc69de52",
+        "version": "3.0",
+        "ref": "main",
+        "folders": [
+          "_archive_/schemas/v3.0/pass"
+        ]
+      },
+      {
+        "commit": "e77481c73e1c703c7de2e4249047b42b8e9b56f4",
+        "version": "2.0",
+        "folders": [
+          "examples/v2.0/yaml"
+        ],
+        "note": "Frozen: the examples folder was removed from the repository in 18bf2771eb98f19cdcb1c23d45d8c2a1f49a54d8 and the pin is its parent, so there is no branch to follow."
+      }
+    ],
+    "acknowledgedBranches": []
+  },
+  "sources": [
+    {
+      "id": "oas-3.0-schema",
+      "version": "3.0",
+      "kind": "schema",
+      "url": "https://spec.openapis.org/oas/3.0/schema/2024-10-18",
+      "path": "schemas/3.0/schema.json",
+      "sha256": "2385f5bbb8c37878daae73baeabe7f34b2f022a4a8c049329ee61f71796f039c"
+    },
+    {
+      "id": "oas-3.1-schema",
+      "version": "3.1",
+      "kind": "schema",
+      "url": "https://spec.openapis.org/oas/3.1/schema/2026-11-05",
+      "path": "schemas/3.1/schema.json",
+      "sha256": "4751a7777357b26b09a9a61b9addd08081de2e65cf80d3ae0df2b4cd931b2d7b"
+    },
+    {
+      "id": "oas-3.1-schema-base",
+      "version": "3.1",
+      "kind": "schema-base",
+      "url": "https://spec.openapis.org/oas/3.1/schema-base/2026-11-05",
+      "path": "schemas/3.1/schema-base.json",
+      "sha256": "1256f323406523ca05f00f873c2d6425147c0e9e62905b2afd373756cd885228"
+    },
+    {
+      "id": "oas-3.1-dialect",
+      "version": "3.1",
+      "kind": "dialect",
+      "url": "https://spec.openapis.org/oas/3.1/dialect/2024-11-10",
+      "path": "schemas/3.1/dialect.json",
+      "sha256": "647f32dfff64949d5020a28ecd1af4ffeffb1e9c695f861a52255a8004e07460"
+    },
+    {
+      "id": "oas-3.1-meta",
+      "version": "3.1",
+      "kind": "meta",
+      "url": "https://spec.openapis.org/oas/3.1/meta/2024-11-10",
+      "path": "schemas/3.1/meta.json",
+      "sha256": "80706a9a404affedbf84ac4dc1328c9ce0d2a00804cdfc4d95c0ddd0053121dd"
+    },
+    {
+      "id": "oas-3.2-schema",
+      "version": "3.2",
+      "kind": "schema",
+      "url": "https://spec.openapis.org/oas/3.2/schema/2026-11-12",
+      "path": "schemas/3.2/schema.json",
+      "sha256": "f1f7ee38d431a7bb1082e4df2288dbe1d4d3f49081b497af249c07b77737fb43"
+    },
+    {
+      "id": "oas-3.2-schema-base",
+      "version": "3.2",
+      "kind": "schema-base",
+      "url": "https://spec.openapis.org/oas/3.2/schema-base/2026-11-12",
+      "path": "schemas/3.2/schema-base.json",
+      "sha256": "8e432f0f148597960daa3aafa0c0030d8aae7538d32c217854a1e3aada595216"
+    },
+    {
+      "id": "oas-3.2-dialect",
+      "version": "3.2",
+      "kind": "dialect",
+      "url": "https://spec.openapis.org/oas/3.2/dialect/2026-02-26",
+      "path": "schemas/3.2/dialect.json",
+      "sha256": "9375b7042aa0b01848403f0a9ebf12a3425e01a9e24337ce12624f10fea73833"
+    },
+    {
+      "id": "oas-3.2-meta",
+      "version": "3.2",
+      "kind": "meta",
+      "url": "https://spec.openapis.org/oas/3.2/meta/2026-02-26",
+      "path": "schemas/3.2/meta.json",
+      "sha256": "f444d02ef7d36f30293983fad8118c823a3c70a49a8e5aa6f1afe21215e35417"
+    },
+    {
+      "id": "json-schema-2020-12-schema",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/schema",
+      "path": "schemas/json-schema-2020-12/schema.json",
+      "sha256": "41da76f5afb7ce062d248f762463a92f7ca47e4e0f905b224ba6afeef91ded0f"
+    },
+    {
+      "id": "json-schema-2020-12-meta-core",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/core",
+      "path": "schemas/json-schema-2020-12/meta/core.json",
+      "sha256": "21f79d143fab1f180245c331e5657057045b36794d41fe151e6e4fed65035299"
+    },
+    {
+      "id": "json-schema-2020-12-meta-applicator",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/applicator",
+      "path": "schemas/json-schema-2020-12/meta/applicator.json",
+      "sha256": "bf273b26f9f735b93ece78f2b61b36676e1d122ce78ab37ad5a2e45dfa1ca2b1"
+    },
+    {
+      "id": "json-schema-2020-12-meta-unevaluated",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/unevaluated",
+      "path": "schemas/json-schema-2020-12/meta/unevaluated.json",
+      "sha256": "fc99f32188da41689a9382af174dd42e8b255e4374965c157b8286556b4ab2bc"
+    },
+    {
+      "id": "json-schema-2020-12-meta-validation",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/validation",
+      "path": "schemas/json-schema-2020-12/meta/validation.json",
+      "sha256": "e921c5b79264d3689af01c1af1ffdf692e09f1c45df90a0f08eb7288c9acdeab"
+    },
+    {
+      "id": "json-schema-2020-12-meta-meta-data",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/meta-data",
+      "path": "schemas/json-schema-2020-12/meta/meta-data.json",
+      "sha256": "c664d438a84d58889c8edecd248ce2f945a4bc0e3b087323b11303dc136abfbe"
+    },
+    {
+      "id": "json-schema-2020-12-meta-format-annotation",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/format-annotation",
+      "path": "schemas/json-schema-2020-12/meta/format-annotation.json",
+      "sha256": "5c79404f831dd905c0f40fefac7c6f3e51bf3729b4a876a5c2020178d97f3bcc"
+    },
+    {
+      "id": "json-schema-2020-12-meta-content",
+      "version": "2020-12",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft/2020-12/meta/content",
+      "path": "schemas/json-schema-2020-12/meta/content.json",
+      "sha256": "a10456605b2b5bb12a1b4dcfc0300f02f54d3e8bb3646bed7724583866627682"
+    },
+    {
+      "id": "oas-3.2-doc-pass-callback-object-examples",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/callback-object-examples.yaml",
+      "path": "documents/3.2/pass/callback-object-examples.yaml",
+      "sha256": "9ea6be14a3931d6fda1fca09c930e3c0a8017c2b2b9bd398dc3ef28f2bb27c9a"
+    },
+    {
+      "id": "oas-3.2-doc-pass-comp_pathitems",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/comp_pathitems.yaml",
+      "path": "documents/3.2/pass/comp_pathitems.yaml",
+      "sha256": "91166ce4fbbdf5e773171ab20783a148cbd26ef52040983af91e5e6281877d52"
+    },
+    {
+      "id": "oas-3.2-doc-pass-components-object-example",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/components-object-example.yaml",
+      "path": "documents/3.2/pass/components-object-example.yaml",
+      "sha256": "42909de10e01b5bd826a7202bdd8f0de78ebeabc0dc2ef29183d8f25051b985e"
+    },
+    {
+      "id": "oas-3.2-doc-pass-example-object-examples",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/example-object-examples.yaml",
+      "path": "documents/3.2/pass/example-object-examples.yaml",
+      "sha256": "5278a58899aeaa27592c9a93d254932a9d54688f112c66edac9e597024a52b2b"
+    },
+    {
+      "id": "oas-3.2-doc-pass-header-object-examples",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/header-object-examples.yaml",
+      "path": "documents/3.2/pass/header-object-examples.yaml",
+      "sha256": "78200575ee3ea09bc1e61c5ad920624641d32a92ba454cb168eec4c3f68631cb"
+    },
+    {
+      "id": "oas-3.2-doc-pass-info-object-example",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/info-object-example.yaml",
+      "path": "documents/3.2/pass/info-object-example.yaml",
+      "sha256": "a6a8baf96d4892d99964ee1cc816c228532cd2078a7e4d608e7475c98cf21df9"
+    },
+    {
+      "id": "oas-3.2-doc-pass-info_summary",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/info_summary.yaml",
+      "path": "documents/3.2/pass/info_summary.yaml",
+      "sha256": "7e216826e709277f35b5c750017807d8b39944c753e01d7edb8e79e9ce68ac16"
+    },
+    {
+      "id": "oas-3.2-doc-pass-json_schema_dialect",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/json_schema_dialect.yaml",
+      "path": "documents/3.2/pass/json_schema_dialect.yaml",
+      "sha256": "1fc6bafd00613b2008f00d388779aa610b3b24f7e0fc72372987a2bce2c0936c"
+    },
+    {
+      "id": "oas-3.2-doc-pass-license_identifier",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/license_identifier.yaml",
+      "path": "documents/3.2/pass/license_identifier.yaml",
+      "sha256": "b40bfa7b9700d54df71f2efba68885bdfecb7d5219cf70322989b8f7fa4dabf6"
+    },
+    {
+      "id": "oas-3.2-doc-pass-link-object-examples",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/link-object-examples.yaml",
+      "path": "documents/3.2/pass/link-object-examples.yaml",
+      "sha256": "34dd6c009b79830b249f816c61e1fab5894888b77be32b1bf9c12d500b4f5048"
+    },
+    {
+      "id": "oas-3.2-doc-pass-media-type-examples",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/media-type-examples.yaml",
+      "path": "documents/3.2/pass/media-type-examples.yaml",
+      "sha256": "c21031451948a365564135e8fb00d1a7a7022e54f2260730274f13055a6c6fcd"
+    },
+    {
+      "id": "oas-3.2-doc-pass-mega",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/mega.yaml",
+      "path": "documents/3.2/pass/mega.yaml",
+      "sha256": "fa116ca6419977d2eeab2cbdf53862679c1c165398dfc5861cdcf1126a47b13f"
+    },
+    {
+      "id": "oas-3.2-doc-pass-minimal_comp",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/minimal_comp.yaml",
+      "path": "documents/3.2/pass/minimal_comp.yaml",
+      "sha256": "73ed0238e19a568b7dd628203752c5f845a5b073851537106fbad3af01096f6b"
+    },
+    {
+      "id": "oas-3.2-doc-pass-minimal_hooks",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/minimal_hooks.yaml",
+      "path": "documents/3.2/pass/minimal_hooks.yaml",
+      "sha256": "5635bc45e16a0683c2a1a2403ddc6957d18ade1b721fc5c9ba0b1fb35fce6875"
+    },
+    {
+      "id": "oas-3.2-doc-pass-minimal_paths",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/minimal_paths.yaml",
+      "path": "documents/3.2/pass/minimal_paths.yaml",
+      "sha256": "f26b4ad0ddcb4f0068c8ada806c352c0d19538393df1d65464b1eeecbacbc399"
+    },
+    {
+      "id": "oas-3.2-doc-pass-non-oauth-scopes",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/non-oauth-scopes.yaml",
+      "path": "documents/3.2/pass/non-oauth-scopes.yaml",
+      "sha256": "a662977893cb3b5ffcde8a9b1b72e6418c4653e4761f48acd0b8be1c69e5c357"
+    },
+    {
+      "id": "oas-3.2-doc-pass-operation-object-example",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/operation-object-example.yaml",
+      "path": "documents/3.2/pass/operation-object-example.yaml",
+      "sha256": "1c870973e41c63efbd04cf4ae965ac5ab56710c6ae66f12deb71e2e36e987478"
+    },
+    {
+      "id": "oas-3.2-doc-pass-parameter-object-cookie-form-allowReserved",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/parameter-object-cookie-form-allowReserved.yaml",
+      "path": "documents/3.2/pass/parameter-object-cookie-form-allowReserved.yaml",
+      "sha256": "29dd9543f3af7a617e977cc0253c6dc901498fa7877f89900ff8f5646aa8003d"
+    },
+    {
+      "id": "oas-3.2-doc-pass-parameter-object-examples",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/parameter-object-examples.yaml",
+      "path": "documents/3.2/pass/parameter-object-examples.yaml",
+      "sha256": "e6d72b4a700e800f2eabc4dc6420bbe8d4134fc4649924e97c5639bd216e739b"
+    },
+    {
+      "id": "oas-3.2-doc-pass-parameter-object-path-allowReserved",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/parameter-object-path-allowReserved.yaml",
+      "path": "documents/3.2/pass/parameter-object-path-allowReserved.yaml",
+      "sha256": "809d3fd473c6381b34f7e1bea5f8ad832dd003cbf681f9afdeb56605c0d73c8f"
+    },
+    {
+      "id": "oas-3.2-doc-pass-parameter-object-query-allowReserved",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/parameter-object-query-allowReserved.yaml",
+      "path": "documents/3.2/pass/parameter-object-query-allowReserved.yaml",
+      "sha256": "ca5a31b34e99eb8c9ac1bba8e60318cffc7bf6c0a98c82e060466dc1a050c4f0"
+    },
+    {
+      "id": "oas-3.2-doc-pass-path-item-object-example",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/path-item-object-example.yaml",
+      "path": "documents/3.2/pass/path-item-object-example.yaml",
+      "sha256": "b90dc7867b3270124ee759e9455a3ba0b8f2ad071c8300e43c99b9edcbd90505"
+    },
+    {
+      "id": "oas-3.2-doc-pass-path_item_servers_parameters",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/path_item_servers_parameters.yaml",
+      "path": "documents/3.2/pass/path_item_servers_parameters.yaml",
+      "sha256": "8a54e15dcf3f1d2ba9084fbecdc1009fe5c84c9c24eb6caf600dcb877e545cf9"
+    },
+    {
+      "id": "oas-3.2-doc-pass-path_no_response",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/path_no_response.yaml",
+      "path": "documents/3.2/pass/path_no_response.yaml",
+      "sha256": "dcf30f25b1ddd1d4a782a7c53293b843a97b8a79dc7a5860527e025ed1cbf060"
+    },
+    {
+      "id": "oas-3.2-doc-pass-path_var_empty_pathitem",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/path_var_empty_pathitem.yaml",
+      "path": "documents/3.2/pass/path_var_empty_pathitem.yaml",
+      "sha256": "03af2710661d2affccdae89b6d6e2164ad4e28ed19ba78ffe58469668b1677c6"
+    },
+    {
+      "id": "oas-3.2-doc-pass-paths-object-example",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/paths-object-example.yaml",
+      "path": "documents/3.2/pass/paths-object-example.yaml",
+      "sha256": "d0586bac026815cb05247c447885c270365651c4e7c407b7ce2cdbfdb59139f8"
+    },
+    {
+      "id": "oas-3.2-doc-pass-request-body-examples",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/request-body-examples.yaml",
+      "path": "documents/3.2/pass/request-body-examples.yaml",
+      "sha256": "3f4d903874200743729b8fed411717dfe58dcf57820bd3f3f3f504e4b4c08ffb"
+    },
+    {
+      "id": "oas-3.2-doc-pass-response-object-examples",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/response-object-examples.yaml",
+      "path": "documents/3.2/pass/response-object-examples.yaml",
+      "sha256": "49687e714ca75c71800a7b46946e80fe86ec61e90ee5a4bda4563f36d14903a0"
+    },
+    {
+      "id": "oas-3.2-doc-pass-schema-object-deprecated-example-keyword",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/schema-object-deprecated-example-keyword.yaml",
+      "path": "documents/3.2/pass/schema-object-deprecated-example-keyword.yaml",
+      "sha256": "a6eb06caf4c93f6f028a1cbee327ff281d010a4fc3f36303567160e3eea9f6c3"
+    },
+    {
+      "id": "oas-3.2-doc-pass-schema",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/schema.yaml",
+      "path": "documents/3.2/pass/schema.yaml",
+      "sha256": "e345fdb96f63c1318861769dbd302c207b8be56775f442c18d8468fd003d6ccb"
+    },
+    {
+      "id": "oas-3.2-doc-pass-security-scheme-object-examples",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/security-scheme-object-examples.yaml",
+      "path": "documents/3.2/pass/security-scheme-object-examples.yaml",
+      "sha256": "38a54b8d8a673e112b3eaec582e2405d370e2168f253e49bb4473027ef452633"
+    },
+    {
+      "id": "oas-3.2-doc-pass-servers",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/servers.yaml",
+      "path": "documents/3.2/pass/servers.yaml",
+      "sha256": "af0a5d3dfb488c6f06ceda00596fc6f884edf05fab6da2698ff2a2d49cfd9a86"
+    },
+    {
+      "id": "oas-3.2-doc-pass-specification-extensions",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/specification-extensions.yaml",
+      "path": "documents/3.2/pass/specification-extensions.yaml",
+      "sha256": "6c4de804c8f456555b0615927825c089bc336b0135972449c3f00b05c3fd764f"
+    },
+    {
+      "id": "oas-3.2-doc-pass-style-defaults",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/style-defaults.yaml",
+      "path": "documents/3.2/pass/style-defaults.yaml",
+      "sha256": "2630fe37c3c7cf3eee70e3ced6162c7efc8375fa8a5444f086357f75cfa939ef"
+    },
+    {
+      "id": "oas-3.2-doc-pass-tag-object-example",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/tag-object-example.yaml",
+      "path": "documents/3.2/pass/tag-object-example.yaml",
+      "sha256": "688d11c77eeafaa9ac2740c919a88e3b2a4974b0f845d476f79ed6a1bdc2b16f"
+    },
+    {
+      "id": "oas-3.2-doc-pass-valid_schema_types",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/valid_schema_types.yaml",
+      "path": "documents/3.2/pass/valid_schema_types.yaml",
+      "sha256": "c95af1e9a1bd0359de5b2912e5a8d7f18c8368fdb5cb873cf42542f5200ffce5"
+    },
+    {
+      "id": "oas-3.2-doc-pass-webhook-example",
+      "version": "3.2",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/pass/webhook-example.yaml",
+      "path": "documents/3.2/pass/webhook-example.yaml",
+      "sha256": "23386b29286eb7c831e6b0a7af91a61111a35d761dc7bc492557859542951cd4"
+    },
+    {
+      "id": "oas-3.2-doc-fail-encoding-enc-item-exclusion",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/encoding-enc-item-exclusion.yaml",
+      "path": "documents/3.2/fail/encoding-enc-item-exclusion.yaml",
+      "sha256": "5a26d70c0f96e09a44c421c7e3781892c408100b22ee61e5af5ef62cbf193fa6"
+    },
+    {
+      "id": "oas-3.2-doc-fail-encoding-enc-prefix-exclusion",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/encoding-enc-prefix-exclusion.yaml",
+      "path": "documents/3.2/fail/encoding-enc-prefix-exclusion.yaml",
+      "sha256": "096d95a1e186b6e530f9663e36eb2c1cdd9a72a0c2e742866fba7f9ad9774ba3"
+    },
+    {
+      "id": "oas-3.2-doc-fail-example-examples",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/example-examples.yaml",
+      "path": "documents/3.2/fail/example-examples.yaml",
+      "sha256": "0681ddfe2727910514a60aa196268d36a3ec0e43adf9cfa98c6c10e813adaccd"
+    },
+    {
+      "id": "oas-3.2-doc-fail-example-object-old-exclusions",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/example-object-old-exclusions.yaml",
+      "path": "documents/3.2/fail/example-object-old-exclusions.yaml",
+      "sha256": "dafa130353d2479741b05baf2328d225546b47087c9f8505a75e97642f02ed4d"
+    },
+    {
+      "id": "oas-3.2-doc-fail-example-object-old-vs-data",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/example-object-old-vs-data.yaml",
+      "path": "documents/3.2/fail/example-object-old-vs-data.yaml",
+      "sha256": "749cf6e00c024fd02b845a893adf78e0230216a939d0d8909ee15d9483884b01"
+    },
+    {
+      "id": "oas-3.2-doc-fail-example-object-old-vs-ser",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/example-object-old-vs-ser.yaml",
+      "path": "documents/3.2/fail/example-object-old-vs-ser.yaml",
+      "sha256": "b6a05a3e35ff2c79aee576144cd3cac083c97125669d6cdb34e35bade4c2f487"
+    },
+    {
+      "id": "oas-3.2-doc-fail-example-object-ser-exclusions",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/example-object-ser-exclusions.yaml",
+      "path": "documents/3.2/fail/example-object-ser-exclusions.yaml",
+      "sha256": "3d52e4592486f96970100fdd7135cd8f4237d559a4e29c34b3b65dbd58d6be94"
+    },
+    {
+      "id": "oas-3.2-doc-fail-header-object-allowReserved",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/header-object-allowReserved.yaml",
+      "path": "documents/3.2/fail/header-object-allowReserved.yaml",
+      "sha256": "80da9e293978968b1b02b453bbada3da00e3cd1e4eae99291ae63d3f69a8be14"
+    },
+    {
+      "id": "oas-3.2-doc-fail-header-object-name",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/header-object-name.yaml",
+      "path": "documents/3.2/fail/header-object-name.yaml",
+      "sha256": "376e5b5f78dcb363aa0a7180e2accdaa7688f92f2837816d245dc1c02e5278b7"
+    },
+    {
+      "id": "oas-3.2-doc-fail-invalid_schema_types",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/invalid_schema_types.yaml",
+      "path": "documents/3.2/fail/invalid_schema_types.yaml",
+      "sha256": "ea5a06534ac565ae84bc706fbf826650936ed1661fbb8c02fd3ba00d40cfe4bb"
+    },
+    {
+      "id": "oas-3.2-doc-fail-media-type-description",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/media-type-description.yaml",
+      "path": "documents/3.2/fail/media-type-description.yaml",
+      "sha256": "a7f595b445b27ca5fcfdb39ab8ddab038280e3a258c3749487bed1e16766f66b"
+    },
+    {
+      "id": "oas-3.2-doc-fail-media-type-enc-item-exclusion",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/media-type-enc-item-exclusion.yaml",
+      "path": "documents/3.2/fail/media-type-enc-item-exclusion.yaml",
+      "sha256": "dcc32312d8a56673977cebe6a039d6fd59fa8b81baa99a76337040bba078e238"
+    },
+    {
+      "id": "oas-3.2-doc-fail-media-type-enc-prefix-exclusion",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/media-type-enc-prefix-exclusion.yaml",
+      "path": "documents/3.2/fail/media-type-enc-prefix-exclusion.yaml",
+      "sha256": "0844f9263cad2529d437865812222f686153f103964301241b772ced48e7d7cc"
+    },
+    {
+      "id": "oas-3.2-doc-fail-no_containers",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/no_containers.yaml",
+      "path": "documents/3.2/fail/no_containers.yaml",
+      "sha256": "7f8bf87b9accbea7e5de6bd797b49ed8da744dbfc102fe7408484e9e8fbb92e5"
+    },
+    {
+      "id": "oas-3.2-doc-fail-openapi-version",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/openapi-version.yaml",
+      "path": "documents/3.2/fail/openapi-version.yaml",
+      "sha256": "edc59a0d110b35ae509ecc4c692d1817560b2d2ca22c7bb07bf22866bd35def8"
+    },
+    {
+      "id": "oas-3.2-doc-fail-operation-object-query-with-querystring",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/operation-object-query-with-querystring.yaml",
+      "path": "documents/3.2/fail/operation-object-query-with-querystring.yaml",
+      "sha256": "5bda030114f6ee092dd6970bf072ac7d2780271e3508823749a445f64685f582"
+    },
+    {
+      "id": "oas-3.2-doc-fail-operation-object-two-querystrings",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/operation-object-two-querystrings.yaml",
+      "path": "documents/3.2/fail/operation-object-two-querystrings.yaml",
+      "sha256": "fd1aafd9b0c23f6f18813de651e2bcf786752cae6a8ee77334fbb9fe254c8a6b"
+    },
+    {
+      "id": "oas-3.2-doc-fail-parameter-object-content-not-with-style",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/parameter-object-content-not-with-style.yaml",
+      "path": "documents/3.2/fail/parameter-object-content-not-with-style.yaml",
+      "sha256": "ad0be402c0623e0b1301b567e1323f4ee66f10d054dd39b47db8fcffe21b9af0"
+    },
+    {
+      "id": "oas-3.2-doc-fail-parameter-object-cookie-allowReserved",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/parameter-object-cookie-allowReserved.yaml",
+      "path": "documents/3.2/fail/parameter-object-cookie-allowReserved.yaml",
+      "sha256": "8c4d1a6a72d6f3c545250ee08cc852827056960c7d33eea7a3f81e701d306350"
+    },
+    {
+      "id": "oas-3.2-doc-fail-parameter-object-header-allowReserved",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/parameter-object-header-allowReserved.yaml",
+      "path": "documents/3.2/fail/parameter-object-header-allowReserved.yaml",
+      "sha256": "38521b3f4684a521e74b82a02a26619ed48a854ae938ba20cdcece8a0ec96cd1"
+    },
+    {
+      "id": "oas-3.2-doc-fail-parameter-object-header-name",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/parameter-object-header-name.yaml",
+      "path": "documents/3.2/fail/parameter-object-header-name.yaml",
+      "sha256": "52467459ea53271e5e87678a3dd89039d6122e195355e81e095c88935bbdea1e"
+    },
+    {
+      "id": "oas-3.2-doc-fail-parameter-object-path-name",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/parameter-object-path-name.yaml",
+      "path": "documents/3.2/fail/parameter-object-path-name.yaml",
+      "sha256": "2164491dca994c6db4df9ca0678741c14196de6d1e7f68ba7892c16157bf3e2e"
+    },
+    {
+      "id": "oas-3.2-doc-fail-parameter-object-querystring-not-with-schema",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/parameter-object-querystring-not-with-schema.yaml",
+      "path": "documents/3.2/fail/parameter-object-querystring-not-with-schema.yaml",
+      "sha256": "8237118b789b0d6274cebabaff84a47bf53d30dd935ed74c0f2b834a51fdaa2f"
+    },
+    {
+      "id": "oas-3.2-doc-fail-path-item-object-conflicting-additional-operation",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/path-item-object-conflicting-additional-operation.yaml",
+      "path": "documents/3.2/fail/path-item-object-conflicting-additional-operation.yaml",
+      "sha256": "ed816c251bc24dfe691e2f8b11dd48b27f86f63bf8f0337b988e52af902aebc6"
+    },
+    {
+      "id": "oas-3.2-doc-fail-path-item-object-query-with-querystring",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/path-item-object-query-with-querystring.yaml",
+      "path": "documents/3.2/fail/path-item-object-query-with-querystring.yaml",
+      "sha256": "ae6690567c424dbc823c570c4ff54cba5092b994ad694c2b7763c52e30b744f2"
+    },
+    {
+      "id": "oas-3.2-doc-fail-path-item-object-two-querystrings",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/path-item-object-two-querystrings.yaml",
+      "path": "documents/3.2/fail/path-item-object-two-querystrings.yaml",
+      "sha256": "819576ab4c567ccd09274aa4de1b22018e7311ad445d912f42af2b4a2a584ef8"
+    },
+    {
+      "id": "oas-3.2-doc-fail-server_enum_empty",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/server_enum_empty.yaml",
+      "path": "documents/3.2/fail/server_enum_empty.yaml",
+      "sha256": "558ddef9ca86411f2eac67f15ef4f1dfae328a72bab816620ff58877378f40fb"
+    },
+    {
+      "id": "oas-3.2-doc-fail-servers",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/servers.yaml",
+      "path": "documents/3.2/fail/servers.yaml",
+      "sha256": "da482470ac1c65a518ef17c1143b2fef811e21e694bcad440669569d7d19294b"
+    },
+    {
+      "id": "oas-3.2-doc-fail-unknown_container",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/unknown_container.yaml",
+      "path": "documents/3.2/fail/unknown_container.yaml",
+      "sha256": "905b804f159da1e0b00fa3daab9d2a22ce2a26926d3de25c3b6bf26c4871a5e8"
+    },
+    {
+      "id": "oas-3.2-doc-fail-xml-attr-exclusion",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/xml-attr-exclusion.yaml",
+      "path": "documents/3.2/fail/xml-attr-exclusion.yaml",
+      "sha256": "e6ce7b087c19a056bc114698112dd9a64b089694c8351610d0abf630fef91127"
+    },
+    {
+      "id": "oas-3.2-doc-fail-xml-wrapped-exclusion",
+      "version": "3.2",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/6d86f6560681d0c461cd06b3faa80814aa120fda/tests/schema/fail/xml-wrapped-exclusion.yaml",
+      "path": "documents/3.2/fail/xml-wrapped-exclusion.yaml",
+      "sha256": "05915265a028c054a63d90e3573214795f1e89aadaaaf5761437377e53a1f404"
+    },
+    {
+      "id": "oas-3.1-doc-pass-callback-object-examples",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/callback-object-examples.yaml",
+      "path": "documents/3.1/pass/callback-object-examples.yaml",
+      "sha256": "16bf01347a9efe27ae54c0667e5f5ab2e4f4fa5a69b89f43e361ecc320dc823b"
+    },
+    {
+      "id": "oas-3.1-doc-pass-comp_pathitems",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/comp_pathitems.yaml",
+      "path": "documents/3.1/pass/comp_pathitems.yaml",
+      "sha256": "70ad9a99f78a67aae715337c839368bc6969276274c250a8acd25d845ea4cd7a"
+    },
+    {
+      "id": "oas-3.1-doc-pass-components-object-example",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/components-object-example.yaml",
+      "path": "documents/3.1/pass/components-object-example.yaml",
+      "sha256": "329f250685c052754689a96e85286e36fe07efaa267eab6b0640f00137648af5"
+    },
+    {
+      "id": "oas-3.1-doc-pass-example-object-examples",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/example-object-examples.yaml",
+      "path": "documents/3.1/pass/example-object-examples.yaml",
+      "sha256": "84332b043d1e7e8c2cdf0bf54b543008ba04b044f09934a13bfa8cfec0a7334e"
+    },
+    {
+      "id": "oas-3.1-doc-pass-header-object-examples",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/header-object-examples.yaml",
+      "path": "documents/3.1/pass/header-object-examples.yaml",
+      "sha256": "1c9222fad82f13a6ae6c1861fe29cd1b3643105780e7b99ebd624cbd8f85a24e"
+    },
+    {
+      "id": "oas-3.1-doc-pass-info-object-example",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/info-object-example.yaml",
+      "path": "documents/3.1/pass/info-object-example.yaml",
+      "sha256": "599ba874585b83e66b2c6d0deb393a104ae80e6fe7e92dff892904010fb99fd3"
+    },
+    {
+      "id": "oas-3.1-doc-pass-info_summary",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/info_summary.yaml",
+      "path": "documents/3.1/pass/info_summary.yaml",
+      "sha256": "7f1d10743acc25dac12d05ed31682d65f84af74edb6fcececec61703f63feb63"
+    },
+    {
+      "id": "oas-3.1-doc-pass-json_schema_dialect",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/json_schema_dialect.yaml",
+      "path": "documents/3.1/pass/json_schema_dialect.yaml",
+      "sha256": "f8a84662cd6a119694da30786f664b75e3895ebfa1c0de813c88a58074c9ec65"
+    },
+    {
+      "id": "oas-3.1-doc-pass-license_identifier",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/license_identifier.yaml",
+      "path": "documents/3.1/pass/license_identifier.yaml",
+      "sha256": "25c23bd9471636f09fd1b3e74597a2bf9e617902831b3821beea2f487162fb33"
+    },
+    {
+      "id": "oas-3.1-doc-pass-link-object-examples",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/link-object-examples.yaml",
+      "path": "documents/3.1/pass/link-object-examples.yaml",
+      "sha256": "551ec5eace03c9ac05229b0994b43ed2f226578c8733bca12d6e4a540d57c8f3"
+    },
+    {
+      "id": "oas-3.1-doc-pass-media-type-examples",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/media-type-examples.yaml",
+      "path": "documents/3.1/pass/media-type-examples.yaml",
+      "sha256": "661dba358edb755447df669efdabc17ad72651fb6862d3240f57ed062aef738e"
+    },
+    {
+      "id": "oas-3.1-doc-pass-mega",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/mega.yaml",
+      "path": "documents/3.1/pass/mega.yaml",
+      "sha256": "57200edd8852f7844fa252e84fed37ba9292105e03d1dfb5a62294d53b2a1e53"
+    },
+    {
+      "id": "oas-3.1-doc-pass-minimal_comp",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/minimal_comp.yaml",
+      "path": "documents/3.1/pass/minimal_comp.yaml",
+      "sha256": "4ddb612c64c14661cebcccf6dd0723c9b1a98e24beffc4b186ce5c88de82a357"
+    },
+    {
+      "id": "oas-3.1-doc-pass-minimal_hooks",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/minimal_hooks.yaml",
+      "path": "documents/3.1/pass/minimal_hooks.yaml",
+      "sha256": "c3dab11ccf72be21125385b39e8af38bb69967fc43b0beaf86b62c374cc578a2"
+    },
+    {
+      "id": "oas-3.1-doc-pass-minimal_paths",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/minimal_paths.yaml",
+      "path": "documents/3.1/pass/minimal_paths.yaml",
+      "sha256": "7349cd5760c3272e3f11ddd5c31fdcc829ba672fbb7d41566792c06b3091381e"
+    },
+    {
+      "id": "oas-3.1-doc-pass-non-oauth-scopes",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/non-oauth-scopes.yaml",
+      "path": "documents/3.1/pass/non-oauth-scopes.yaml",
+      "sha256": "b50f4c3aef8af9d9e95e67a60893bdffd9f7bc28c2fb0bbf59b34ae534cd5f9b"
+    },
+    {
+      "id": "oas-3.1-doc-pass-operation-object-example",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/operation-object-example.yaml",
+      "path": "documents/3.1/pass/operation-object-example.yaml",
+      "sha256": "63dc11d5bb99766e3b7db4ac97d30ddc2b0feeac4439f0c5eb9a438cbd5120ec"
+    },
+    {
+      "id": "oas-3.1-doc-pass-parameter-object-examples",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/parameter-object-examples.yaml",
+      "path": "documents/3.1/pass/parameter-object-examples.yaml",
+      "sha256": "5e106832e7ee6a0db2dd6398fad4dd6f52ed9bf9b8d4d7385291b0657e3a8368"
+    },
+    {
+      "id": "oas-3.1-doc-pass-parameter-object-query-allowReserved",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/parameter-object-query-allowReserved.yaml",
+      "path": "documents/3.1/pass/parameter-object-query-allowReserved.yaml",
+      "sha256": "a5daad7a44d9d547f651a0ee350637868236ff9c6bf2a2ecf9efa5acceae83c1"
+    },
+    {
+      "id": "oas-3.1-doc-pass-path-item-object-example",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/path-item-object-example.yaml",
+      "path": "documents/3.1/pass/path-item-object-example.yaml",
+      "sha256": "40d11326794dce5709d96ce27e56d95de167c322c9ca65bbd4f1e9cc9607b3e6"
+    },
+    {
+      "id": "oas-3.1-doc-pass-path_item_servers_parameters",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/path_item_servers_parameters.yaml",
+      "path": "documents/3.1/pass/path_item_servers_parameters.yaml",
+      "sha256": "378262a8b0d54f56a78d9448fffa69158f821c947721e757e10ef9cb2577cc15"
+    },
+    {
+      "id": "oas-3.1-doc-pass-path_no_response",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/path_no_response.yaml",
+      "path": "documents/3.1/pass/path_no_response.yaml",
+      "sha256": "bc241c8ef6ec65b3b94c2255618e5c334f4c7912683bb1e2025a1f2686193179"
+    },
+    {
+      "id": "oas-3.1-doc-pass-path_var_empty_pathitem",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/path_var_empty_pathitem.yaml",
+      "path": "documents/3.1/pass/path_var_empty_pathitem.yaml",
+      "sha256": "9c0c157ee883bdbc8d556b6c125d2d9dd8089b83acdbc7b5274361a216a0f6ed"
+    },
+    {
+      "id": "oas-3.1-doc-pass-paths-object-example",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/paths-object-example.yaml",
+      "path": "documents/3.1/pass/paths-object-example.yaml",
+      "sha256": "24d428e9e5e1befda491ab9ac3b1020b9546f63afb5b8a25a715a3d303169eb6"
+    },
+    {
+      "id": "oas-3.1-doc-pass-request-body-examples",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/request-body-examples.yaml",
+      "path": "documents/3.1/pass/request-body-examples.yaml",
+      "sha256": "252451b0bb7070570620a3b7a98ed023df6087958a940b109a626ca5215a7b43"
+    },
+    {
+      "id": "oas-3.1-doc-pass-response-object-examples",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/response-object-examples.yaml",
+      "path": "documents/3.1/pass/response-object-examples.yaml",
+      "sha256": "6190cd6646ba1635cd9b4cbf2fedde4d024d81102b39ea3e2eaca23925f6b7bc"
+    },
+    {
+      "id": "oas-3.1-doc-pass-schema-object-deprecated-example-keyword",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/schema-object-deprecated-example-keyword.yaml",
+      "path": "documents/3.1/pass/schema-object-deprecated-example-keyword.yaml",
+      "sha256": "aadde890f2edeef7e64f7d132a6e269c7bd34450d9a49feb3ec8f0a6d9950358"
+    },
+    {
+      "id": "oas-3.1-doc-pass-schema",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/schema.yaml",
+      "path": "documents/3.1/pass/schema.yaml",
+      "sha256": "051ff2b77c3fe80f4719ca83fc474f2439aefe5f39e058e95cf3852d1bc83df6"
+    },
+    {
+      "id": "oas-3.1-doc-pass-security-scheme-object-examples",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/security-scheme-object-examples.yaml",
+      "path": "documents/3.1/pass/security-scheme-object-examples.yaml",
+      "sha256": "91d8d05a80f1464f064d3b74efcaf2903075c631b8e66938f13e0eb371d7e5b3"
+    },
+    {
+      "id": "oas-3.1-doc-pass-servers",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/servers.yaml",
+      "path": "documents/3.1/pass/servers.yaml",
+      "sha256": "9d019218df627ad09b1c9e6a7faccab117bd3561605333c560b28a6db5c5a5d2"
+    },
+    {
+      "id": "oas-3.1-doc-pass-specification-extensions",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/specification-extensions.yaml",
+      "path": "documents/3.1/pass/specification-extensions.yaml",
+      "sha256": "656bd9d6c94b7c1fee4fbb3d5c2794a95f320ce86033481de93d7e5ad03c3362"
+    },
+    {
+      "id": "oas-3.1-doc-pass-style-defaults",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/style-defaults.yaml",
+      "path": "documents/3.1/pass/style-defaults.yaml",
+      "sha256": "c7f3a7c83bb7ed14ed33d18580c58e54d2921dbfd261dd803a1a40d76363bcbc"
+    },
+    {
+      "id": "oas-3.1-doc-pass-tag-object-example",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/tag-object-example.yaml",
+      "path": "documents/3.1/pass/tag-object-example.yaml",
+      "sha256": "a12bf32aa6ca6cd1d42a5a01dad6f55ff6ac31b28e74d0faf65665b02deee46e"
+    },
+    {
+      "id": "oas-3.1-doc-pass-valid_schema_types",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/valid_schema_types.yaml",
+      "path": "documents/3.1/pass/valid_schema_types.yaml",
+      "sha256": "813560241a3c9816f20baa92bd145057f8cb8f7d6ff355b5feace13c39630e74"
+    },
+    {
+      "id": "oas-3.1-doc-pass-webhook-example",
+      "version": "3.1",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/pass/webhook-example.yaml",
+      "path": "documents/3.1/pass/webhook-example.yaml",
+      "sha256": "ebe6a6bf433374fe54c03c894cbb782dcae673217726fd85b34c625bcde14418"
+    },
+    {
+      "id": "oas-3.1-doc-fail-example-examples",
+      "version": "3.1",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/fail/example-examples.yaml",
+      "path": "documents/3.1/fail/example-examples.yaml",
+      "sha256": "8ee58b9dd00c78449048092535251ce85f4f7c500ec80172b40dec923de67900"
+    },
+    {
+      "id": "oas-3.1-doc-fail-header-object-allowReserved",
+      "version": "3.1",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/fail/header-object-allowReserved.yaml",
+      "path": "documents/3.1/fail/header-object-allowReserved.yaml",
+      "sha256": "488de0e9f9567abf263c8582579ea362b1bf22b1d37bfec1fcff9e5f6baaee16"
+    },
+    {
+      "id": "oas-3.1-doc-fail-invalid_schema_types",
+      "version": "3.1",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/fail/invalid_schema_types.yaml",
+      "path": "documents/3.1/fail/invalid_schema_types.yaml",
+      "sha256": "f7a3c419e5e582e07e2f5a948007b1bc8d0eb029d942fee044dbdd1161479f58"
+    },
+    {
+      "id": "oas-3.1-doc-fail-link-object-no-body",
+      "version": "3.1",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/fail/link-object-no-body.yaml",
+      "path": "documents/3.1/fail/link-object-no-body.yaml",
+      "sha256": "537f7f7dd387f36ac0cff65f69fb80bd479c7ca41029420fb45b4a4188c4b1b3"
+    },
+    {
+      "id": "oas-3.1-doc-fail-no_containers",
+      "version": "3.1",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/fail/no_containers.yaml",
+      "path": "documents/3.1/fail/no_containers.yaml",
+      "sha256": "a681fd1c94dc89c717b137232c12de00a37a44f217852870357f5416e6938de1"
+    },
+    {
+      "id": "oas-3.1-doc-fail-openapi-version",
+      "version": "3.1",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/fail/openapi-version.yaml",
+      "path": "documents/3.1/fail/openapi-version.yaml",
+      "sha256": "cfa0a09aa5edb6f83f48db73a2b20a87434e84359a1255d6a3d22ba7ffa91936"
+    },
+    {
+      "id": "oas-3.1-doc-fail-parameter-object-cookie-form-allowReserved",
+      "version": "3.1",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/fail/parameter-object-cookie-form-allowReserved.yaml",
+      "path": "documents/3.1/fail/parameter-object-cookie-form-allowReserved.yaml",
+      "sha256": "5da26bc71a608e8ee2467cde5d46edfcb56587cd22874bf255f4e7e1290ce1ff"
+    },
+    {
+      "id": "oas-3.1-doc-fail-parameter-object-header-allowReserved",
+      "version": "3.1",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/fail/parameter-object-header-allowReserved.yaml",
+      "path": "documents/3.1/fail/parameter-object-header-allowReserved.yaml",
+      "sha256": "a5be6d11d0f60bd9bbbec7c6fb7826c29424bfa838c10cadbfe133b0cf2c317b"
+    },
+    {
+      "id": "oas-3.1-doc-fail-parameter-object-path-allowReserved",
+      "version": "3.1",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/fail/parameter-object-path-allowReserved.yaml",
+      "path": "documents/3.1/fail/parameter-object-path-allowReserved.yaml",
+      "sha256": "b75590e0a4225eb7aaf860b3e3fbedcbea550fc92aa74148bcdea474e901814d"
+    },
+    {
+      "id": "oas-3.1-doc-fail-server_enum_empty",
+      "version": "3.1",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/fail/server_enum_empty.yaml",
+      "path": "documents/3.1/fail/server_enum_empty.yaml",
+      "sha256": "19c7e945c0d56b0c8e0fc24134e3ea9c6850f15619e0d2e7f83712d81c8ae6a5"
+    },
+    {
+      "id": "oas-3.1-doc-fail-servers",
+      "version": "3.1",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/fail/servers.yaml",
+      "path": "documents/3.1/fail/servers.yaml",
+      "sha256": "0ae79d7626514656d75605f50b06fc9d58a29a21b5ed5c7a39ca03bdc782f420"
+    },
+    {
+      "id": "oas-3.1-doc-fail-unknown_container",
+      "version": "3.1",
+      "kind": "document-fail",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/642ee90575f60233302ad3e82f9de83e02996532/tests/schema/fail/unknown_container.yaml",
+      "path": "documents/3.1/fail/unknown_container.yaml",
+      "sha256": "55dbea30267e064d41d4bc4d8c285cc85a34c82dfc84ebbdd38f7226564c6144"
+    },
+    {
+      "id": "oas-3.0-doc-pass-api-with-examples",
+      "version": "3.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/4f86429f134f7e48b6351563549b4502fc69de52/_archive_/schemas/v3.0/pass/api-with-examples.yaml",
+      "path": "documents/3.0/pass/api-with-examples.yaml",
+      "sha256": "f7dc3d69f69ca11ae3e7e6ee702aff13fee3faca565033058d9fd073a15d9d45"
+    },
+    {
+      "id": "oas-3.0-doc-pass-callback-example",
+      "version": "3.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/4f86429f134f7e48b6351563549b4502fc69de52/_archive_/schemas/v3.0/pass/callback-example.yaml",
+      "path": "documents/3.0/pass/callback-example.yaml",
+      "sha256": "42174fc75c21436e3ffd10960c483c4374469059f652c1fdc4542854233ab15d"
+    },
+    {
+      "id": "oas-3.0-doc-pass-link-example",
+      "version": "3.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/4f86429f134f7e48b6351563549b4502fc69de52/_archive_/schemas/v3.0/pass/link-example.yaml",
+      "path": "documents/3.0/pass/link-example.yaml",
+      "sha256": "4b7b29d7bda1cf95f8c027500c86a9eb3761dfee42f1a8aeb095c5c0b5ccde3b"
+    },
+    {
+      "id": "oas-3.0-doc-pass-petstore-expanded",
+      "version": "3.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/4f86429f134f7e48b6351563549b4502fc69de52/_archive_/schemas/v3.0/pass/petstore-expanded.yaml",
+      "path": "documents/3.0/pass/petstore-expanded.yaml",
+      "sha256": "b1633b6309c065c43d56be7c659b0f2c4be03be5a4013b7c3f74b32bd33f62eb"
+    },
+    {
+      "id": "oas-3.0-doc-pass-petstore",
+      "version": "3.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/4f86429f134f7e48b6351563549b4502fc69de52/_archive_/schemas/v3.0/pass/petstore.yaml",
+      "path": "documents/3.0/pass/petstore.yaml",
+      "sha256": "598136cb904e17e8eeead51ae33dd8d401fdff455d2d74f3869c4aa5f2742266"
+    },
+    {
+      "id": "oas-3.0-doc-pass-uspto",
+      "version": "3.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/4f86429f134f7e48b6351563549b4502fc69de52/_archive_/schemas/v3.0/pass/uspto.yaml",
+      "path": "documents/3.0/pass/uspto.yaml",
+      "sha256": "8c171115aa448ea485aedbbe6f17448290aaeefd05d4f04c28edc175549cbc18"
+    },
+    {
+      "id": "oas-2.0-schema",
+      "version": "2.0",
+      "kind": "schema",
+      "url": "https://spec.openapis.org/oas/2.0/schema/2017-08-27",
+      "path": "schemas/2.0/schema.json",
+      "sha256": "b36871c8016292c5e66dd3b203e69aeff98bfef97e0b3c67c1909036095586a5"
+    },
+    {
+      "id": "json-schema-draft-04-schema",
+      "version": "draft-04",
+      "kind": "meta-schema",
+      "url": "https://json-schema.org/draft-04/schema",
+      "path": "schemas/json-schema-draft-04/schema.json",
+      "sha256": "e1489d0b4755f02793302591d3fcb8f07b6893a82a94f24895f8e4edf11b82e2"
+    },
+    {
+      "id": "oas-2.0-doc-pass-api-with-examples",
+      "version": "2.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/e77481c73e1c703c7de2e4249047b42b8e9b56f4/examples/v2.0/yaml/api-with-examples.yaml",
+      "path": "documents/2.0/pass/api-with-examples.yaml",
+      "sha256": "7a10daca44dba5c82e896e9455593ede653dbf6d56401d31544c9ffb904ccfb1"
+    },
+    {
+      "id": "oas-2.0-doc-pass-petstore",
+      "version": "2.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/e77481c73e1c703c7de2e4249047b42b8e9b56f4/examples/v2.0/yaml/petstore.yaml",
+      "path": "documents/2.0/pass/petstore.yaml",
+      "sha256": "9fdb0fc3767861fcd86811901165a930c2c3102edbbcc20e4efb13064bfc44c7"
+    },
+    {
+      "id": "oas-2.0-doc-pass-petstore-expanded",
+      "version": "2.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/e77481c73e1c703c7de2e4249047b42b8e9b56f4/examples/v2.0/yaml/petstore-expanded.yaml",
+      "path": "documents/2.0/pass/petstore-expanded.yaml",
+      "sha256": "0cc54991bbc2da80b068a437df2c78c7403684e6421028da4842a26a09d1f220"
+    },
+    {
+      "id": "oas-2.0-doc-pass-petstore-minimal",
+      "version": "2.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/e77481c73e1c703c7de2e4249047b42b8e9b56f4/examples/v2.0/yaml/petstore-minimal.yaml",
+      "path": "documents/2.0/pass/petstore-minimal.yaml",
+      "sha256": "e763737014747a2d6ac5828dde8b0946981faba404dce67e9a53e1b63096b0ec"
+    },
+    {
+      "id": "oas-2.0-doc-pass-petstore-simple",
+      "version": "2.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/e77481c73e1c703c7de2e4249047b42b8e9b56f4/examples/v2.0/yaml/petstore-simple.yaml",
+      "path": "documents/2.0/pass/petstore-simple.yaml",
+      "sha256": "e6c0ebc7a1dda4cfcc1f883753f8cf558d6768e0fd68fcabaac222dc2892c3dc"
+    },
+    {
+      "id": "oas-2.0-doc-pass-petstore-with-external-docs",
+      "version": "2.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/e77481c73e1c703c7de2e4249047b42b8e9b56f4/examples/v2.0/yaml/petstore-with-external-docs.yaml",
+      "path": "documents/2.0/pass/petstore-with-external-docs.yaml",
+      "sha256": "cf80de6593113ca5e9bd4d9f870dd0d78d98b54bb94e5ee9849795181ba47ab8"
+    },
+    {
+      "id": "oas-2.0-doc-pass-uber",
+      "version": "2.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/e77481c73e1c703c7de2e4249047b42b8e9b56f4/examples/v2.0/yaml/uber.yaml",
+      "path": "documents/2.0/pass/uber.yaml",
+      "sha256": "d5e1168897e321109d89d1a6233e2c88cd6af7018618d0401069a33dd0f9880f"
+    },
+    {
+      "id": "oas-2.0-doc-pass-petstore-separate-common-error",
+      "version": "2.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/e77481c73e1c703c7de2e4249047b42b8e9b56f4/examples/v2.0/yaml/petstore-separate/common/Error.yaml",
+      "path": "documents/2.0/pass/petstore-separate/common/Error.yaml",
+      "sha256": "26b25c91e94f3661ec0c78cd912fd6a906c4670378b0f97e84125a8858f58d83"
+    },
+    {
+      "id": "oas-2.0-doc-pass-petstore-separate-spec-newpet",
+      "version": "2.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/e77481c73e1c703c7de2e4249047b42b8e9b56f4/examples/v2.0/yaml/petstore-separate/spec/NewPet.yaml",
+      "path": "documents/2.0/pass/petstore-separate/spec/NewPet.yaml",
+      "sha256": "1df0ee3eb9abcdb6d143c0741c3aa4237d0226e886af49d45baea6598f2b736b"
+    },
+    {
+      "id": "oas-2.0-doc-pass-petstore-separate-spec-pet",
+      "version": "2.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/e77481c73e1c703c7de2e4249047b42b8e9b56f4/examples/v2.0/yaml/petstore-separate/spec/Pet.yaml",
+      "path": "documents/2.0/pass/petstore-separate/spec/Pet.yaml",
+      "sha256": "f4615f4c74213a8f585e969e36a1653b1e917f65be05a8349de7e4addf05379f"
+    },
+    {
+      "id": "oas-2.0-doc-pass-petstore-separate-spec-parameters",
+      "version": "2.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/e77481c73e1c703c7de2e4249047b42b8e9b56f4/examples/v2.0/yaml/petstore-separate/spec/parameters.yaml",
+      "path": "documents/2.0/pass/petstore-separate/spec/parameters.yaml",
+      "sha256": "727b27132ddbb5c46af5c682de3df967c320ecb520b810fe9e7a79bcd901f80b"
+    },
+    {
+      "id": "oas-2.0-doc-pass-petstore-separate-spec-swagger",
+      "version": "2.0",
+      "kind": "document-pass",
+      "url": "https://raw.githubusercontent.com/OAI/OpenAPI-Specification/e77481c73e1c703c7de2e4249047b42b8e9b56f4/examples/v2.0/yaml/petstore-separate/spec/swagger.yaml",
+      "path": "documents/2.0/pass/petstore-separate/spec/swagger.yaml",
+      "sha256": "f3583436faa0ccacf760a5b4ab8b344d8995e6cd707936d82dbac714ff3ab6e9"
+    }
+  ]
+}

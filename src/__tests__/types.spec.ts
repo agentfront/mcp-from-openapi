@@ -1015,3 +1015,175 @@ describe('toJsonSchema charges every keyword it copies (issue #50)', () => {
     expect(() => toJsonSchema(top, { maxDepth: 10, maxNodes: 100000 })).toThrow(SchemaError);
   });
 });
+
+describe('toJsonSchema on boolean schemas', () => {
+  const NEVER = { not: {} };
+
+  it('converts true to {} and false to { not: {} } at the root, each a fresh object', () => {
+    expect(toJsonSchema(true)).toEqual({});
+    expect(toJsonSchema(false)).toEqual(NEVER);
+    const first = toJsonSchema(false) as any;
+    const second = toJsonSchema(false) as any;
+    expect(first).not.toBe(second);
+    expect(first.not).not.toBe(second.not);
+  });
+
+  it('converts a boolean wherever conversion walks a subschema', () => {
+    const result = toJsonSchema({
+      type: 'object',
+      properties: { never: false, any: true },
+      items: [true, false],
+      prefixItems: [false, true],
+      allOf: [false],
+      anyOf: [true, false],
+      oneOf: [false, { type: 'string' }],
+      $defs: { never: false },
+      definitions: { never: false },
+      patternProperties: { '^x-': false },
+      dependentSchemas: { never: false },
+    } as any) as any;
+
+    expect(result.properties).toEqual({ never: NEVER, any: {} });
+    expect(result.items).toEqual([{}, NEVER]);
+    expect(result.prefixItems).toEqual([NEVER, {}]);
+    expect(result.allOf).toEqual([NEVER]);
+    expect(result.anyOf).toEqual([{}, NEVER]);
+    expect(result.oneOf).toEqual([NEVER, { type: 'string' }]);
+    for (const key of ['$defs', 'definitions', 'dependentSchemas']) expect(result[key]).toEqual({ never: NEVER });
+    expect(result.patternProperties).toEqual({ '^x-': NEVER });
+    // `items: true` and `not: true` are subschemas too
+    expect(toJsonSchema({ type: 'array', items: true } as any)).toEqual({ type: 'array', items: {} });
+    expect(toJsonSchema({ not: true } as any)).toEqual(NEVER);
+  });
+
+  it('keeps a boolean as written where JSON Schema allows a boolean keyword value', () => {
+    const keywords = {
+      additionalProperties: false,
+      items: false,
+      not: false,
+      contains: false,
+      propertyNames: false,
+      if: false,
+      then: true,
+      else: false,
+      contentSchema: false,
+      unevaluatedItems: false,
+      unevaluatedProperties: true,
+    };
+    expect(toJsonSchema(keywords as any)).toEqual(keywords);
+  });
+
+  it('never shares the object of one false schema with another', () => {
+    const result = toJsonSchema({ properties: { a: false, b: false } } as any) as any;
+    expect(result.properties.a).not.toBe(result.properties.b);
+    result.properties.a.description = 'changed';
+    expect(result.properties.b).toEqual(NEVER);
+  });
+
+  it('charges false its visit and its keyword, and true its visit', () => {
+    expect(toJsonSchema(false, { maxNodes: 2 })).toEqual(NEVER);
+    expect(() => toJsonSchema(false, { maxNodes: 1 })).toThrow(/node budget of 1 /);
+    expect(toJsonSchema(true, { maxNodes: 1 })).toEqual({});
+    // The root, its keyword, then each false property: 2 + 2 * 2
+    const schema = { properties: { a: false, b: false } } as any;
+    expect(() => toJsonSchema(schema, { maxNodes: 6 })).not.toThrow();
+    expect(() => toJsonSchema(schema, { maxNodes: 5 })).toThrow(/node budget of 5 /);
+  });
+
+  it('leaves a placeholder for a false schema past maxDepth, like any other', () => {
+    const result = toJsonSchema({ properties: { a: { properties: { b: false } } } } as any, { maxDepth: 1 }) as any;
+    expect(result.properties.a.properties.b).toEqual({});
+  });
+
+  it('still converts a non-boolean degenerate subschema to an empty schema', () => {
+    expect(toJsonSchema({ properties: { a: 5 } } as any)).toEqual({ properties: { a: {} } });
+  });
+});
+
+describe('isPresentSchema and isNeverSchema', () => {
+  const { isPresentSchema, isNeverSchema } = require('../types');
+
+  it('reads every truthy schema value and false as a schema', () => {
+    for (const value of [{}, { type: 'string' }, true, false, [], 'x', 1]) expect(isPresentSchema(value)).toBe(true);
+    for (const value of [undefined, null, 0, '', NaN]) expect(isPresentSchema(value)).toBe(false);
+  });
+
+  it('recognizes a schema whose not accepts everything, whatever else it holds', () => {
+    for (const value of [{ not: {} }, { not: true }, { not: {}, description: 'gone', 'x-parameter-location': 'body' }]) {
+      expect(isNeverSchema(value)).toBe(true);
+    }
+    for (const value of [{}, { not: { type: 'string' } }, { not: false }, { not: null }, { not: [] }, false, null, [], 'x']) {
+      expect(isNeverSchema(value)).toBe(false);
+    }
+  });
+});
+
+describe('toJsonSchema on Swagger 2.0 constructs', () => {
+  it('reads x-nullable as nullable when the schema has no nullable', () => {
+    expect(toJsonSchema({ type: 'string', 'x-nullable': true } as any)).toEqual({ type: ['string', 'null'] });
+    expect(toJsonSchema({ type: 'string', 'x-nullable': false } as any)).toEqual({ type: 'string' });
+    // A type-less schema is wrapped, as for nullable
+    expect(toJsonSchema({ description: 'd', enum: ['a'], 'x-nullable': true } as any)).toEqual({
+      description: 'd',
+      anyOf: [{ enum: ['a'] }, { type: 'null' }],
+    });
+    // Nested schemas too
+    expect(
+      toJsonSchema({ type: 'object', properties: { a: { type: 'integer', 'x-nullable': true } } } as any),
+    ).toEqual({ type: 'object', properties: { a: { type: ['integer', 'null'] } } });
+  });
+
+  it('lets nullable win over x-nullable, which is then kept as written', () => {
+    expect(toJsonSchema({ type: 'string', nullable: false, 'x-nullable': true } as any)).toEqual({
+      type: 'string',
+      'x-nullable': true,
+    });
+    expect(toJsonSchema({ type: 'string', nullable: true, 'x-nullable': false } as any)).toEqual({
+      type: ['string', 'null'],
+      'x-nullable': false,
+    });
+    // A value that is not a boolean is not read
+    expect(toJsonSchema({ type: 'string', 'x-nullable': 'yes' } as any)).toEqual({ type: 'string', 'x-nullable': 'yes' });
+  });
+
+  it('reads type file as a binary string', () => {
+    expect(toJsonSchema({ type: 'file', description: 'cover' } as any)).toEqual({
+      type: 'string',
+      format: 'binary',
+      description: 'cover',
+    });
+    // A format of its own is replaced
+    expect(toJsonSchema({ type: 'file', format: 'byte' } as any)).toEqual({ type: 'string', format: 'binary' });
+    // In a type list, and before nullable applies
+    expect(toJsonSchema({ type: ['file', 'string'], nullable: true } as any)).toEqual({
+      type: ['string', 'null'],
+      format: 'binary',
+    });
+    expect(toJsonSchema({ type: 'file', 'x-nullable': true } as any)).toEqual({
+      type: ['string', 'null'],
+      format: 'binary',
+    });
+    expect(toJsonSchema({ type: 'array', items: { type: 'file' } } as any)).toEqual({
+      type: 'array',
+      items: { type: 'string', format: 'binary' },
+    });
+    // Other types are left alone
+    expect(toJsonSchema({ type: ['string', 'null'], format: 'byte' } as any)).toEqual({
+      type: ['string', 'null'],
+      format: 'byte',
+    });
+  });
+
+  it('turns a string discriminator into the OpenAPI 3 object', () => {
+    expect(toJsonSchema({ type: 'object', discriminator: 'kind' } as any)).toEqual({
+      type: 'object',
+      discriminator: { propertyName: 'kind' },
+    });
+    const object = { propertyName: 'kind', mapping: { a: '#/x' } };
+    expect(toJsonSchema({ discriminator: object } as any)).toEqual({ discriminator: object });
+    // Under a composition
+    expect(toJsonSchema({ oneOf: [{ discriminator: 'k' }] } as any)).toEqual({
+      oneOf: [{ discriminator: { propertyName: 'k' } }],
+    });
+  });
+});

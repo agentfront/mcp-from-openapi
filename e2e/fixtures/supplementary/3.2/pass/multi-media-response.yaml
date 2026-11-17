@@ -1,0 +1,54 @@
+# One response offering a streamed and a buffered media type. The event stream is listed before the JSON array,
+# so the stream does not come from the media type the output schema comes from (`application/json`).
+# An item of `text/event-stream` is one parsed event (OpenAPI 3.2, "Special Considerations for Server-Sent
+# Events"), not the value its `data` field carries: `itemSchema` describes the event object, and the JSON in
+# `data` is described with `contentMediaType` and `contentSchema`. The buffered array's items are the values.
+openapi: 3.2.0
+info:
+  title: Prices
+  version: 1.0.0
+servers:
+  - url: https://prices.example.com
+paths:
+  /prices:
+    get:
+      operationId: getPrices
+      summary: Current prices, as a snapshot or as a live feed
+      responses:
+        '200':
+          description: The prices
+          content:
+            text/event-stream:
+              itemSchema:
+                $ref: '#/components/schemas/PriceEvent'
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PriceTick'
+components:
+  schemas:
+    PriceEvent:
+      type: object
+      required: [data]
+      properties:
+        event:
+          type: string
+        id:
+          type: string
+        retry:
+          type: integer
+          minimum: 0
+        data:
+          type: string
+          contentMediaType: application/json
+          contentSchema:
+            $ref: '#/components/schemas/PriceTick'
+    PriceTick:
+      type: object
+      required: [symbol, price]
+      properties:
+        symbol:
+          type: string
+        price:
+          type: number

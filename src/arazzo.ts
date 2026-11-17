@@ -17,7 +17,20 @@ import { SchemaBuilder, resolveSchemaLimits } from './schema-builder';
 import { applyClientTarget } from './client-targets';
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { emitToolTypeScript } from './type-signature';
-import { toJsonSchema } from './types';
+import { DIAGNOSTIC_CODES, toJsonSchema } from './types';
+import {
+  describeValue,
+  detectSpecVersion,
+  getOperation,
+  isHttpToken,
+  isRefusedMethod,
+  listOperations,
+  ownProperty,
+  resolveOperationLayout,
+  toStandardMethod,
+  wireMethod,
+} from './spec';
+import { fragmentPointerTokens } from './base-uri';
 import * as yaml from 'yaml';
 import type {
   GenerateOptions,
@@ -79,8 +92,20 @@ export interface FromArazzoOptions {
    * Source description name → resolved OpenAPI document or pre-built
    * generator. Source URLs are NEVER fetched — the caller supplies resolved
    * documents for every source the workflows use.
+   *
+   * A source whose path items or operations are `$ref`s to other documents (a
+   * multi-file description) is indexed as the generator generates from it,
+   * dereferenced: the references are read here, once, by the generator that
+   * holds them and under its own `refResolution`, so there is no need to
+   * generate tools first. A reference that cannot be read is an
+   * `ArazzoError` carrying the reason.
+   *
+   * A Swagger 2.0 source works like any other: its operations (those of a
+   * 2.0 Path Item, so no `trace`) are found by `operationId` or by
+   * `#/paths/<path>/<method>` pointer, and each step's tool is built from its
+   * OpenAPI 3.0 conversion, as `generateTool` builds it.
    */
-  sources: Record<string, OpenAPIDocument | OpenAPIToolGenerator>;
+  sources: Record<string, object | OpenAPIToolGenerator>;
 
   /**
    * Schema-affecting options, applied to the per-step embedded schemas AND
@@ -90,6 +115,12 @@ export interface FromArazzoOptions {
 
   /**
    * Load options for internally-constructed generators (raw documents only).
+   * They are shared by every raw source, so they cannot carry
+   * `documentUri`, which names one document: a source that needs its own
+   * URI (for relative references, or references to itself) is loaded with
+   * `OpenAPIToolGenerator.fromJSON(document, { documentUri })` (or
+   * `fromURL`/`fromFile`) and passed in `sources` as a generator. A
+   * `documentUri` here throws an `ArazzoError`.
    */
   loadOptions?: Pick<LoadOptions, 'dereference' | 'validate' | 'baseUrl' | 'overlays'>;
 }
@@ -97,7 +128,6 @@ export interface FromArazzoOptions {
 const ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const OUTPUT_KEY_PATTERN = /^[a-zA-Z0-9.\-_]+$/;
 const VERSION_PATTERN = /^1\.0\.\d+$/;
-const HTTP_METHODS: readonly string[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
 const PARAMETER_LOCATIONS: readonly string[] = ['path', 'query', 'header', 'cookie'];
 const OUTPUT_DERIVATION_MAX_DEPTH = 8;
 
@@ -464,7 +494,70 @@ interface SourceContext {
   sourceTypes: Map<string, 'openapi' | 'arazzo'>;
 }
 
+/**
+ * Which Path Item fields hold a source's operations: the declared version
+ * decides whether `query` and `additionalOperations` are read, as it does for
+ * the operations the generator generates.
+ */
+function operationLayout(document: object) {
+  return resolveOperationLayout(detectSpecVersion(document));
+}
+
+/** Whether `value` is a `$ref` object (a string `$ref`, as dereferencing reads it). */
+function isReference(value: unknown): boolean {
+  return typeof ownProperty(value, '$ref') === 'string';
+}
+
+/**
+ * The document `generator` generates from, which is where a step finds its
+ * operation. A path item or an operation that is a `$ref` to another document
+ * (a multi-file description) holds its operations in that document, so until
+ * the generator dereferences them they are not in `getDocument()`. The
+ * generator does that on first use; this is where it is needed first, so
+ * `validate()` does it now: for a document that references other documents it
+ * dereferences once (the result is kept for generation) and, unlike
+ * generation, reports a reference that cannot be read as a result instead of
+ * throwing, so the failure is the real one rather than an operation missing
+ * from an index that never saw it. A document with no such reference is
+ * returned as it is, without any work.
+ */
+async function documentToIndex(
+  doc: ArazzoDocument,
+  name: string,
+  generator: OpenAPIToolGenerator,
+): Promise<OpenAPIDocument> {
+  const document = generator.getDocument();
+  const layout = operationLayout(document);
+  const holdsReference = Object.values(document.paths ?? {}).some(
+    (pathItem) =>
+      isReference(pathItem) ||
+      listOperations(pathItem, { layout }).operations.some(({ operation }) => isReference(operation)),
+  );
+  if (!holdsReference) return document;
+
+  const unreadable = (await generator.validate()).errors?.find(
+    (error) => error.code === DIAGNOSTIC_CODES.UNREADABLE_REFERENCE,
+  );
+  if (unreadable !== undefined) {
+    err(
+      // The name is a checked id ([A-Za-z0-9_-]+); described, so a long one is cut too
+      `Failed to dereference source ${describeValue(name)}: ${unreadable.message}`,
+      `/sourceDescriptions/${doc.sourceDescriptions.findIndex((source) => source.name === name)}`,
+      { source: name, ...(unreadable.path !== undefined && { sourcePath: unreadable.path }) },
+    );
+  }
+  return generator.getDocument();
+}
+
 async function prepareSources(doc: ArazzoDocument, options: FromArazzoOptions): Promise<SourceContext> {
+  // One URI for every raw source would make each one's references to another's URL local to itself
+  if (ownProperty(options.loadOptions, 'documentUri') !== undefined) {
+    err(
+      'loadOptions.documentUri would give every source the same URI; load a source with its own documentUri ' +
+        '(OpenAPIToolGenerator.fromJSON(document, { documentUri })) and pass the generator in options.sources',
+      '',
+    );
+  }
   const declared = new Map(doc.sourceDescriptions.map((s) => [s.name, s]));
   const generators = new Map<string, OpenAPIToolGenerator>();
   const sourceTypes = new Map<string, 'openapi' | 'arazzo'>();
@@ -478,7 +571,7 @@ async function prepareSources(doc: ArazzoDocument, options: FromArazzoOptions): 
     if (source instanceof OpenAPIToolGenerator) {
       generators.set(name, source);
     } else {
-      generators.set(name, await OpenAPIToolGenerator.fromJSON(source as object, options.loadOptions));
+      generators.set(name, await OpenAPIToolGenerator.fromJSON(source, options.loadOptions));
     }
   }
   for (const [name, source] of declared) {
@@ -487,16 +580,14 @@ async function prepareSources(doc: ArazzoDocument, options: FromArazzoOptions): 
 
   const operationIndex: SourceContext['operationIndex'] = new Map();
   for (const [name, generator] of generators) {
-    const document = generator.getDocument();
+    const document = await documentToIndex(doc, name, generator);
+    const layout = operationLayout(document);
     for (const [pathStr, pathItem] of Object.entries(document.paths ?? {})) {
-      if (!pathItem || typeof pathItem !== 'object') continue;
-      for (const method of HTTP_METHODS) {
-        const operation = (pathItem as Record<string, unknown>)[method];
-        if (!operation || typeof operation !== 'object') continue;
+      for (const { method, operation } of listOperations(pathItem, { layout }).operations) {
         const operationId = (operation as Record<string, unknown>)['operationId'];
         if (typeof operationId !== 'string') continue;
         const hits = operationIndex.get(operationId) ?? [];
-        hits.push({ source: name, path: pathStr, method: method as HTTPMethod });
+        hits.push({ source: name, path: pathStr, method });
         operationIndex.set(operationId, hits);
       }
     }
@@ -532,21 +623,41 @@ function parseOperationPath(value: string, path: string): { source: string; path
   }
   const source = ast.path[0];
   const rest = value.slice(close + 1);
-  if (!rest.startsWith('#/')) {
+  // The fragment is a JSON Pointer, percent-encoded (RFC 6901 section 6):
+  // decoded first (`%4CINK` is `LINK`, `%7B` is `{`), then split and
+  // unescaped. Decoding is lenient as for `$ref` fragments: a `%` that does
+  // not start a valid escape stays as written
+  const segments = rest.startsWith('#') ? fragmentPointerTokens(rest.slice(1)) : undefined;
+  if (segments === undefined || segments.length === 0) {
     err(`operationPath "${value}" requires a "#/paths/..." JSON Pointer after the source expression`, path);
   }
-  const segments = rest
-    .slice(2)
-    .split('/')
-    .map((segment) => segment.replace(/~1/g, '/').replace(/~0/g, '~'));
-  if (segments.length !== 3 || segments[0] !== 'paths') {
-    err(`operationPath pointer in "${value}" must have the shape #/paths/<path>/<method>`, path);
+  // #/paths/<path>/<method> for a fixed field, or (OpenAPI 3.2)
+  // #/paths/<path>/additionalOperations/<METHOD> for an additional operation.
+  // The method of an additional operation is its key exactly as written, so
+  // it is found only under that spelling. Whether the document has the
+  // operation (its version decides whether `query` and `additionalOperations`
+  // exist) is checked against the source document when the step is resolved.
+  const additional = segments.length === 4 && segments[2] === 'additionalOperations';
+  if (segments[0] !== 'paths' || (segments.length !== 3 && !additional)) {
+    err(
+      `operationPath pointer in "${value}" must have the shape #/paths/<path>/<method> or #/paths/<path>/additionalOperations/<method>`,
+      path,
+    );
   }
-  const method = segments[2].toLowerCase();
-  if (!HTTP_METHODS.includes(method)) {
-    err(`operationPath "${value}" ends in unknown HTTP method "${segments[2]}"`, path);
+  if (additional) {
+    // The key is a method exactly as written. A key `listOperations` ignores
+    // (not a token, CONNECT, or a fixed field's method) names no operation.
+    const key = segments[3];
+    if (!isHttpToken(key) || isRefusedMethod(key) || toStandardMethod(key) !== undefined) {
+      err(`operationPath "${value}" ends in unknown HTTP method ${JSON.stringify(key)} under additionalOperations`, path);
+    }
+    return { source, path: segments[1], method: key };
   }
-  return { source, path: segments[1], method: method as HTTPMethod };
+  const method = toStandardMethod(segments[2]);
+  if (method === undefined) {
+    err(`operationPath "${value}" ends in unknown HTTP method ${JSON.stringify(segments[2])}`, path);
+  }
+  return { source, path: segments[1], method };
 }
 
 function resolveOperationRef(
@@ -732,13 +843,22 @@ async function resolveStepOperation(
   let cached = ctx.operationCache.get(key);
   if (!cached) {
     const generator = requireGenerator(ctx.sources, ref.source, docPath);
+    const failure = (message: string) =>
+      new ArazzoError(`Failed to resolve ${wireMethod(ref.method)} ${ref.path} from source "${ref.source}": ${message}`, {
+        path: docPath,
+        source: ref.source,
+      });
+    // The operation must exist where the document's version puts operations
+    // (an operationPath can name any method of any path) and, for an
+    // additional operation, under exactly the key the pointer spells
+    const document = generator.getDocument();
+    const entry = getOperation(ownProperty(document.paths, ref.path), ref.method, { layout: operationLayout(document) });
+    if (entry === undefined) {
+      throw failure(`Operation not found: ${wireMethod(ref.method)} ${ref.path}`);
+    }
     cached = generator.generateTool(ref.path, ref.method, ctx.generateOptions as GenerateOptions).catch((error: unknown) => {
       /* c8 ignore next -- the generator only throws Error instances */
-      const message = error instanceof Error ? error.message : String(error);
-      throw new ArazzoError(
-        `Failed to resolve ${ref.method.toUpperCase()} ${ref.path} from source "${ref.source}": ${message}`,
-        { path: docPath, source: ref.source },
-      );
+      throw failure(error instanceof Error ? error.message : String(error));
     });
     ctx.operationCache.set(key, cached);
   }

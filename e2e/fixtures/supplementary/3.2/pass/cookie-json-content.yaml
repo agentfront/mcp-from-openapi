@@ -1,0 +1,45 @@
+# Cookie parameters defined with a JSON `content`. A cookie value cannot carry the `"` and `,` of JSON text, so
+# only a value that is a number, a boolean or null can be sent: the library makes the tool for all three, and
+# warns (COOKIE_CONTENT_NOT_SENDABLE) about the one whose schema allows an object.
+openapi: 3.2.0
+info:
+  title: Visitor
+  version: 1.0.0
+servers:
+  - url: https://visitors.example.com
+paths:
+  /visitor:
+    get:
+      operationId: getVisitor
+      summary: Read the visitor profile
+      parameters:
+        - name: session-options
+          in: cookie
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  theme:
+                    type: string
+                  compact:
+                    type: boolean
+        - name: visit-count
+          in: cookie
+          content:
+            application/json:
+              schema:
+                type: integer
+        - name: banner-seen
+          in: cookie
+          content:
+            application/json:
+              schema:
+                type: boolean
+      responses:
+        '200':
+          description: The visitor profile
+          content:
+            application/json:
+              schema:
+                type: object

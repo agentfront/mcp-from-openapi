@@ -1,0 +1,6 @@
+name: ownerId
+in: path
+required: true
+description: The owner's identifier
+schema:
+  $ref: ../schemas/Id.yaml

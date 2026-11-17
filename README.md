@@ -55,17 +55,18 @@ Now you know exactly how to build the HTTP request.
 
 ## Features
 
-- **Built-in Request Builder** -- `buildHttpRequest()` applies the full OpenAPI serialization table (form/deepObject/pipeDelimited queries, label/matrix paths, multipart, binary, `wholeBody`) so you never hand-write request assembly
+- **Swagger 2.0 and OpenAPI 3.0, 3.1 and 3.2** -- Validated with the rules of the version a document declares. From 3.2: the `query` operation and `additionalOperations` methods, `in: querystring` whole-query parameters, `style: cookie`, streamed responses (`itemSchema`), `$self`, and security schemes named by URI; what the library skips or ignores is recorded in `getDiagnostics()` instead of dropped. A Swagger 2.0 document is converted to OpenAPI 3.0 (`upgradeSwagger2`, also exported) and its tools are generated from the conversion, with what could not be carried over exactly recorded the same way
+- **Built-in Request Builder** -- `buildHttpRequest()` applies the full OpenAPI serialization table (form/deepObject/pipeDelimited queries, label/matrix paths, `content` parameters, per-field Encoding Objects in form and multipart bodies, `allowReserved` that never lets a value add a query pair, OpenAPI 3.2 whole-query (`in: querystring`) and `style: cookie`, multipart, binary, `wholeBody`) so you never hand-write request assembly
 - **Client Compatibility Targets** -- `target: 'claude' | 'openai' | 'gemini' | 'strict'` emits schemas each client actually accepts (inlined refs, closed objects, collapsed unions, demoted formats)
 - **Context-Budget Reports** -- `analyzeToolSet()` estimates the token bill per tool and warns at the thresholds where agent accuracy degrades
 - **Overlays & Lint** -- apply [OpenAPI Overlay](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/curation.md) curation files at load time; `lint()` flags the spec gaps that hurt tool-calling accuracy
 - **Curation-Grade Filtering** -- Filter by tag, method, path glob (`/admin/**`), operationId, a `readOnlyOnly` safety switch, and `x-mcp` extension flags with root < path < operation precedence
-- **Smart Parameter Handling** -- Automatic conflict detection and resolution across path, query, header, cookie, and body; `allOf` bodies flatten, union and binary bodies map cleanly (`wholeBody`, `binary` markers)
-- **Complete Schemas** -- Input schema combines all parameters; output schema from responses (with oneOf unions); clean JSON Schema 2020-12 output (`nullable` unions, normalized `examples`)
+- **Smart Parameter Handling** -- Automatic conflict detection and resolution across path, query, header, cookie, and body; an operation-level parameter overrides a path-level one with the same name and location; `allOf` bodies flatten, union and binary bodies map cleanly (`wholeBody`, `binary` markers)
+- **Complete Schemas** -- Input schema combines all parameters; output schema from responses (with oneOf unions); streamed responses (`itemSchema`) reported in `metadata.responseStream`; clean JSON Schema 2020-12 output (`nullable` unions, normalized `examples`)
 - **MCP-Native Tools** -- `title` and tool `annotations` (readOnly/destructive/idempotent hints) inferred from HTTP semantics, overridable via the `x-mcp` extension family; spec-compliant tool names (64-char cap, stable hash truncation, collision dedup); deterministic tool ordering for prompt-cache friendliness; `toSdkTool()` for one-line SDK registration
 - **Security Resolution** -- Framework-agnostic auth for Bearer, Basic, Digest, API Key, OAuth2, OpenID, mTLS, HMAC, AWS Sig V4; per-scheme `includeSecurityInInput`
-- **SSRF Prevention** -- Blocks internal IPs, localhost, and cloud metadata endpoints by default during `$ref` resolution; one-flag `secureDefaults` posture for untrusted specs
-- **Multiple Input Sources** -- Load from URL, file, YAML string, or JSON object
+- **SSRF Prevention** -- Blocks internal IPs, localhost, and cloud metadata endpoints by default during `$ref` resolution; one-flag `secureDefaults` posture for untrusted specs; a documented trust model for what a spec can make the library read
+- **Multiple Input Sources** -- Load from URL, file, YAML string, or JSON object; multi-file specs resolve relative `$ref`s against where the document was loaded from (URL, file or `documentUri`)
 - **Rich Metadata** -- Authentication, servers, tags, deprecation, external docs, `x-frontmcp` extension
 - **Production Ready** -- Full TypeScript support, validation, structured errors, 100% test coverage (enforced)
 - **Runtime Agnostic** -- Works on Node and V8 isolates (Cloudflare Workers) alike
@@ -148,8 +149,9 @@ for (const tool of await generator.generateTools({ target: "claude" })) {
 
 | Document                                                                                                    | Description                                                       |
 | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| [Getting Started](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/getting-started.md)         | Loading specs, generating tools, building requests                |
+| [Getting Started](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/getting-started.md)         | Loading specs (multi-file included), generating tools, building requests |
 | [Configuration](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/configuration.md)             | LoadOptions, GenerateOptions, RefResolutionOptions                |
+| [OpenAPI Versions](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/openapi-versions.md)       | Supported versions, Swagger 2.0 conversion, OpenAPI 3.2 features, diagnostics, known gaps |
 | [Parameter Conflicts](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/parameter-conflicts.md) | How conflict detection and resolution works                       |
 | [Request Builder](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/request-builder.md)         | `buildHttpRequest` — full OpenAPI parameter serialization         |
 | [Client Targets](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/client-targets.md)           | Per-client schema dialects (Claude, OpenAI, Gemini)               |
@@ -158,10 +160,10 @@ for (const tool of await generator.generateTools({ target: "claude" })) {
 | [Modern MCP Fields](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/modern-mcp-fields.md)     | Tool `_meta`, icons, `x-mcp-header`, elicitation descriptors      |
 | [Arazzo Workflows](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/arazzo.md)                 | fromArazzo() — Arazzo 1.0 workflows as consolidated MCP tools     |
 | [Tested Examples](https://github.com/agentfront/mcp-from-openapi/tree/main/examples)                        | Runnable examples, each executed as an e2e test on every CI run   |
-| [Response Schemas](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/response-schemas.md)       | Output schemas, status codes, oneOf unions                        |
+| [Response Schemas](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/response-schemas.md)       | Output schemas, status codes, oneOf unions, streamed responses    |
 | [Annotations & Extensions](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/annotations.md)    | Tool title, annotation inference, `x-mcp` extension family        |
 | [Security](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/security.md)                       | SecurityResolver, all auth types, custom resolvers                |
-| [SSRF Prevention](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/ssrf-prevention.md)         | Ref resolution security, blocked IPs and hosts                    |
+| [SSRF Prevention](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/ssrf-prevention.md)         | Ref resolution security, base URIs and `$self`, trust model       |
 | [Format Resolution](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/FORMAT_RESOLUTION.md)     | Format-to-schema enrichment (uuid, date-time, email, int32, etc.) |
 | [Naming Strategies](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/naming-strategies.md)     | Custom tool naming and conflict resolvers                         |
 | [SchemaBuilder](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/schema-builder.md)            | JSON Schema utility methods                                       |
@@ -170,10 +172,11 @@ for (const tool of await generator.generateTools({ target: "claude" })) {
 | [API Reference](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/api-reference.md)             | Complete types, interfaces, and exports                           |
 | [Examples](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/examples.md)                       | MCP server, Zod, filtering, security, and more                    |
 | [Architecture](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/architecture.md)               | System overview, data flow, design patterns                       |
+| [Maintaining OpenAPI Support](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/maintaining-openapi-support.md) | For maintainers: adding a version, moving the pinned official sources |
 
 ## Requirements
 
-- Node.js >= 20.0.0
+- Node.js >= 22.19.0
 - TypeScript >= 5.0 (for TypeScript users)
 - Peer dependency: `zod@^4.0.0`
 
@@ -190,7 +193,10 @@ Bug reports and feature requests go through the
 
 Report vulnerabilities privately — see the
 [security policy](https://github.com/agentfront/mcp-from-openapi/blob/main/SECURITY.md).
-When loading untrusted specs, use `secureDefaults: true`.
+When loading untrusted specs, use `secureDefaults: true`, and do not allow
+the `file` protocol in `refResolution.allowedProtocols` for a spec you do not
+control: it lets the spec read any local file the process can read (see the
+[trust model](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/ssrf-prevention.md#trust-model)).
 
 ## Related Projects
 

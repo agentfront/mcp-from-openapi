@@ -1,4 +1,5 @@
 import type { JsonSchema } from './types';
+import { isNeverSchema } from './types';
 import { SchemaError } from './errors';
 import { chargeBudget, copyJsonValue, mapSlots, MAX_VALUE_DEPTH, type CopyBudget } from './json-copy';
 
@@ -299,14 +300,20 @@ function mergeAllOf(node: SchemaRecord): SchemaRecord {
   return merged;
 }
 
-/** Is this the `anyOf: [X, { type: 'null' }]` wrapper toJsonSchema emits for nullable schemas? */
+/**
+ * Is this the `anyOf: [X, { type: 'null' }]` wrapper toJsonSchema emits for
+ * nullable schemas? Not when X accepts no value (`{ not: {} }`: a `false`, or
+ * OpenAPI 3.0's `not: {}` with `nullable: true`): then only `null` is valid,
+ * and unwrapping to X would reject `null` too, so the union is left to the
+ * union rules.
+ */
 function nullableWrapperMember(node: SchemaRecord): SchemaRecord | undefined {
   const anyOf = node['anyOf'];
   if (!Array.isArray(anyOf) || anyOf.length !== 2) return undefined;
   const nullIndex = anyOf.findIndex((m) => isSchemaObject(m) && (m as SchemaRecord)['type'] === 'null');
   if (nullIndex === -1) return undefined;
   const other = anyOf[1 - nullIndex];
-  return isSchemaObject(other) ? (other as SchemaRecord) : undefined;
+  return isSchemaObject(other) && !isNeverSchema(other) ? (other as SchemaRecord) : undefined;
 }
 
 function describeVariants(members: unknown[]): string {
@@ -368,8 +375,10 @@ export function collapseRootCompositions(schema: JsonSchema): JsonSchema {
 
 /**
  * Collapse unions at EVERY level (Gemini): nullable wrappers unwrap with a
- * note; other `oneOf`/`anyOf` keep their first variant and document the
- * omitted alternatives; `allOf` merges.
+ * note; other `oneOf`/`anyOf` keep their first variant that accepts some
+ * value (a `{ not: {} }` variant, a `false` in the document, accepts none, so
+ * leaving it out changes nothing) and document the other omitted
+ * alternatives; `allOf` merges.
  */
 export function collapseNestedUnions(schema: JsonSchema): JsonSchema {
   return walkSchema(schema, (node) => {
@@ -412,13 +421,16 @@ export function collapseNestedUnions(schema: JsonSchema): JsonSchema {
       let collapsedUnion = false;
       for (const key of ['oneOf', 'anyOf'] as const) {
         const members = current[key];
-        if (Array.isArray(members) && members.length > 0 && isSchemaObject(members[0])) {
+        // The first variant that accepts a value; the first of all when none does
+        const kept = Array.isArray(members) ? Math.max(0, members.findIndex((m) => !isNeverSchema(m))) : 0;
+        if (Array.isArray(members) && members.length > 0 && isSchemaObject(members[kept])) {
           const { [key]: _members, ...rest } = current;
-          const first = { ...(members[0] as SchemaRecord) };
+          const first = { ...(members[kept] as SchemaRecord) };
+          const omitted = members.filter((member, index) => index !== kept && !isNeverSchema(member));
           const note =
-            members.length > 1
-              ? `${members.length - 1} alternative schema variant(s) omitted for client compatibility: ${describeVariants(
-                  members.slice(1),
+            omitted.length > 0
+              ? `${omitted.length} alternative schema variant(s) omitted for client compatibility: ${describeVariants(
+                  omitted,
                 )}.`
               : undefined;
           const merged = { ...first, ...rest };
@@ -492,6 +504,11 @@ export function enforceClosedObjects(schema: JsonSchema): JsonSchema {
  * `required`; optional fields are expressed as required-but-nullable. This
  * rewrites each object node accordingly (typed optionals gain a `null` type;
  * untyped optionals are already permissive).
+ *
+ * An optional property no value satisfies (`{ not: {} }`, a `false` in the
+ * document) cannot be required: the object could never be sent. In a closed
+ * object (`additionalProperties: false`, no `patternProperties`) it is left
+ * out, which forbids it just the same; elsewhere it stays optional.
  */
 export function requireAllProperties(schema: JsonSchema): JsonSchema {
   return walkSchema(schema, (node) => {
@@ -499,9 +516,18 @@ export function requireAllProperties(schema: JsonSchema): JsonSchema {
 
     const properties = node['properties'] as SchemaRecord;
     const originallyRequired = new Set(Array.isArray(node['required']) ? node['required'].map(String) : []);
+    const closed = node['additionalProperties'] === false && node['patternProperties'] === undefined;
     const rewritten: SchemaRecord = {};
+    const optional = new Set<string>();
 
     for (const [name, propSchema] of Object.entries(properties)) {
+      if (!originallyRequired.has(name) && isNeverSchema(propSchema)) {
+        if (!closed) {
+          rewritten[name] = propSchema;
+          optional.add(name);
+        }
+        continue;
+      }
       // const-constrained properties are left untouched: adding null would
       // contradict the const, and const already admits exactly one value.
       if (originallyRequired.has(name) || !isSchemaObject(propSchema) || (propSchema as SchemaRecord)['const'] !== undefined) {
@@ -530,7 +556,7 @@ export function requireAllProperties(schema: JsonSchema): JsonSchema {
       }
     }
 
-    return { ...node, properties: rewritten, required: Object.keys(properties) };
+    return { ...node, properties: rewritten, required: Object.keys(rewritten).filter((name) => !optional.has(name)) };
   });
 }
 

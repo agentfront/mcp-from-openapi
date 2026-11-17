@@ -114,6 +114,8 @@ export type {
   ParameterMapper,
   ToolMetadata,
   ResponseHints,
+  ResponseStatusRange,
+  ResponseStreamInfo,
   FrontMcpExtensionData,
   SerializationInfo,
   SecurityRequirement,
@@ -137,7 +139,7 @@ export type {
   ParameterLocation,
   AuthType,
 
-  // Re-exported OpenAPI types (from openapi-types package)
+  // OpenAPI object types: each a union of the 3.0, 3.1 and 3.2 objects
   OperationObject,
   ParameterObject,
   RequestBodyObject,
@@ -157,12 +159,55 @@ export type {
   EncodingObject,
   SecurityRequirementObject,
   SchemaObject,
+  SchemaOrBoolean,
 
   // Validation types
   ValidationResult,
   ValidationErrorDetail,
   ValidationWarning,
 } from './types';
+
+// OpenAPI object types per specification version, under the spec's own names
+// (`OAS20.SwaggerObject`, `OAS31.OperationObject`, `OAS32.MediaTypeObject`,
+// ...), and the view that reads a spec object's `x-` extensions
+export type { OAS20, OAS30, OAS31, OAS32, WithExtensions, ExtensionName } from './spec';
+
+// Swagger 2.0 to OpenAPI 3.0: the conversion the generator applies to a 2.0
+// document once it is dereferenced, as a standalone function
+export { MAX_CONVERSION_ENTRIES, MAX_MEDIA_TYPES_PER_LIST, upgradeSwagger2 } from './spec';
+export type { UpgradeSwagger2Options, UpgradeSwagger2Result } from './spec';
+
+// OpenAPI versions, operations and diagnostics: the declared version of a
+// document (`generator.getSpecVersion()`), the walk over a Path Item's
+// operations that `generateTools` uses — pass
+// `{ layout: resolveOperationLayout(detectSpecVersion(document)) }` to read
+// what the declared version defines, as the generator does — and the codes
+// and cap of `generator.getDiagnostics()`
+export {
+  SUPPORTED_SPEC_VERSIONS,
+  detectSpecVersion,
+  getOperation,
+  isStandardMethod,
+  listOperations,
+  resolveOperationLayout,
+} from './spec';
+export { DIAGNOSTIC_CODES, MAX_DIAGNOSTICS, LEGACY_PATH_KEY_MAX_LENGTH } from './types';
+export type { DiagnosticCode } from './types';
+export type {
+  GetOperationOptions,
+  ListOperationsOptions,
+  OperationEntry,
+  OperationLayout,
+  OperationList,
+  OperationSource,
+  SpecDiagnostic,
+  SpecDiagnosticSeverity,
+  SpecFamily,
+  SpecVersionField,
+  SpecVersionInfo,
+  SpecVersionStatus,
+  StandardMethod,
+} from './spec';
 
 // Security resolver types
 export type {

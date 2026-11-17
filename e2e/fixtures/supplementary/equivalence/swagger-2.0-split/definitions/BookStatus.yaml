@@ -1,0 +1,6 @@
+type: string
+description: Whether the book can be borrowed
+enum:
+  - available
+  - borrowed
+  - lost

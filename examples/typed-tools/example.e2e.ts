@@ -1,5 +1,5 @@
 /** Executes the typed-tools example and compiles its output with real tsc. */
-import * as ts from 'typescript';
+import { compileVirtual } from '../../e2e/helpers/tsc';
 import { buildTypedSurface } from './example';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -54,17 +54,7 @@ describe('example: typed-tools', () => {
     expect(surface.signatures['billing.createInvoice']).toContain('amount: number');
 
     // The concatenated declarations compile under the real TypeScript compiler
-    const options: ts.CompilerOptions = { noEmit: true, strict: true, skipLibCheck: true, lib: ['lib.es2022.d.ts'], types: [] };
-    const host = ts.createCompilerHost(options);
-    const readFile = host.readFile.bind(host);
-    const fileExists = host.fileExists.bind(host);
-    const getSourceFile = host.getSourceFile.bind(host);
-    host.readFile = (name) => (name === 'surface.ts' ? surface.declarations : readFile(name));
-    host.fileExists = (name) => name === 'surface.ts' || fileExists(name);
-    host.getSourceFile = (name, version, ...rest) =>
-      name === 'surface.ts' ? ts.createSourceFile(name, surface.declarations, version, true) : getSourceFile(name, version, ...rest);
-    const diagnostics = ts.getPreEmitDiagnostics(ts.createProgram(['surface.ts'], options, host));
-    expect(diagnostics.map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n'))).toEqual([]);
+    expect(compileVirtual('surface.ts', surface.declarations)).toEqual([]);
 
     expect(surface.declarations).toContain('declare function billingListInvoices');
   });

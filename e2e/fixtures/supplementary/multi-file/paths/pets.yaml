@@ -1,0 +1,28 @@
+get:
+  operationId: listPets
+  summary: List pets
+  parameters:
+    - $ref: ../parameters/paging/Limit.yaml
+  responses:
+    '200':
+      $ref: ../responses/PetList.yaml
+    default:
+      $ref: ../responses/Problem.yaml
+post:
+  operationId: createPet
+  summary: Register a pet
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: ../schemas/NewPet.yaml
+  responses:
+    '201':
+      description: The pet was registered
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Pet.yaml
+    default:
+      $ref: ../responses/Problem.yaml

@@ -1,0 +1,31 @@
+# Response Objects with a `summary` and no `description` (the description is optional from 3.2).
+openapi: 3.2.0
+info:
+  title: Health
+  version: 1.0.0
+servers:
+  - url: https://health.example.com
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Service health
+      responses:
+        '200':
+          summary: Healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+        default:
+          summary: Unhealthy
+          content:
+            application/problem+json:
+              schema:
+                type: object
+                properties:
+                  title:
+                    type: string

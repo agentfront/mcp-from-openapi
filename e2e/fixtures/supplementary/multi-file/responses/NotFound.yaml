@@ -1,0 +1,5 @@
+description: There is no such resource
+content:
+  application/json:
+    schema:
+      $ref: ../schemas/Error.yaml

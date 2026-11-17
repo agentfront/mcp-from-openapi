@@ -1,10 +1,23 @@
 /**
- * Real-spec story: three vendored real-world specs survive the whole
+ * Real-spec story: four vendored real-world specs survive the whole
  * pipeline — generation, MCP name rules, JSON Schema 2020-12 validity (ajv),
  * every client-target dialect, lint, and token accounting. The literal counts
  * pin fixture↔spec drift (see e2e/fixtures/README.md).
+ *
+ * One of the four is Swagger 2.0 (Netlify, `netlify-trimmed-2.0.json`), which the
+ * library converts to OpenAPI 3.0 and generates from. Its 177 tools are the 177
+ * operations of the document (76 get, 50 post, 23 put, 23 delete, 5 patch, none
+ * deprecated, each with its own operationId). It is linted through the generator, which dereferences it
+ * first: `lintDocument` converts what it is given and does not follow a `$ref`
+ * left in a 2.0 document. Of its 45 warnings and 261 infos, four codes were counted
+ * again from the document itself (e2e/swagger2.e2e.ts reads the same document through
+ * the converter): 43 `unpaginated-list` (a GET whose response holds an array and that
+ * has no pagination parameter), 155 `missing-parameter-description` (operations with a
+ * path, query or header parameter that has no description), 48 `missing-request-example`
+ * (the operations with a body, 47 `in: body` and the one multipart upload) and 42
+ * `vague-description` (summary and description under 20 characters).
  */
-import { OpenAPIToolGenerator, analyzeToolSet, estimateToolTokens, lintDocument } from '../src';
+import { OpenAPIToolGenerator, analyzeToolSet, detectSpecVersion, estimateToolTokens, lintDocument } from '../src';
 import type { ClientTarget, JsonSchema, McpOpenAPITool, OpenAPIDocument } from '../src';
 import { loadFixture, loadJsonFixture } from './helpers/fixtures';
 import { compileAll } from './helpers/ajv';
@@ -18,6 +31,7 @@ const FIXTURES: Array<{
   { file: 'petstore-3.0.yaml', toolCount: 19, lintCounts: { error: 0, warning: 2, info: 8 } },
   { file: 'github-trimmed-3.0.json', toolCount: 78, lintCounts: { error: 0, warning: 26, info: 15 } },
   { file: 'discord-trimmed-3.1.json', toolCount: 60, lintCounts: { error: 0, warning: 64, info: 72 } },
+  { file: 'netlify-trimmed-2.0.json', toolCount: 177, lintCounts: { error: 0, warning: 45, info: 261 } },
 ];
 
 const TARGETS = ['claude', 'openai', 'gemini', 'strict'] as const satisfies readonly ClientTarget[];
@@ -93,7 +107,15 @@ describe.each(FIXTURES)('story: real spec $file', ({ file, toolCount, lintCounts
     }
   });
 
-  it('lints to the expected finding counts', () => {
+  it('lints to the expected finding counts', async () => {
+    if (detectSpecVersion(document).family === '2.0') {
+      // Swagger 2.0: the generator dereferences, then converts, then lints the OpenAPI 3.0 document it generates from
+      const generator = await OpenAPIToolGenerator.fromJSON(loadDocument(file));
+      const result = await generator.lint();
+      expect(result.counts).toEqual(lintCounts);
+      expect(lintDocument(generator.getDocument())).toEqual(result);
+      return;
+    }
     expect(lintDocument(document).counts).toEqual(lintCounts);
   });
 
@@ -106,5 +128,19 @@ describe.each(FIXTURES)('story: real spec $file', ({ file, toolCount, lintCounts
       expect(Number.isInteger(tokens)).toBe(true);
       expect(tokens).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('story: real spec netlify-trimmed-2.0.json, converted without a finding', () => {
+  // A real Swagger 2.0 description is the test that the conversion does not cry wolf: every construct of this one
+  // (`type: file`, `x-nullable`, `in: body` and `in: formData`, a global parameter and response, an implicit OAuth2
+  // definition with no `scopes`, `consumes` and `produces` at the root and on operations) is carried over exactly, so
+  // generating from it records no diagnostic of any kind. A finding here is a construct the conversion no longer handles.
+  it('records no diagnostic, and every tool of it has a server', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(loadDocument('netlify-trimmed-2.0.json'));
+    const tools = await generator.generateTools();
+    expect(tools).toHaveLength(177);
+    expect(generator.getDiagnostics()).toEqual([]);
+    expect(tools.filter((tool) => (tool.metadata.servers ?? []).length === 0)).toEqual([]);
   });
 });

@@ -1,0 +1,33 @@
+# DELIBERATELY INVALID: `in: querystring` is an OpenAPI 3.2 parameter location. The official 3.1 schema
+# rejects it; the library warns (FEATURE_NEWER_THAN_DECLARED_VERSION) and still reads the parameter as the
+# whole query string, since the generator reads the location whatever version the document declares.
+openapi: 3.1.1
+info:
+  title: Pet shop search
+  version: 1.0.0
+servers:
+  - url: https://api.petshop.example/v1
+paths:
+  /pets/search:
+    get:
+      operationId: searchPets
+      summary: Search the pets for sale
+      parameters:
+        - name: criteria
+          in: querystring
+          content:
+            application/x-www-form-urlencoded:
+              schema:
+                type: object
+                properties:
+                  species:
+                    type: string
+      responses:
+        '200':
+          description: The pets that match
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
