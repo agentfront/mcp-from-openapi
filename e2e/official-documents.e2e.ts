@@ -588,6 +588,9 @@ const UNPROCESSED_CODES: ReadonlySet<string> = new Set([
   'UNRESOLVED_SECURITY_SCHEME',
   'INVALID_SECURITY_REQUIREMENT',
   'UNSATISFIABLE_SECURITY',
+  // an operation that fails to build, and a parameter, request body or response left as a reference not read
+  'TOOL_GENERATION_FAILED',
+  'UNRESOLVED_REFERENCE',
   // `$self` (src/base-uri.ts): ignored, so the references of the document resolve as if it were absent
   // (against the retrieval URI, or the working directory when there is none): not a string or a URI reference
   // without a fragment, a form the library refuses to use as a base, a relative one with nothing to resolve it against

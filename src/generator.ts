@@ -750,6 +750,16 @@ function onlyScalarJson(schema: unknown): boolean {
   );
 }
 
+/** The `UNRESOLVED_REFERENCE` warning for a Reference Object at `pointer` that generation needs resolved */
+function unresolvedReference(method: string, path: string, pointer: string, consequence: string): SpecDiagnostic {
+  return {
+    severity: 'warning',
+    code: DIAGNOSTIC_CODES.UNRESOLVED_REFERENCE,
+    message: `${operationLabel(method, path)}: a reference at ${describeValue(pointer)} was not resolved (secureDefaults does not read external references); ${consequence}`,
+    path: pointer,
+  };
+}
+
 /** Assemble the tool description per the configured strategy. */
 function composeDescription(
   operation: OperationObject,
@@ -997,6 +1007,9 @@ export class OpenAPIToolGenerator {
    * user information or fragment); `LoadOptions.documentUri` replaces it.
    */
   private constructor(document: OpenAPIDocument, rawOptions: LoadOptions = {}, retrievalUri?: string) {
+    if (!isSpecObject(document)) {
+      throw new ParseError(`An OpenAPI document must be an object, found ${describeValue(document)}`);
+    }
     this.document = document;
     const options = applySecureDefaults(rawOptions);
     // Checked before anything else: a bad option fails the load, whatever the document
@@ -1713,13 +1726,21 @@ export class OpenAPIToolGenerator {
     // The value of a `$ref` (cached under `key`) to `target`: a boolean schema
     // as it is; else a placeholder, cached first so a cycle back to it sees
     // it, filled once its walked target is known
+    const byTarget = new Map<object, Record<string, unknown>>();
     const refTo = (key: string, target: unknown): unknown => {
       if (typeof target === 'boolean') {
         cache.set(key, target);
         return target;
       }
+      // Every spelling of one pointer (`#//a`, `#a/`) shares the placeholder of its target
+      const shared = target !== null && typeof target === 'object' ? byTarget.get(target) : undefined;
+      if (shared !== undefined) {
+        cache.set(key, shared);
+        return shared;
+      }
       const placeholder: Record<string, unknown> = {};
       cache.set(key, placeholder);
+      if (target !== null && typeof target === 'object') byTarget.set(target, placeholder);
       frames.push({ children: [target], keys: null, next: 0, out: [], placeholder });
       return pending;
     };
@@ -2111,6 +2132,12 @@ export class OpenAPIToolGenerator {
           /* c8 ignore next */
           const errorMessage = error instanceof Error ? error.message : String(error);
           console.warn(`Failed to generate tool for ${operationLabel(method, pathStr)}:`, errorMessage);
+          this.addDiagnostic({
+            severity: 'warning',
+            code: DIAGNOSTIC_CODES.TOOL_GENERATION_FAILED,
+            message: `${operationLabel(method, pathStr)} makes no tool: ${messageText(errorMessage, DEREFERENCE_ERROR_MAX_LENGTH)}`,
+            path: operationPointer(pathStr, entry),
+          });
         }
       }
     }
@@ -2166,7 +2193,7 @@ export class OpenAPIToolGenerator {
     const document = this.getDocument();
 
     if (!document.paths) {
-      throw new Error('No paths defined in OpenAPI document');
+      throw new GenerationError('No paths defined in OpenAPI document', { path: pathStr, method });
     }
 
     // Own-property lookups: a path or method named `constructor` must not
@@ -2176,7 +2203,7 @@ export class OpenAPIToolGenerator {
     const entry = getOperation(pathItem, method, { layout: this.operationLayout });
 
     if (!entry) {
-      throw new Error(`Operation not found: ${operationLabel(String(method), pathStr)}`);
+      throw new GenerationError(`Operation not found: ${operationLabel(String(method), pathStr)}`, { path: pathStr, method });
     }
     const tool = this.buildToolGuarded(pathStr, pathItem, entry, options);
     this.schemaNodeBudget(options).charge(tool);
@@ -2201,6 +2228,24 @@ export class OpenAPIToolGenerator {
         throw error;
       },
     };
+  }
+
+  /** Skips an operation whose request body is an unresolved reference, and reports each unresolved response */
+  private checkUnresolvedReferences(pathStr: string, entry: OperationEntry): void {
+    const pointer = operationPointer(pathStr, entry);
+    const { method, operation } = entry;
+    if (isReferenceObject(operation.requestBody)) {
+      const at = appendPointer(pointer, 'requestBody');
+      throw this.skipOperation(unresolvedReference(method, pathStr, at, 'the operation makes no tool'), {
+        path: pathStr,
+        method,
+      });
+    }
+    for (const [status, response] of isSpecObject(operation.responses) ? Object.entries(operation.responses) : []) {
+      if (isReferenceObject(response)) {
+        this.addDiagnostic(unresolvedReference(method, pathStr, appendPointer(pointer, 'responses', status), 'the response is ignored'));
+      }
+    }
   }
 
   /**
@@ -2275,9 +2320,12 @@ export class OpenAPIToolGenerator {
       if (!Array.isArray(parameters)) continue;
       for (let index = 0; index < parameters.length; index++) {
         const parameter: unknown = parameters[index];
-        if (isReferenceObject(parameter)) continue;
-        const name = ownProperty(parameter, 'name');
         const at = appendPointer(pointer, this.sourceIndex(parameters, index));
+        if (isReferenceObject(parameter)) {
+          if (this.options.dereference) return unresolvedReference(entry.method, pathStr, at, 'the operation makes no tool');
+          continue;
+        }
+        const name = ownProperty(parameter, 'name');
         if (unnamed === undefined && readParameterName(name).kind === 'invalid') {
           unnamed = {
             severity: 'warning',
@@ -2581,6 +2629,8 @@ export class OpenAPIToolGenerator {
     if (parameterCheck.skip !== undefined) {
       throw this.skipOperation(parameterCheck.skip, { path: pathStr, method });
     }
+    // After dereferencing, a reference left is an external one that was not read (secureDefaults)
+    if (this.options.dereference) this.checkUnresolvedReferences(pathStr, entry);
     const streamingBody = this.streamingRequestBodyDiagnostic(pathStr, entry);
     if (streamingBody !== undefined) this.addDiagnostic(streamingBody);
 
@@ -2979,7 +3029,7 @@ export class OpenAPIToolGenerator {
     }
 
     // Tag filters
-    const tags = operation.tags ?? [];
+    const tags = Array.isArray(operation.tags) ? operation.tags : [];
     if (options.includeTags && !tags.some((tag) => options.includeTags!.includes(tag))) {
       return false;
     }
@@ -3243,6 +3293,7 @@ export class OpenAPIToolGenerator {
   ): { name: string; scheme: Record<string, unknown> } | { problem: string } {
     // Own properties only: a scheme named `constructor` is not Object's
     const found = ownProperty(schemes, key);
+    if (this.options.dereference && isReferenceObject(found)) return { problem: 'is a reference that was not resolved' };
     if (isSpecObject(found)) return { name: key, scheme: found };
     const notDefined = 'components.securitySchemes does not define';
     if (!/[:#/]/.test(key)) return { problem: notDefined };
@@ -3263,10 +3314,11 @@ export class OpenAPIToolGenerator {
   private toSecurityRequirement(scheme: string, scopes: string[], found: Record<string, unknown>): SecurityRequirement {
     const securityScheme = found as unknown as SecuritySchemeObject | ReferenceObject;
 
-    // Skip if it's a reference object
+    // With dereference: false, a scheme left as a reference is read as HTTP bearer, as before
     if (isReferenceObject(securityScheme)) {
       return { scheme, type: 'http', scopes };
     }
+
 
     // Typed as a plain string so the equality checks below narrow it to the known locations
     const apiKeyIn: string | undefined = 'in' in securityScheme ? securityScheme.in : undefined;

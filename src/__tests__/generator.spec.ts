@@ -7083,7 +7083,7 @@ describe('OpenAPI 3.2 parameters and responses (issue #55)', () => {
         );
         expect(await generator.generateTools()).toEqual([]);
         expect(warn).toHaveBeenCalledWith('Failed to generate tool for POST /a:', 'No content type available in request body');
-        expect(generator.getDiagnostics()).toEqual([]);
+        expect(generator.getDiagnostics().map((diagnostic) => diagnostic.code)).toEqual(['TOOL_GENERATION_FAILED']);
       } finally {
         warn.mockRestore();
       }

@@ -2040,6 +2040,10 @@ export const DIAGNOSTIC_CODES = Object.freeze({
   NO_OPERATIONS: 'NO_OPERATIONS',
   /** Validator warning: an operation has no `operationId` (its tool name comes from the method and path). */
   NO_OPERATION_ID: 'NO_OPERATION_ID',
+  /** An operation `generateTools` could not turn into a tool, for a reason no other code names. */
+  TOOL_GENERATION_FAILED: 'TOOL_GENERATION_FAILED',
+  /** A parameter, request body or response generation needs is a reference that was not resolved. */
+  UNRESOLVED_REFERENCE: 'UNRESOLVED_REFERENCE',
   /** Validator warning: two operations share an `operationId`, which must be unique. */
   DUPLICATE_OPERATION_ID: 'DUPLICATE_OPERATION_ID',
   /** Validator warning: the document defines no servers. */

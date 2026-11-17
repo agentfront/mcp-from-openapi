@@ -254,6 +254,7 @@ export function parseDocumentUri(value: unknown): string {
   if (url.username !== '' || url.password !== '') throw problem('must not contain user information');
   if (value.includes('#')) throw problem('must not contain a fragment');
   if (url.protocol === 'file:' && url.host !== '') throw problem('must not name a host in a file URI');
+  if (url.href.length > MAX_BASE_URI_LENGTH) throw problem(`must be at most ${MAX_BASE_URI_LENGTH} characters once normalized`);
   return url.href;
 }
 
@@ -562,6 +563,20 @@ function identityBases(base: DocumentBase): string[] {
   return bases;
 }
 
+/** A value reached by a walk, linked to its container so its location is built only when needed */
+interface PathVisit {
+  node: unknown;
+  parent: PathVisit | null;
+  key: string;
+}
+
+/** The reference tokens from the root to `visit` */
+function locationOf(visit: PathVisit): string[] {
+  const tokens: string[] = [];
+  for (let at: PathVisit | null = visit; at !== null && at.parent !== null; at = at.parent) tokens.push(at.key);
+  return tokens.reverse();
+}
+
 /**
  * Every `$ref` of `root` that names the document `base` describes, in
  * document order, without changing anything. A reference names the document
@@ -597,18 +612,10 @@ export function findSelfReferences(root: unknown, base: DocumentBase): SelfRefer
     return found;
   };
 
-  interface Visit {
-    node: unknown;
-    parent: Visit | null;
-    key: string;
+  interface Visit extends PathVisit {
     /** Under (or at) a Schema Object with its own `$id` */
     scoped: boolean;
   }
-  const locationOf = (visit: Visit): string[] => {
-    const tokens: string[] = [];
-    for (let at: Visit | null = visit; at !== null && at.parent !== null; at = at.parent) tokens.push(at.key);
-    return tokens.reverse();
-  };
   const references: SelfReference[] = [];
   const seen = new Set<object>();
   const stack: Visit[] = [{ node: root, parent: null, key: '', scoped: false }];
@@ -668,19 +675,20 @@ export function refParserScopesIds(document: unknown): boolean {
  */
 export function findRelativeReference(root: unknown): { ref: string; location: string[] } | undefined {
   const seen = new Set<object>();
-  const stack: Array<{ node: unknown; location: string[] }> = [{ node: root, location: [] }];
+  const stack: PathVisit[] = [{ node: root, parent: null, key: '' }];
   while (stack.length > 0) {
-    const { node, location } = stack.pop() as { node: unknown; location: string[] };
+    const visit = stack.pop() as PathVisit;
+    const { node } = visit;
     if (node === null || typeof node !== 'object' || seen.has(node)) continue;
     seen.add(node);
     const ref = Array.isArray(node) ? undefined : ownProperty(node, '$ref');
     if (typeof ref === 'string' && ref !== '' && !ref.startsWith('#') && !HAS_SCHEME.test(ref)) {
-      return { ref, location };
+      return { ref, location: locationOf(visit) };
     }
     const record = node as Record<string, unknown>;
     const keys = Object.keys(record);
     for (let index = keys.length - 1; index >= 0; index--) {
-      stack.push({ node: record[keys[index]], location: [...location, keys[index]] });
+      stack.push({ node: record[keys[index]], parent: visit, key: keys[index] });
     }
   }
   return undefined;
