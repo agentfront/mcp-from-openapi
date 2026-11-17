@@ -161,11 +161,11 @@ function hasAnyExample(content: Record<string, unknown> | undefined): boolean {
  * examples). Small spec fixes routinely take tool-call success rates from
  * mediocre to near-perfect — each finding carries a concrete hint.
  */
-export function lintDocument(document: OpenAPIDocument): LintResult {
+export function lintDocument(document: object): LintResult {
   const findings: LintFinding[] = [];
   const operationIds = new Map<string, string[]>();
 
-  const paths = document.paths ?? {};
+  const paths = (document as OpenAPIDocument).paths ?? {};
   for (const [pathStr, pathItem] of Object.entries(paths).sort(([a], [b]) => (a < b ? -1 : 1))) {
     if (!pathItem || '$ref' in pathItem) continue;
 

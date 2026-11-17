@@ -2,7 +2,29 @@ import type { JSONSchema } from 'zod/v4/core';
 
 /** JSON Schema type from Zod v4 */
 export type JsonSchema = JSONSchema.JSONSchema;
-import type { OpenAPIV3, OpenAPIV3_1 } from 'openapi-types';
+import type {
+  OpenAPIDocument,
+  OperationObject,
+  ParameterObject,
+  RequestBodyObject,
+  ResponseObject,
+  ResponsesObject,
+  MediaTypeObject,
+  HeaderObject,
+  ExampleObject,
+  PathItemObject,
+  PathsObject,
+  ServerObject,
+  SecuritySchemeObject,
+  ReferenceObject,
+  TagObject,
+  ExternalDocumentationObject,
+  ServerVariableObject,
+  EncodingObject,
+  SecurityRequirementObject,
+  SchemaObject,
+  SchemaOrBoolean,
+} from './spec';
 import { SchemaError } from './errors';
 
 /**
@@ -10,10 +32,31 @@ import { SchemaError } from './errors';
  */
 export type OpenAPIVersion = '3.0.0' | '3.0.1' | '3.0.2' | '3.0.3' | '3.1.0';
 
-/**
- * Unified OpenAPI Document type (supports both 3.0 and 3.1)
- */
-export type OpenAPIDocument = OpenAPIV3.Document | OpenAPIV3_1.Document;
+// OpenAPI object types (cross-version unions of the `src/spec` types): the
+// document, and the objects within it that the library reads
+export type {
+  OpenAPIDocument,
+  OperationObject,
+  ParameterObject,
+  RequestBodyObject,
+  ResponseObject,
+  ResponsesObject,
+  MediaTypeObject,
+  HeaderObject,
+  ExampleObject,
+  PathItemObject,
+  PathsObject,
+  ServerObject,
+  SecuritySchemeObject,
+  ReferenceObject,
+  TagObject,
+  ExternalDocumentationObject,
+  ServerVariableObject,
+  EncodingObject,
+  SecurityRequirementObject,
+  SchemaObject,
+  SchemaOrBoolean,
+};
 
 /**
  * HTTP methods supported by OpenAPI
@@ -29,29 +72,6 @@ export type ParameterLocation = 'path' | 'query' | 'header' | 'cookie' | 'body';
  * Authentication types supported
  */
 export type AuthType = 'apiKey' | 'http' | 'oauth2' | 'openIdConnect' | 'mutualTLS';
-
-// Re-export OpenAPI types for convenience
-export type OperationObject = OpenAPIV3.OperationObject | OpenAPIV3_1.OperationObject;
-export type ParameterObject = OpenAPIV3.ParameterObject | OpenAPIV3_1.ParameterObject;
-export type RequestBodyObject = OpenAPIV3.RequestBodyObject | OpenAPIV3_1.RequestBodyObject;
-export type ResponseObject = OpenAPIV3.ResponseObject | OpenAPIV3_1.ResponseObject;
-export type ResponsesObject = OpenAPIV3.ResponsesObject | OpenAPIV3_1.ResponsesObject;
-export type MediaTypeObject = OpenAPIV3.MediaTypeObject | OpenAPIV3_1.MediaTypeObject;
-export type HeaderObject = OpenAPIV3.HeaderObject | OpenAPIV3_1.HeaderObject;
-export type ExampleObject = OpenAPIV3.ExampleObject | OpenAPIV3_1.ExampleObject;
-export type PathItemObject = OpenAPIV3.PathItemObject | OpenAPIV3_1.PathItemObject;
-export type PathsObject = OpenAPIV3.PathsObject | OpenAPIV3_1.PathsObject;
-export type ServerObject = OpenAPIV3.ServerObject | OpenAPIV3_1.ServerObject;
-export type SecuritySchemeObject = OpenAPIV3.SecuritySchemeObject | OpenAPIV3_1.SecuritySchemeObject;
-export type ReferenceObject = OpenAPIV3.ReferenceObject | OpenAPIV3_1.ReferenceObject;
-export type TagObject = OpenAPIV3.TagObject | OpenAPIV3_1.TagObject;
-export type ExternalDocumentationObject =
-  | OpenAPIV3.ExternalDocumentationObject
-  | OpenAPIV3_1.ExternalDocumentationObject;
-export type ServerVariableObject = OpenAPIV3.ServerVariableObject | OpenAPIV3_1.ServerVariableObject;
-export type EncodingObject = OpenAPIV3.EncodingObject | OpenAPIV3_1.EncodingObject;
-export type SecurityRequirementObject = OpenAPIV3.SecurityRequirementObject | OpenAPIV3_1.SecurityRequirementObject;
-export type SchemaObject = OpenAPIV3.SchemaObject | OpenAPIV3_1.SchemaObject;
 
 /**
  * Helper to check if an object is a ReferenceObject
@@ -113,6 +133,8 @@ const SCHEMA_SINGLE_KEYWORDS = [
  * - OpenAPI 3.0 boolean `exclusiveMinimum`/`exclusiveMaximum` -> numeric form
  * - OpenAPI `example` (singular) -> `examples` array (2020-12 keyword)
  * - OpenAPI-only `xml` metadata is dropped
+ * - A boolean schema (OpenAPI 3.1 and later) converts to `{}`; for `false`
+ *   that is a known gap, as the result accepts everything
  *
  * A subschema shared by several parents (a `$ref` target, after
  * dereferencing) is converted once and the result is reused, so the output
@@ -120,10 +142,7 @@ const SCHEMA_SINGLE_KEYWORDS = [
  * materialize a fresh tree with `SchemaBuilder.truncateDepth`. The root is
  * always a fresh object.
  */
-export function toJsonSchema(
-  schema: SchemaObject | ReferenceObject,
-  options: SchemaConversionOptions = {},
-): JsonSchema {
+export function toJsonSchema(schema: object | boolean, options: SchemaConversionOptions = {}): JsonSchema {
   const state: ConversionState = {
     root: schema,
     maxDepth: normalizeConversionLimit(options.maxDepth, 0),
@@ -135,7 +154,10 @@ export function toJsonSchema(
     cut: false,
     lowWater: Infinity,
   };
-  return convertSchema(schema, 0, state);
+  // Any object converts (a Schema or Reference Object of any version, or a
+  // schema-shaped object the caller built); a boolean takes visitSchema's
+  // non-object path
+  return convertSchema(schema as SchemaObject | ReferenceObject, 0, state);
 }
 
 /** Absent or non-finite limits mean "unbounded"; finite ones floor, with a minimum. */

@@ -2,7 +2,13 @@ import type { JSONSchema } from 'zod/v4/core';
 
 /** JSON Schema type from Zod v4 */
 type JsonSchema = JSONSchema.JSONSchema;
-import type { ResponseObject, GenerateOptions, ResponsesObject, SchemaConversionOptions } from './types';
+import type {
+  ResponseObject,
+  GenerateOptions,
+  MediaTypeObject,
+  ResponsesObject,
+  SchemaConversionOptions,
+} from './types';
 import { isReferenceObject, toJsonSchema } from './types';
 import { collectExampleValues } from './parameter-resolver';
 
@@ -97,7 +103,11 @@ export class ResponseBuilder {
    * `null` schema; one with content needs a schema for its selected media type
    */
   private yieldsSchema(response: ResponseObject): boolean {
-    return !response.content || Boolean(response.content[this.selectContentType(response.content)]?.schema);
+    // 3.2 also allows a Reference Object here; like the rest of generation, read it as resolved
+    return (
+      !response.content ||
+      Boolean((response.content as Record<string, MediaTypeObject>)[this.selectContentType(response.content)]?.schema)
+    );
   }
 
   /**
@@ -114,7 +124,8 @@ export class ResponseBuilder {
     }
 
     const contentType = this.selectContentType(response.content);
-    const mediaType = response.content[contentType];
+    // 3.2 also allows a Reference Object here; like the rest of generation, read it as resolved
+    const mediaType = response.content[contentType] as MediaTypeObject;
 
     const schema: JsonSchema & { 'x-status-code'?: number } = {
       // collectResponses only keeps responses whose media type has a schema

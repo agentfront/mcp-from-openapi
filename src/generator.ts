@@ -20,10 +20,12 @@ import type {
   ParameterMapper,
   ToolMetadata,
   ServerObject,
+  ServerInfo,
   PathItemObject,
   JsonSchema,
   ToolIcon,
 } from './types';
+import type { WithExtensions } from './spec';
 import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import { isReferenceObject } from './types';
 import { ParameterResolver } from './parameter-resolver';
@@ -249,7 +251,7 @@ function iconsFromInfoLogo(info: unknown): ToolIcon[] | undefined {
   if (!info || typeof info !== 'object') {
     return undefined;
   }
-  const logo = (info as Record<string, unknown>)['x-logo'];
+  const logo = (info as WithExtensions)['x-logo'];
   let src: string | undefined;
   if (typeof logo === 'string') {
     src = logo;
@@ -888,7 +890,7 @@ export class OpenAPIToolGenerator {
     if (pathItem.parameters) {
       pathParameters = pathItem.parameters.filter(
         (p): p is ParameterObject => !isReferenceObject(p),
-      ) as ParameterObject[];
+      );
     }
 
     // Extract security requirements
@@ -1268,12 +1270,13 @@ export class OpenAPIToolGenerator {
     }
 
     // Extract servers
-    const servers = (operation as { servers?: ServerObject[] }).servers ?? document.servers;
+    const servers = operation.servers ?? document.servers;
     if (servers) {
       metadata.servers = servers.map((server: ServerObject) => ({
         url: this.options.baseUrl || server.url,
         description: server.description,
-        variables: server.variables,
+        // A parsed document's maps hold no `undefined` values
+        variables: server.variables as ServerInfo['variables'],
       }));
     } else if (this.options.baseUrl) {
       metadata.servers = [{ url: this.options.baseUrl }];
@@ -1298,7 +1301,7 @@ export class OpenAPIToolGenerator {
     }
 
     // FrontMCP extension (x-frontmcp)
-    const operationWithExt = operation as Record<string, unknown>;
+    const operationWithExt = operation as WithExtensions<OperationObject>;
     if (operationWithExt['x-frontmcp']) {
       metadata.frontmcp = operationWithExt['x-frontmcp'] as ToolMetadata['frontmcp'];
     }
@@ -1319,14 +1322,16 @@ export class OpenAPIToolGenerator {
 
     return security.flatMap((req) =>
       Object.entries(req).map(([scheme, scopes]): SecurityRequirement => {
-        const securityScheme = document.components!.securitySchemes![scheme];
+        // A requirement naming a scheme the document lacks still fails below (not handled yet)
+        const securityScheme = document.components!.securitySchemes![scheme]!;
 
         // Skip if it's a reference object
         if (isReferenceObject(securityScheme)) {
           return { scheme, type: 'http', scopes };
         }
 
-        const apiKeyIn = 'in' in securityScheme ? securityScheme.in : undefined;
+        // Typed as a plain string so the equality checks below narrow it to the known locations
+        const apiKeyIn: string | undefined = 'in' in securityScheme ? securityScheme.in : undefined;
         const result: SecurityRequirement = {
           scheme,
           type: securityScheme.type as AuthType,

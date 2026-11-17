@@ -6,9 +6,10 @@ import type {
   ParameterMapper,
   ParameterObject,
   RequestBodyObject,
+  MediaTypeObject,
   NamingStrategy,
   ParameterLocation,
-  SchemaObject,
+  SchemaOrBoolean,
   ReferenceObject,
   SecurityRequirement,
   SecurityParameterInfo,
@@ -114,7 +115,8 @@ export class ParameterResolver {
     // Process request body
     if (requestBody?.content) {
       const contentType = this.selectContentType(requestBody.content);
-      const mediaType = requestBody.content[contentType];
+      // 3.2 also allows a Reference Object here; like the rest of generation, read it as resolved
+      const mediaType = requestBody.content[contentType] as MediaTypeObject | undefined;
 
       if (mediaType?.schema) {
         const mediaExamples = this.includeExamples
@@ -202,7 +204,7 @@ export class ParameterResolver {
    * Extract parameters from request body schema
    */
   private extractBodyParameters(
-    schema: SchemaObject | ReferenceObject,
+    schema: SchemaOrBoolean | ReferenceObject,
     parametersByName: Map<string, ParameterInfo[]>,
     required: boolean,
     contentType: string,
@@ -455,7 +457,7 @@ interface ParameterInfo {
   name: string;
   location: ParameterLocation;
   required: boolean;
-  schema: SchemaObject | ReferenceObject | JsonSchema;
+  schema: SchemaOrBoolean | ReferenceObject | JsonSchema;
   description?: string;
   style?: string;
   explode?: boolean;

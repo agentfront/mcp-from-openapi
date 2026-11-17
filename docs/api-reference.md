@@ -143,8 +143,10 @@ import { Validator } from "mcp-from-openapi";
 #### Methods
 
 ```typescript
-async validate(document: OpenAPIDocument): Promise<ValidationResult>
+async validate(document: object): Promise<ValidationResult>
 ```
+
+Accepts any object, like the generator's factories.
 
 ---
 
@@ -223,7 +225,7 @@ applyOverlay<T extends object>(document: T, overlay: OverlayDocument): T
 Agent-readiness lint with severity-ranked findings and fix hints; `generator.lint()` runs it on the overlay-patched, dereferenced document. See [Curation](./curation.md).
 
 ```typescript
-lintDocument(document: OpenAPIDocument): LintResult
+lintDocument(document: object): LintResult
 ```
 
 ### toSdkTool
@@ -269,6 +271,12 @@ if (isReferenceObject(schema)) {
 ### toJsonSchema
 
 Converts OpenAPI schema objects to JSON Schema format. Handles OpenAPI 3.0's boolean `exclusiveMinimum`/`exclusiveMaximum` conversion to numeric format.
+
+```typescript
+toJsonSchema(schema: object | boolean, options?: SchemaConversionOptions): JsonSchema
+```
+
+The input is any object (a Schema or Reference Object of any OpenAPI version, or a schema-shaped object you built) or a boolean schema. A boolean schema converts to `{}`; for `false` that is a known gap, as the result accepts everything.
 
 ```typescript
 import { toJsonSchema } from "mcp-from-openapi";
@@ -650,6 +658,7 @@ interface NamingStrategy {
     path: string,
     method: HTTPMethod,
     operationId?: string,
+    operation?: OperationObject,
   ) => string;
 }
 ```
@@ -720,7 +729,7 @@ See [Error Handling](./error-handling.md) for usage patterns.
 
 ```typescript
 type OpenAPIVersion = "3.0.0" | "3.0.1" | "3.0.2" | "3.0.3" | "3.1.0";
-type OpenAPIDocument = OpenAPIV3.Document | OpenAPIV3_1.Document;
+type OpenAPIDocument = OAS30.OpenAPIObject | OAS31.OpenAPIObject | OAS32.OpenAPIObject;
 type HTTPMethod =
   "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "trace";
 type ParameterLocation = "path" | "query" | "header" | "cookie" | "body";
@@ -729,11 +738,46 @@ type AuthType = "apiKey" | "http" | "oauth2" | "openIdConnect" | "mutualTLS";
 
 ---
 
-## Re-exported OpenAPI Types
+## OpenAPI Object Types
 
-These types are re-exported from the `openapi-types` package for convenience:
+The library ships its own types for OpenAPI 3.0, 3.1 and 3.2 documents, written from the OpenAPI Specification text and the OpenAPI Initiative's JSON Schemas. It installs no third-party OpenAPI types package.
 
-`OperationObject`, `ParameterObject`, `RequestBodyObject`, `ResponseObject`, `ResponsesObject`, `MediaTypeObject`, `HeaderObject`, `ExampleObject`, `PathItemObject`, `PathsObject`, `ServerObject`, `SecuritySchemeObject`, `ReferenceObject`, `TagObject`, `ExternalDocumentationObject`, `ServerVariableObject`, `EncodingObject`, `SecurityRequirementObject`, `SchemaObject`
+### Per-version namespaces
+
+`OAS30`, `OAS31` and `OAS32` hold each version's objects under the specification's own names: `OpenAPIObject`, `InfoObject`, `ContactObject`, `LicenseObject`, `ServerObject`, `ServerVariableObject`, `ComponentsObject`, `PathsObject`, `PathItemObject`, `OperationObject`, `ExternalDocumentationObject`, `ParameterObject`, `RequestBodyObject`, `MediaTypeObject`, `EncodingObject`, `ResponsesObject`, `ResponseObject`, `CallbackObject`, `ExampleObject`, `LinkObject`, `HeaderObject`, `TagObject`, `ReferenceObject`, `SchemaObject`, `DiscriminatorObject`, `XMLObject`, `SecuritySchemeObject`, `OAuthFlowsObject`, `OAuthFlowObject`, `SecurityRequirementObject`. `OAS31` and `OAS32` also export `SchemaOrBoolean`.
+
+```typescript
+import type { OAS31, OAS32 } from "mcp-from-openapi";
+
+function streamItemSchema(mediaType: OAS32.MediaTypeObject): OAS32.SchemaOrBoolean | undefined {
+  return mediaType.itemSchema; // new in 3.2
+}
+```
+
+### Cross-version types
+
+Each of these is the union of the 3.0, 3.1 and 3.2 objects of the same name, so it accepts an object of any supported version:
+
+`OpenAPIDocument`, `OperationObject`, `ParameterObject`, `RequestBodyObject`, `ResponseObject`, `ResponsesObject`, `MediaTypeObject`, `HeaderObject`, `ExampleObject`, `PathItemObject`, `PathsObject`, `ServerObject`, `SecuritySchemeObject`, `ReferenceObject`, `TagObject`, `ExternalDocumentationObject`, `ServerVariableObject`, `EncodingObject`, `SecurityRequirementObject`, `SchemaObject`
+
+Reading a field that only some versions define (such as 3.2's `query` operation) needs narrowing to that version's type.
+
+`SchemaObject` is always an object. From 3.1 on a schema may also be `true` (anything is valid) or `false` (nothing is valid): `SchemaOrBoolean` is `SchemaObject | boolean`, and in `OAS31` and `OAS32` every position that allows a boolean schema (a parameter's `schema`, `items`, `properties` values, ...) is typed with that version's `SchemaOrBoolean`.
+
+### How the types are shaped
+
+- **Reader types.** They describe documents the library reads. Fields the specification enumerates (`in`, `style`, a security scheme's `type`, ...) are open strings: the known values autocomplete and any other string is still accepted. Rejecting an invalid document is the validator's job.
+- **No `x-` fields.** Specification extensions are not declared on any object, so documents typed with your own interfaces stay assignable. Read an extension through `WithExtensions`, which views an object together with its `x-` fields; each one is `unknown` until checked. `ExtensionName` is the type of such a field name (`` `x-${string}` ``).
+
+```typescript
+import type { OperationObject, WithExtensions } from "mcp-from-openapi";
+
+function isInternal(operation: OperationObject): boolean {
+  return (operation as WithExtensions<OperationObject>)["x-internal"] === true;
+}
+```
+- **A map lookup may find nothing.** The values of every map (paths, responses, `content`, component maps, security requirements, schema `properties`, ...) may be `undefined`: a key may be missing, and a document imported as a JSON module, where sibling maps have different keys, type-checks as is.
+- **Free-form values are `any`.** `example`, `default`, `enum` members, `const` and similar values the specification leaves free-form are typed `any`, so existing code that reads them keeps compiling; the document decides what they hold, so check them before relying on their shape.
 
 ---
 

@@ -25,7 +25,6 @@ import type {
   JsonSchema,
   LoadOptions,
   McpOpenAPITool,
-  OpenAPIDocument,
   SchemaObject,
   SecurityRequirement,
 } from './types';
@@ -80,7 +79,7 @@ export interface FromArazzoOptions {
    * generator. Source URLs are NEVER fetched — the caller supplies resolved
    * documents for every source the workflows use.
    */
-  sources: Record<string, OpenAPIDocument | OpenAPIToolGenerator>;
+  sources: Record<string, object | OpenAPIToolGenerator>;
 
   /**
    * Schema-affecting options, applied to the per-step embedded schemas AND
@@ -478,7 +477,7 @@ async function prepareSources(doc: ArazzoDocument, options: FromArazzoOptions): 
     if (source instanceof OpenAPIToolGenerator) {
       generators.set(name, source);
     } else {
-      generators.set(name, await OpenAPIToolGenerator.fromJSON(source as object, options.loadOptions));
+      generators.set(name, await OpenAPIToolGenerator.fromJSON(source, options.loadOptions));
     }
   }
   for (const [name, source] of declared) {

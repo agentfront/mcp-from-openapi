@@ -1,4 +1,5 @@
-import type { FrontMcpExtensionData, HTTPMethod, OperationObject, ToolAnnotations, ToolIcon } from './types';
+import type { FrontMcpExtensionData, HTTPMethod, ToolAnnotations, ToolIcon } from './types';
+import type { WithExtensions } from './spec';
 import { SchemaError } from './errors';
 import { copyJsonValue, type CopyBudget } from './json-copy';
 import { resolveSchemaLimits } from './schema-builder';
@@ -164,7 +165,7 @@ function sanitizeIcons(value: unknown): ToolIcon[] | undefined {
 
 /** Read the `x-mcp` extension off any spec node (document, path item, operation). */
 function readXMcp(node: object): unknown {
-  return (node as { 'x-mcp'?: unknown })['x-mcp'];
+  return (node as WithExtensions)['x-mcp'];
 }
 
 /** Parse an `x-mcp` value (boolean shorthand or object form) into enabled/undefined. */
@@ -186,7 +187,7 @@ function parseXMcpEnabled(ext: unknown): boolean | undefined {
  * whole extension family participates (`x-speakeasy-mcp: { disabled }` too),
  * with the family's own precedence.
  */
-export function resolveExtensionEnabled(document: object, pathItem: object, operation: OperationObject): boolean {
+export function resolveExtensionEnabled(document: object, pathItem: object, operation: object): boolean {
   let enabled = true;
 
   const rootSetting = parseXMcpEnabled(readXMcp(document));
@@ -215,7 +216,7 @@ export function resolveExtensionEnabled(document: object, pathItem: object, oper
  * nests more than 1000 levels deep.
  */
 export function extractExtensionOverrides(
-  operation: OperationObject,
+  operation: object,
   options: ExtensionOverridesOptions = {},
 ): ExtensionToolOverrides {
   const { maxNodes } = resolveSchemaLimits({ maxSchemaNodes: options.maxMetaNodes });
@@ -237,14 +238,14 @@ export function extractExtensionOverrides(
  * spec — for callers that read just `disabled` or `annotations` (operation
  * filters): oversized meta then fails only that tool's generation.
  */
-export function extractExtensionSettings(operation: OperationObject): ExtensionToolOverrides {
+export function extractExtensionSettings(operation: object): ExtensionToolOverrides {
   return readExtensionOverrides(operation, null);
 }
 
-function readExtensionOverrides(operation: OperationObject, metaBudget: CopyBudget | null): ExtensionToolOverrides {
+function readExtensionOverrides(operation: object, metaBudget: CopyBudget | null): ExtensionToolOverrides {
   const meta = (value: unknown) => (metaBudget ? sanitizeMeta(value, metaBudget) : undefined);
   const icons = (value: unknown) => (metaBudget ? sanitizeIcons(value) : undefined);
-  const op = operation as Record<string, unknown>;
+  const op = operation as WithExtensions;
   let result: ExtensionToolOverrides = {};
 
   // 1. x-speakeasy-mcp (lowest precedence)

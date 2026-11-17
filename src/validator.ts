@@ -5,43 +5,46 @@ import type { OpenAPIDocument, ValidationResult, ValidationErrorDetail, Validati
  */
 export class Validator {
   /**
-   * Validate an OpenAPI document
+   * Validate an OpenAPI document. Accepts any object, like the generator's
+   * factories.
    */
-  async validate(document: OpenAPIDocument): Promise<ValidationResult> {
+  async validate(document: object): Promise<ValidationResult> {
+    // Any object is accepted; read it as an OpenAPI document
+    const doc = document as OpenAPIDocument;
     const errors: ValidationErrorDetail[] = [];
     const warnings: ValidationWarning[] = [];
 
     // Check OpenAPI version
-    if (!document.openapi) {
+    if (!doc.openapi) {
       errors.push({
         message: 'Missing required field: openapi',
         path: '/openapi',
         code: 'MISSING_OPENAPI_VERSION',
       });
-    } else if (!this.isValidOpenAPIVersion(document.openapi)) {
+    } else if (!this.isValidOpenAPIVersion(doc.openapi)) {
       errors.push({
-        message: `Unsupported OpenAPI version: ${document.openapi}. Expected 3.0.x or 3.1.x`,
+        message: `Unsupported OpenAPI version: ${doc.openapi}. Expected 3.0.x or 3.1.x`,
         path: '/openapi',
         code: 'INVALID_OPENAPI_VERSION',
       });
     }
 
     // Check info
-    if (!document.info) {
+    if (!doc.info) {
       errors.push({
         message: 'Missing required field: info',
         path: '/info',
         code: 'MISSING_INFO',
       });
     } else {
-      if (!document.info.title) {
+      if (!doc.info.title) {
         errors.push({
           message: 'Missing required field: info.title',
           path: '/info/title',
           code: 'MISSING_TITLE',
         });
       }
-      if (!document.info.version) {
+      if (!doc.info.version) {
         errors.push({
           message: 'Missing required field: info.version',
           path: '/info/version',
@@ -51,20 +54,19 @@ export class Validator {
     }
 
     // Check paths
-    if (!document.paths || Object.keys(document.paths).length === 0) {
+    if (!doc.paths || Object.keys(doc.paths).length === 0) {
       warnings.push({
         message: 'No paths defined in OpenAPI document',
         path: '/paths',
         code: 'NO_PATHS',
       });
     } else {
-      const componentParameters =
-        (document as { components?: { parameters?: Record<string, unknown> } }).components?.parameters ?? {};
-      this.validatePaths(document.paths, componentParameters, errors, warnings);
+      const componentParameters = doc.components?.parameters ?? {};
+      this.validatePaths(doc.paths, componentParameters, errors, warnings);
     }
 
     // Check servers
-    if (!document.servers || document.servers.length === 0) {
+    if (!doc.servers || doc.servers.length === 0) {
       warnings.push({
         message: 'No servers defined. You may need to provide a baseUrl option.',
         path: '/servers',
@@ -73,7 +75,7 @@ export class Validator {
     }
 
     // Check security schemes
-    if (document.security && !document.components?.securitySchemes) {
+    if (doc.security && !doc.components?.securitySchemes) {
       warnings.push({
         message: 'Security requirements defined but no security schemes found',
         path: '/security',

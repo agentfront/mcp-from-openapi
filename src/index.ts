@@ -137,7 +137,7 @@ export type {
   ParameterLocation,
   AuthType,
 
-  // Re-exported OpenAPI types (from openapi-types package)
+  // OpenAPI object types: each a union of the 3.0, 3.1 and 3.2 objects
   OperationObject,
   ParameterObject,
   RequestBodyObject,
@@ -157,12 +157,18 @@ export type {
   EncodingObject,
   SecurityRequirementObject,
   SchemaObject,
+  SchemaOrBoolean,
 
   // Validation types
   ValidationResult,
   ValidationErrorDetail,
   ValidationWarning,
 } from './types';
+
+// OpenAPI object types per specification version, under the spec's own names
+// (`OAS31.OperationObject`, `OAS32.MediaTypeObject`, ...), and the view that
+// reads a spec object's `x-` extensions
+export type { OAS30, OAS31, OAS32, WithExtensions, ExtensionName } from './spec';
 
 // Security resolver types
 export type {
