@@ -42,10 +42,6 @@ module.exports = {
     '!src/arazzo-types.ts',
     // Types-only: the OpenAPI object types
     '!src/spec/types/**',
-    // The spec layer's barrel, excluded like src/index.ts. Today it re-exports
-    // only types, so it is never loaded and V8 would report all its lines as
-    // uncovered (0%), failing the gate
-    '!src/spec/index.ts',
     '!src/**/*.spec.ts',
     '!src/**/*.test.ts',
     '!src/**/__tests__/**',
