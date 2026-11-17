@@ -16,7 +16,7 @@ import type {
   SecuritySchemeObject,
   SchemaConversionOptions,
 } from './types';
-import { toJsonSchema, isReferenceObject } from './types';
+import { toJsonSchema, isReferenceObject, isPresentSchema } from './types';
 import { diagnosticKey, isSpecObject, ownProperty } from './spec';
 import { GenerationError } from './errors';
 import { classifyMediaType } from './media-type';
@@ -371,13 +371,14 @@ export class ParameterResolver {
       const mediaType = requestBody.content[contentType] as MediaTypeObject | undefined;
 
       // A media type with only `itemSchema` (a streamed body) is not read; the
-      // generator records UNSUPPORTED_STREAMING_REQUEST_BODY for it
-      if (mediaType?.schema) {
+      // generator records UNSUPPORTED_STREAMING_REQUEST_BODY for it. A boolean
+      // schema is read: `true` is any body, `false` none
+      if (mediaType && isPresentSchema(mediaType.schema)) {
         const mediaExamples = this.includeExamples
           ? collectExampleValues(mediaType.example, mediaType.examples)
           : undefined;
         /* c8 ignore next -- both sides of ?? tested: true by required body tests, false by optional body tests */
-        this.extractBodyParameters(mediaType.schema, parametersByName, requestBody.required ?? false, contentType, mediaExamples, mediaType.encoding);
+        this.extractBodyParameters(mediaType.schema!, parametersByName, requestBody.required ?? false, contentType, mediaExamples, mediaType.encoding);
       }
     }
 
@@ -490,7 +491,9 @@ export class ParameterResolver {
     encoding?: Record<string, any>,
     prefix = '',
   ): void {
-    if (!schema || typeof schema !== 'object') return;
+    // A boolean schema is a whole body: `true` any value (`{}`), `false` none
+    // (`{ not: {} }`, so a required one cannot be satisfied, as the document says)
+    if (typeof schema !== 'boolean' && (!schema || typeof schema !== 'object')) return;
 
     // Convert to JsonSchema for processing
     const jsonSchema = toJsonSchema(schema, this.schemaConversion);
@@ -507,6 +510,9 @@ export class ParameterResolver {
         const fullName = prefix ? `${prefix}.${propName}` : propName;
         const isRequired = required && requiredFields.has(propName);
 
+        // Always an object: conversion turns every subschema into one (a
+        // boolean `false` property into `{ not: {} }`, which keeps it as an
+        // input that accepts no value)
         if (typeof propSchema === 'object') {
           const propEncoding = encoding?.[propName];
           // Distribute media-type-level whole-body examples onto the
@@ -885,7 +891,7 @@ function flattenObjectBody(schema: JsonSchema): FlattenedObjectBody | undefined 
  * and `contentMediaType` is an embedded *string* payload, not a file part.
  */
 function isBinarySchema(schema: JsonSchema): boolean {
-  /* c8 ignore next -- defensive: callers guard with `typeof === 'object'` before invoking */
+  /* c8 ignore next -- defensive: callers pass toJsonSchema results, which are always objects */
   if (!schema || typeof schema !== 'object') return false;
   const record = schema as Record<string, unknown>;
   if (record['format'] === 'binary') return true;

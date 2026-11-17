@@ -15,6 +15,8 @@ import {
   pointerTargetProblem,
   readSelfField,
   redactUserInfo,
+  refParserScopesIds,
+  userInfoOf,
   resolveDocumentBase,
   resolveSecuritySchemeUri,
   retrievalUriOf,
@@ -125,7 +127,16 @@ describe('parseDocumentUri', () => {
   });
 
   it('never quotes user information, in the message or the context', () => {
-    for (const value of ['https://admin:hunter2@example.com/x', 'https://admin:hunter2@example.com/x#frag', 'ftp://admin:hunter2@h/']) {
+    for (const value of [
+      'https://admin:hunter2@example.com/x',
+      'https://admin:hunter2@example.com/x#frag',
+      'ftp://admin:hunter2@h/',
+      // Malformed: refused for another reason first, still never quoted with its credential
+      ' https://admin:hunter2@example.com/spec.yaml',
+      'https:admin:hunter2@example.com/spec.yaml',
+      'https:\\\\admin:hunter2@example.com\\spec.yaml',
+      'https://admin:hunter 2@example.com/spec.yaml',
+    ]) {
       try {
         parseDocumentUri(value);
         throw new Error('expected a LoadError');
@@ -147,8 +158,53 @@ describe('redactUserInfo', () => {
     ['https://example.com/a@b', 'https://example.com/a@b'],
     ['https://example.com/a?x=@', 'https://example.com/a?x=@'],
     ['not a uri', 'not a uri'],
-  ])('redacts %s', (value, shown) => {
+    // Malformed values a URL parser still reads as user information
+    [' https://admin:secret@example.com/spec.yaml', ' https://***@example.com/spec.yaml'],
+    // Tabs and line breaks are removed, as a URL parser does, and leading controls skipped
+    ['\thttps://admin:secret@example.com', 'https://***@example.com'],
+    ['https:/\t/u:p@h/x', 'https://***@h/x'],
+    ['https:\n//u:p@h', 'https://***@h'],
+    ['ht\rtps://u:p@h', 'https://***@h'],
+    ['\u0001https://u:p@h', '\u0001https://***@h'],
+    // A special scheme reads an authority without `//`; inside a path too (a reference resolved as a local path)
+    ['https:user:secret@host/pet.json', 'https:***@host/pet.json'],
+    ['HTTPS:u:p@h', 'HTTPS:***@h'],
+    ['/srv/specs/https:user:secret@host/pet.json', '/srv/specs/https:***@host/pet.json'],
+    ['file:///srv/ws:u:p@h/x?q@r', 'file:///srv/ws:***@h/x?q@r'],
+    // Another scheme only with `//`
+    ['foo://u:p@h/x', 'foo://***@h/x'],
+    ['https:admin:secret@example.com/a', 'https:***@example.com/a'],
+    ['https:\\\\admin:secret@example.com\\a', 'https:\\\\***@example.com\\a'],
+    ['https://admin:se cret@exa mple.com/a', 'https://***@exa mple.com/a'],
+    ['https://a@b:secret@example.com#x@y', 'https://***@example.com#x@y'],
+    // Not user information for a URL parser: an opaque URI, or a file name with a scheme-like prefix
+    ['admin:secret@example.com', 'admin:secret@example.com'],
+    ['mailto:a@b', 'mailto:a@b'],
+    ['a:b@c.yaml', 'a:b@c.yaml'],
+    ['schemas/a:b@c.yaml', 'schemas/a:b@c.yaml'],
+    ['a\nb@c', 'a\nb@c'],
+    // A relative reference has no authority: an `@` in its path is not user information
+    ['pet@v2.yaml', 'pet@v2.yaml'],
+    ['@scope/schemas.yaml#/Pet', '@scope/schemas.yaml#/Pet'],
+    ['./a@b/c.yaml', './a@b/c.yaml'],
+    ['/a@b', '/a@b'],
+  ])('redacts %p', (value, shown) => {
     expect(redactUserInfo(value)).toBe(shown);
+  });
+});
+
+describe('userInfoOf', () => {
+  it.each<[string, string[]]>([
+    ['https://user:secret@example.com/a', ['user:secret']],
+    ['https:user:secret@host/pet.json', ['user:secret']],
+    ['https:/\t/u:p@h/x', ['u:p']],
+    ['/srv/https:u:p@h/x', ['u:p']],
+    ['https://a@b/c/http:d@e/f', ['a', 'd']],
+    ['https://@h', []],
+    ['pet@v2.yaml', []],
+    ['a:b@c.yaml', []],
+  ])('finds the user information of %p', (text, parts) => {
+    expect(userInfoOf(text)).toEqual(parts);
   });
 });
 
@@ -205,6 +261,9 @@ describe('readSelfField', () => {
     ['https://example.com:99999/', 'must be a URI reference (RFC 3986), found "https://example.com:99999/"'],
     ['https://example.com/api#/info', 'must not contain a fragment, found "https://example.com/api#/info"'],
     ['#', 'must not contain a fragment, found "#"'],
+    // User information is never quoted, even in a value that is refused for another reason
+    ['https://admin:secret@example.com/a b', 'must be a URI reference (RFC 3986), found "https://***@example.com/a b"'],
+    ['https://admin:secret@example.com/api#x', 'must not contain a fragment, found "https://***@example.com/api#x"'],
   ])('reports %p as INVALID_SELF', (value, problem) => {
     expect(readSelfField({ $self: value }, V32)).toEqual({
       kind: 'invalid',
@@ -301,6 +360,11 @@ describe('resolveDocumentBase', () => {
         },
       ],
     });
+    // A network-path reference is relative too; its user information is not quoted
+    const networkPath = resolve('//admin:hunter2@example.com/api').diagnostics[0];
+    expect(networkPath.code).toBe(DIAGNOSTIC_CODES.UNRESOLVABLE_SELF);
+    expect(networkPath.message).toContain('("//***@example.com/api")');
+    expect(networkPath.message).not.toContain('hunter2');
   });
 
   it('refuses a $self with user information, without quoting it', () => {
@@ -498,13 +562,20 @@ describe('findSelfReferences', () => {
     expect(scan('', nothing)).toEqual([]);
   });
 
-  it('finds them in document order, with where each is, and skips anything under a schema with its own $id', () => {
+  it('finds them in document order, with where each is, and only absolute ones under a schema with its own $id', () => {
     const document = {
       paths: { '/pets': { $ref: 'https://example.com/api/openapi.yaml#/components/pathItems/Pets' } },
       components: {
         schemas: {
           Pet: { properties: { tags: { items: [{ $ref: 'openapi.yaml#/components/schemas/Tag' }] } } },
-          Scoped: { $id: 'https://example.com/schemas/s', properties: { a: { $ref: 'openapi.yaml#/x' } } },
+          Scoped: {
+            $id: 'https://example.com/schemas/s',
+            properties: {
+              a: { $ref: 'openapi.yaml#/x' },
+              b: { $ref: 'https://example.com/api/openapi.yaml#/components/schemas/B' },
+              c: { $ref: '//example.com/api/openapi.yaml#/c' },
+            },
+          },
           Unscoped: { $id: '', $ref: 'openapi.yaml#/y' },
           Other: { $ref: 'other.yaml#/Other' },
           Inherited: Object.create({ $ref: 'openapi.yaml#/z' }),
@@ -513,10 +584,16 @@ describe('findSelfReferences', () => {
       },
     };
     const { references } = findSelfReferences(document, base);
-    expect(references.map((r) => [r.ref, r.location()])).toEqual([
-      ['https://example.com/api/openapi.yaml#/components/pathItems/Pets', ['paths', '/pets']],
-      ['openapi.yaml#/components/schemas/Tag', ['components', 'schemas', 'Pet', 'properties', 'tags', 'items', '0']],
-      ['openapi.yaml#/y', ['components', 'schemas', 'Unscoped']],
+    expect(references.map((r) => [r.ref, r.location(), r.scoped])).toEqual([
+      ['https://example.com/api/openapi.yaml#/components/pathItems/Pets', ['paths', '/pets'], false],
+      ['openapi.yaml#/components/schemas/Tag', ['components', 'schemas', 'Pet', 'properties', 'tags', 'items', '0'], false],
+      // An absolute reference names the document whatever the $id; a relative one (even network-path) is the $id's
+      [
+        'https://example.com/api/openapi.yaml#/components/schemas/B',
+        ['components', 'schemas', 'Scoped', 'properties', 'b'],
+        true,
+      ],
+      ['openapi.yaml#/y', ['components', 'schemas', 'Unscoped'], false],
     ]);
     // Nothing is changed
     expect(document.paths['/pets'].$ref).toBe('https://example.com/api/openapi.yaml#/components/pathItems/Pets');
@@ -550,6 +627,26 @@ describe('findSelfReferences', () => {
     const [deep] = findSelfReferences(node, base).references;
     expect(deep.tokens).toEqual(['deep']);
     expect(deep.location()).toHaveLength(20000);
+  });
+});
+
+describe('refParserScopesIds', () => {
+  it.each<[string, Record<string, unknown>, boolean]>([
+    ['OpenAPI 3.1', { openapi: '3.1.0' }, true],
+    ['OpenAPI 3.1 without a patch', { openapi: '3.1' }, true],
+    ['OpenAPI 3.0', { openapi: '3.0.3' }, false],
+    ['OpenAPI 3.2', { openapi: '3.2.0' }, false],
+    ['OpenAPI 3.10', { openapi: '3.10.0' }, false],
+    ['Swagger 2.0', { swagger: '2.0' }, false],
+    ['a root $id', { openapi: '3.0.3', $id: 'https://example.com/x' }, true],
+    ['an empty root $id', { openapi: '3.0.3', $id: '' }, false],
+    ['a draft-04 id', { $schema: 'http://json-schema.org/draft-04/schema#', id: 'https://example.com/x' }, true],
+    ['a 2020-12 dialect', { openapi: '3.2.0', $schema: 'https://json-schema.org/draft/2020-12/schema' }, true],
+    ['the OpenAPI 3.1 dialect', { $schema: 'https://spec.openapis.org/oas/3.1/dialect/base' }, true],
+    ['another $schema', { openapi: '3.0.3', $schema: 'https://example.com/mine' }, false],
+    ['not an object', 'x' as unknown as Record<string, unknown>, false],
+  ])('%s: %p', (_label, document, expected) => {
+    expect(refParserScopesIds(document)).toBe(expected);
   });
 });
 

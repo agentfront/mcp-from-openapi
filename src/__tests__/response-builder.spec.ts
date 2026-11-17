@@ -743,10 +743,126 @@ describe('ResponseBuilder: OpenAPI 3.2 responses (issue #55)', () => {
     it('accepts a boolean item schema and applies the conversion limits', () => {
       const boolean = { 200: { description: 'x', content: { 'multipart/mixed': { itemSchema: true } } } } as any;
       expect(new ResponseBuilder().buildStream(boolean)?.itemSchema).toEqual({});
+      // `false`: no item is valid
+      const never = { 200: { description: 'x', content: { 'multipart/mixed': { itemSchema: false } } } } as any;
+      expect(new ResponseBuilder().buildStream(never)?.itemSchema).toEqual({ not: {} });
 
       const deep = { 200: sse({ itemSchema: { type: 'object', properties: { a: { type: 'object', properties: { b: { type: 'string' } } } } } }) } as any;
       expect((new ResponseBuilder({}, { maxDepth: 1 }).buildStream(deep)?.itemSchema as any).properties.a.properties.b).toEqual({});
       expect(() => new ResponseBuilder({}, { maxNodes: 2 }).buildStream(deep)).toThrow(/maxSchemaNodes/);
     });
+  });
+});
+
+describe('ResponseBuilder: boolean response schemas', () => {
+  const json = (schema: unknown, description = 'x') => ({ description, content: { 'application/json': { schema } } });
+
+  it('builds { not: {} } for a response whose schema is false, and {} for true', () => {
+    expect(new ResponseBuilder().build({ 200: json(false, 'never') } as any)).toEqual({
+      not: {},
+      'x-status-code': 200,
+      description: 'never',
+      'x-content-type': 'application/json',
+    });
+    expect(new ResponseBuilder().build({ 200: json(true, 'any') } as any)).toEqual({
+      'x-status-code': 200,
+      description: 'any',
+      'x-content-type': 'application/json',
+    });
+  });
+
+  it('keeps a false response among the candidates, so it is preferred like any other', () => {
+    const responses = { 200: json(false), 404: json({ type: 'object' }) } as any;
+    expect(new ResponseBuilder({ includeAllResponses: false }).build(responses)).toMatchObject({
+      not: {},
+      'x-status-code': 200,
+    });
+    const union = new ResponseBuilder().build(responses) as any;
+    expect(union.oneOf.map((variant: any) => variant['x-status-code'])).toEqual([200, 404]);
+    expect(union.oneOf[0].not).toEqual({});
+  });
+});
+
+describe('ResponseBuilder: response status ranges', () => {
+  const json = (type: string) => ({ description: type, content: { 'application/json': { schema: { type } } } });
+  const status = (builder: ResponseBuilder, responses: Record<string, unknown>) =>
+    (builder.build(responses as any) as any)?.['x-status-code'];
+  const preferred = (responses: Record<string, unknown>, preferredStatusCodes?: number[]) =>
+    status(new ResponseBuilder({ includeAllResponses: false, preferredStatusCodes }), responses);
+
+  it('keeps a range key as an upper-cased string, in any case it is written', () => {
+    for (const key of ['2XX', '2xx', '2xX', '2Xx']) expect(status(new ResponseBuilder(), { [key]: json('string') })).toBe('2XX');
+    for (const digit of ['1', '3', '4', '5']) {
+      expect(status(new ResponseBuilder(), { [`${digit}XX`]: json('string') })).toBe(`${digit}XX`);
+    }
+    const union = new ResponseBuilder().build({ 200: json('object'), '4XX': json('string'), default: json('number') } as any) as any;
+    expect(union.oneOf.map((variant: any) => variant['x-status-code'])).toEqual([200, '4XX']);
+  });
+
+  it('reads any other key as it always has', () => {
+    // Not range keys: parseInt reads what it can, and a key without a number is skipped
+    expect(status(new ResponseBuilder(), { '6XX': json('string') })).toBe(6);
+    expect(status(new ResponseBuilder(), { '0XX': json('string') })).toBe(0);
+    expect(status(new ResponseBuilder(), { '20X': json('string') })).toBe(20);
+    expect(status(new ResponseBuilder(), { '2XXX': json('string') })).toBe(2);
+    expect(new ResponseBuilder().build({ XX: json('string') } as any)).toBeUndefined();
+  });
+
+  it('prefers an explicit code over the range of its class', () => {
+    expect(preferred({ '2XX': json('string'), 200: json('object') })).toBe(200);
+    // A preferred explicit code wins even over a range covering an earlier preference
+    expect(preferred({ '2XX': json('string'), 201: json('object') })).toBe(201);
+    // Without preferences, an explicit 2xx before the 2XX range, an explicit 3xx before 3XX
+    expect(preferred({ '2XX': json('string'), 299: json('object') }, [])).toBe(299);
+    expect(preferred({ '3XX': json('string'), 302: json('object'), '4XX': json('number') }, [])).toBe(302);
+  });
+
+  it('lets a range stand for a preferred code when no explicit code matches', () => {
+    // A success range is preferred over an explicit error
+    expect(preferred({ 500: json('object'), '2XX': json('string') })).toBe('2XX');
+    expect(preferred({ 302: json('object'), '2XX': json('string') })).toBe('2XX');
+    // The range covering the earliest preference
+    expect(preferred({ '3XX': json('string'), '2XX': json('object') }, [301, 200])).toBe('3XX');
+    // A range with no preference is still a success, then a redirect
+    expect(preferred({ 404: json('object'), '3XX': json('string') }, [])).toBe('3XX');
+    expect(preferred({ '5XX': json('object'), '2XX': json('string') }, [])).toBe('2XX');
+    // Neither: the first
+    expect(preferred({ '5XX': json('object'), '4XX': json('string') })).toBe('5XX');
+    // A preference that is not a whole status code covers no range
+    expect(preferred({ '4XX': json('object'), '2XX': json('string') }, [200.5, 404])).toBe('4XX');
+  });
+
+  // The order, one rule per row: a preferred explicit code; any explicit 2xx;
+  // a range covering a preferred code, else 2XX; an explicit 3xx, else 3XX; the first
+  it.each<[string, Record<string, unknown>, number[] | undefined, number | string]>([
+    ['an explicit code wins over a range of its class that covers a preference', { 299: 0, '2XX': 0 }, undefined, 299],
+    ['the same, whatever the key order', { '2XX': 0, 299: 0 }, undefined, 299],
+    ['a preferred explicit code before any other explicit 2xx', { 299: 0, 201: 0, '2XX': 0 }, undefined, 201],
+    ['an explicit 2xx before a range covering a preferred error', { '4XX': 0, 250: 0 }, [404], 250],
+    ['the first explicit 2xx in key order (integer keys ascending)', { 299: 0, 250: 0, '2XX': 0 }, undefined, 250],
+    ['a range covering a preference when no explicit 2xx exists', { 302: 0, '2XX': 0 }, undefined, '2XX'],
+    ['a range covering the earliest preference', { '4XX': 0, '2XX': 0, 500: 0 }, [404, 200], '4XX'],
+    ['the 2XX range when no range covers a preference', { 302: 0, '2XX': 0 }, [404], '2XX'],
+    ['the 2XX range before an explicit redirect', { 301: 0, '2XX': 0 }, [], '2XX'],
+    ['an explicit redirect before the 3XX range', { '3XX': 0, 304: 0 }, [], 304],
+    ['the 3XX range when nothing else matches', { 500: 0, '3XX': 0 }, [], '3XX'],
+    ['the first candidate otherwise', { 503: 0, '4XX': 0 }, [], 503],
+  ])('selects %s', (_label, keys, preferredStatusCodes, expected) => {
+    const responses = Object.fromEntries(Object.keys(keys).map((key) => [key, json('object')]));
+    expect(preferred(responses, preferredStatusCodes)).toBe(expected);
+    // The streamed response is chosen by the same rules
+    const sse = { description: 's', content: { 'text/event-stream': { itemSchema: { type: 'string' } } } };
+    const streams = Object.fromEntries(Object.keys(keys).map((key) => [key, sse]));
+    expect(new ResponseBuilder({ preferredStatusCodes }).buildStream(streams as any)?.statusCode).toBe(expected);
+  });
+
+  it('selects and reports a streamed range response the same way', () => {
+    const sse = (type: string) => ({ description: type, content: { 'text/event-stream': { itemSchema: { type } } } });
+    expect(new ResponseBuilder().buildStream({ 500: sse('number'), '2xx': sse('string') } as any)).toEqual({
+      statusCode: '2XX',
+      contentType: 'text/event-stream',
+      itemSchema: { type: 'string' },
+    });
+    expect(new ResponseBuilder().buildStream({ '2XX': sse('number'), 200: sse('string') } as any)?.statusCode).toBe(200);
   });
 });

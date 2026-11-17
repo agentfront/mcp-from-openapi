@@ -865,3 +865,36 @@ describe('lintDocument on deeply nested schemas (issue #50)', () => {
     expect(findings.map((f) => f.code)).not.toContain('missing-request-example');
   });
 });
+
+describe('lintDocument on a Swagger 2.0 document', () => {
+  it('lints its OpenAPI 3.0 conversion, as generator.lint() does', async () => {
+    const swagger: any = {
+      swagger: '2.0',
+      info: { title: 'Pets', version: '1' },
+      host: 'api.example.com',
+      paths: {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            summary: 'List every pet of the store',
+            responses: { 200: { description: 'ok', schema: { type: 'array', items: { type: 'string' } } } },
+          },
+          post: {
+            operationId: 'createPet',
+            summary: 'Create a pet in the store',
+            parameters: [{ name: 'pet', in: 'body', schema: { type: 'object', properties: { name: { type: 'string' } } } }],
+            responses: { 201: { description: 'created' } },
+          },
+        },
+      },
+    };
+    const codes = lintDocument(swagger).findings.map((f) => [f.code, f.path]);
+    // The response schema and the request body are read from their 3.0 places
+    expect(codes).toEqual([
+      ['unpaginated-list', 'GET /pets'],
+      ['missing-request-example', 'POST /pets'],
+    ]);
+    const generator = await OpenAPIToolGenerator.fromJSON(swagger);
+    expect(await generator.lint()).toEqual(lintDocument(swagger));
+  });
+});

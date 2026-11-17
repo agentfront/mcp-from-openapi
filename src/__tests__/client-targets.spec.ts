@@ -750,3 +750,66 @@ describe('inlineLocalRefs stays bounded (issue #50)', () => {
     expect(result.items[0]).not.toBe(tuple);
   });
 });
+
+describe('schemas no value satisfies ({ not: {} }, a false in the document)', () => {
+  const NEVER = { not: {} };
+
+  it('requireAllProperties leaves an optional one out of a closed object, keeping the others required', () => {
+    const result: any = requireAllProperties({
+      type: 'object',
+      properties: { gone: { ...NEVER, description: 'd' }, alsoGone: { not: true }, name: { type: 'string' } },
+      additionalProperties: false,
+    } as any);
+    expect(result.properties).toEqual({ name: { type: ['string', 'null'] } });
+    expect(result.required).toEqual(['name']);
+  });
+
+  it('requireAllProperties keeps an optional one optional where leaving it out would allow it', () => {
+    for (const extra of [{}, { additionalProperties: { type: 'string' } }, { additionalProperties: false, patternProperties: { '^g': {} } }]) {
+      const result: any = requireAllProperties({
+        type: 'object',
+        properties: { gone: NEVER, name: { type: 'string' } },
+        ...extra,
+      } as any);
+      expect(result.properties.gone).toEqual(NEVER);
+      expect(result.required).toEqual(['name']);
+    }
+  });
+
+  it('requireAllProperties keeps a required one required: the document allows no such object', () => {
+    const result: any = requireAllProperties({
+      type: 'object',
+      properties: { gone: NEVER, name: { type: 'string' } },
+      required: ['gone'],
+      additionalProperties: false,
+    } as any);
+    expect(result.properties.gone).toEqual(NEVER);
+    expect(result.required).toEqual(['gone', 'name']);
+  });
+
+  it('collapseNestedUnions keeps the first variant that accepts a value and leaves the others out of the note', () => {
+    const result: any = collapseNestedUnions({
+      type: 'object',
+      properties: {
+        pick: { anyOf: [NEVER, { type: 'string' }, { not: true }, { type: 'integer' }] },
+        only: { oneOf: [NEVER, { type: 'boolean' }] },
+        none: { anyOf: [NEVER, { not: true }] },
+      },
+    } as any);
+    expect(result.properties.pick).toEqual({
+      type: 'string',
+      description: '1 alternative schema variant(s) omitted for client compatibility: type integer.',
+    });
+    expect(result.properties.only).toEqual({ type: 'boolean' });
+    // Every variant accepts nothing: the first is kept
+    expect(result.properties.none).toEqual(NEVER);
+  });
+
+  it('every target passes { not: {} } elsewhere through unchanged', () => {
+    const schema = { type: 'object', properties: { list: { type: 'array', items: NEVER } } } as any;
+    for (const target of ['claude', 'strict', 'gemini'] as const) {
+      expect((applyClientTarget(schema, target) as any).properties.list.items).toEqual(NEVER);
+    }
+    expect((applyClientTarget(schema, 'openai') as any).properties.list).toEqual({ type: ['array', 'null'], items: NEVER });
+  });
+});

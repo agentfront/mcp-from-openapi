@@ -1,5 +1,5 @@
 import type { OpenAPIDocument, ValidationResult, ValidationErrorDetail, ValidationWarning } from './types';
-import { DIAGNOSTIC_CODES, LEGACY_PATH_KEY_MAX_LENGTH, MAX_DIAGNOSTICS, isReferenceObject } from './types';
+import { DIAGNOSTIC_CODES, LEGACY_PATH_KEY_MAX_LENGTH, MAX_DIAGNOSTICS, isPresentSchema, isReferenceObject } from './types';
 import {
   analyzeParameters,
   describeContentWithoutSchema,
@@ -24,7 +24,11 @@ import {
   listOperations,
   listSkippedNewerOperations,
   ownProperty,
+  parameterNameNotStringDiagnostic,
+  readParameterName,
+  readSwagger2BasePath,
   resolveOperationLayout,
+  swagger2SkippedOperations,
   wireMethod,
   type OperationEntry,
   type OperationLayout,
@@ -154,11 +158,21 @@ interface ValidationContext {
   version: SpecVersionInfo;
   /** The declared version's profile; the latest one when the version is not usable. */
   profile: SpecProfile;
+  /** The document is Swagger 2.0, validated with the 2.0 rules. */
+  swagger: boolean;
   /** The operation fields read: the declared version's (`resolveOperationLayout`). */
   layout: OperationLayout;
+  /** The map local parameter references point into: `components.parameters` (2.0: `parameters`). */
   componentParameters: unknown;
+  /** A local reference to one of them: `#/components/parameters/<name>` (2.0: `#/parameters/<name>`). */
+  parameterRef: RegExp;
   errors: FindingList;
   warnings: FindingList;
+}
+
+/** `Swagger 2.0`, `OpenAPI 3.1`: the name of a family, for a message. */
+function specName(family: string): string {
+  return family === '2.0' ? 'Swagger 2.0' : `OpenAPI ${family}`;
 }
 
 function toFinding(diagnostic: SpecDiagnostic): ValidationWarning {
@@ -210,6 +224,8 @@ export function skippedOperationDiagnostics(
   version: SpecVersionInfo,
   pointer: string,
 ): SpecDiagnostic[] {
+  // Swagger 2.0: the fields 2.0 does not define (`trace` among them), as the converter reports them
+  if (version.family === '2.0') return swagger2SkippedOperations(pathItem, pointer);
   const found: SpecDiagnostic[] = [];
   for (const skipped of listSkippedNewerOperations(pathItem, layout, { pointer })) {
     // Every field a known layout leaves out is a feature (`queryMethod`, `additionalOperations`)
@@ -222,6 +238,17 @@ export function skippedOperationDiagnostics(
     });
   }
   return found;
+}
+
+/**
+ * `parameter` with a number or boolean `name` replaced by its text (see
+ * `readParameterName`), so it is merged and compared as generation reads
+ * it; any other value is returned as it is.
+ */
+export function withTextName(parameter: unknown): unknown {
+  if (!isSpecObject(parameter)) return parameter;
+  const name = readParameterName(parameter['name']);
+  return name.kind === 'coerced' ? { ...parameter, name: name.name } : parameter;
 }
 
 /** `"limit" (in: "query")`: a parameter in a message, its name and location bounded and escaped. */
@@ -328,11 +355,31 @@ export function duplicateParameterDiagnostic(
 /**
  * Validates OpenAPI documents with the rules of the version they declare.
  *
- * - The version comes from `detectSpecVersion`. OpenAPI 3.0, 3.1 and 3.2 are
- *   supported; a newer 3.x minor version is valid with a
+ * - The version comes from `detectSpecVersion`. Swagger 2.0 and OpenAPI 3.0,
+ *   3.1 and 3.2 are supported; a newer 3.x minor version is valid with a
  *   `NEWER_OPENAPI_VERSION` warning and checked with the latest rules.
- *   Anything else is an `INVALID_OPENAPI_VERSION` error (Swagger 2.0, another
- *   major, a malformed value) or `MISSING_OPENAPI_VERSION`.
+ *   Anything else is an `INVALID_OPENAPI_VERSION` error (another major or
+ *   minor, a malformed value) or `MISSING_OPENAPI_VERSION`.
+ * - Swagger 2.0 is validated as written, with its own rules (the generator
+ *   converts it to OpenAPI 3.0 afterwards): the seven methods of a 2.0 Path
+ *   Item (no `trace`, no `query`: each is a `FEATURE_NEWER_THAN_DECLARED_VERSION`
+ *   warning); locations `path`, `query`, `header`, `formData` and `body`
+ *   (`INVALID_PARAMETER_IN` for any other, `cookie` and `querystring`
+ *   included); `responses` required; a body parameter needs `schema` and any
+ *   other `type` (`MISSING_PARAMETER_SCHEMA`); per operation (path-level
+ *   parameters included) at most one body parameter
+ *   (`SWAGGER_MULTIPLE_BODY_PARAMETERS`) and none next to `formData` ones
+ *   (`SWAGGER_BODY_AND_FORM_DATA`), rules of the 2.0 text the official schema
+ *   cannot express; local parameter references are `#/parameters/<name>`;
+ *   `basePath` must start with `/` and be usable in a URL
+ *   (`INVALID_BASE_PATH`: no `{`, `}`, whitespace, `?`, `#`, backslash, `.`
+ *   or `..` segment; `readSwagger2BasePath`). `NO_SERVERS` warns about a
+ *   missing `host`, `NO_SECURITY_SCHEMES` about `security` without
+ *   `securityDefinitions`.
+ * - A parameter `name` that is a number or a boolean (YAML reads an unquoted
+ *   `2024` so) is read as its text, with a `PARAMETER_NAME_NOT_STRING`
+ *   warning, in every version; an absent, `null` or empty name is
+ *   `MISSING_PARAMETER_NAME`, an object or array `INVALID_PARAMETER_NAME`.
  * - Operations are those the declared version defines
  *   (`resolveOperationLayout`), exactly the ones the generator turns into
  *   tools: `query` and `additionalOperations` from 3.2 on. In an older
@@ -368,11 +415,14 @@ export class Validator {
     // Any object is accepted; read it as an OpenAPI document
     const doc = document as OpenAPIDocument;
     const version = detectSpecVersion(document);
+    const swagger = version.family === '2.0';
     const context: ValidationContext = {
       version,
       profile: getSpecProfile(version.family) ?? SPEC_PROFILES[LATEST_SPEC_FAMILY],
+      swagger,
       layout: resolveOperationLayout(version),
-      componentParameters: ownProperty(doc.components, 'parameters'),
+      componentParameters: swagger ? ownProperty(doc, 'parameters') : ownProperty(doc.components, 'parameters'),
+      parameterRef: swagger ? /^#\/parameters\/(.+)$/ : /^#\/components\/parameters\/(.+)$/,
       errors: new FindingList('errors'),
       warnings: new FindingList('warnings'),
     };
@@ -424,8 +474,36 @@ export class Validator {
       this.validatePaths(doc.paths, context);
     }
 
-    // Check servers
-    if (!doc.servers || doc.servers.length === 0) {
+    // Swagger 2.0 `basePath`: the official schema requires a leading "/"
+    // (#/properties/basePath/pattern), and a server URL cannot carry some paths
+    const basePathValue = ownProperty(doc, 'basePath');
+    if (swagger && basePathValue !== undefined) {
+      const basePath = readSwagger2BasePath(basePathValue);
+      if (basePath.kind !== 'usable') {
+        errors.push({
+          message:
+            basePath.kind === 'missing-slash'
+              ? `basePath must start with "/", found ${describeValue(basePathValue)}`
+              : `basePath cannot be used: ${basePath.problem}`,
+          path: '/basePath',
+          code: 'INVALID_BASE_PATH',
+        });
+      }
+    }
+
+    // Check servers. Swagger 2.0 has one, from `host`: without it the API is on the
+    // host serving the document, which a generator knows only from where it read it
+    if (swagger) {
+      if (ownProperty(doc, 'host') === undefined) {
+        warnings.push({
+          message:
+            'No host defined: the API is on the host serving the document, known only when it is loaded with ' +
+            'fromURL or LoadOptions.documentUri. You may need to provide a baseUrl option.',
+          path: '/host',
+          code: 'NO_SERVERS',
+        });
+      }
+    } else if (!doc.servers || doc.servers.length === 0) {
       warnings.push({
         message: 'No servers defined. You may need to provide a baseUrl option.',
         path: '/servers',
@@ -433,8 +511,9 @@ export class Validator {
       });
     }
 
-    // Check security schemes
-    if (doc.security && !doc.components?.securitySchemes) {
+    // Check security schemes (Swagger 2.0: `securityDefinitions`)
+    const schemes = swagger ? ownProperty(doc, 'securityDefinitions') : doc.components?.securitySchemes;
+    if (doc.security && !schemes) {
       warnings.push({
         message: 'Security requirements defined but no security schemes found',
         path: '/security',
@@ -450,16 +529,17 @@ export class Validator {
   }
 
   /**
-   * Resolve a local `#/components/parameters/<name>` reference (JSON Pointer
-   * tokens decoded). Returns undefined for external or dangling references.
+   * Resolve a local `#/components/parameters/<name>` reference (Swagger 2.0:
+   * `#/parameters/<name>`; JSON Pointer tokens decoded). Returns undefined for
+   * external or dangling references.
    */
-  private resolveParameterRef(param: any, componentParameters: unknown): any {
+  private resolveParameterRef(param: any, context: ValidationContext): any {
     if (!param || typeof param !== 'object' || !('$ref' in param)) return param;
-    const match = /^#\/components\/parameters\/(.+)$/.exec(String(param.$ref));
+    const match = context.parameterRef.exec(String(param.$ref));
     if (!match) return undefined;
     const name = match[1].replace(/~1/g, '/').replace(/~0/g, '~');
     // Own properties only: a name like `constructor` must not resolve through the prototype
-    return ownProperty(componentParameters, name);
+    return ownProperty(context.componentParameters, name);
   }
 
   /** Walker findings of one Path Item become errors or warnings, see `WALKER_ERROR_CODES`. */
@@ -516,16 +596,17 @@ export class Validator {
       if (pathLevelParameters.length > 0) {
         this.validateParameters(pathLevelParameters, `${legacyBase}/parameters`, pathLevelPointer, context);
       }
-      const resolvedPathLevel = pathLevelParameters.map((p: unknown) =>
-        this.resolveParameterRef(p, context.componentParameters),
-      );
-      // A path-level violation is reported once, here, not again for each operation
-      const pathLevelQuerystringValid = this.validateQuerystringUse(
-        effectiveParameters(resolvedPathLevel, []),
-        pathLevelPointer,
-        `Path ${messageText(path)}`,
-        context,
-      );
+      const resolvedPathLevel = pathLevelParameters.map((p: unknown) => withTextName(this.resolveParameterRef(p, context)));
+      // A path-level violation is reported once, here, not again for each operation. Swagger 2.0
+      // has no `in: querystring` (its body rules are checked per operation instead)
+      const pathLevelQuerystringValid =
+        context.swagger ||
+        this.validateQuerystringUse(
+          effectiveParameters(resolvedPathLevel, []),
+          pathLevelPointer,
+          `Path ${messageText(path)}`,
+          context,
+        );
 
       for (const entry of listed.operations) {
         this.validateOperation(entry, path, pathLevelParameters, resolvedPathLevel, pathLevelQuerystringValid, context);
@@ -589,10 +670,15 @@ export class Validator {
       this.validateParameters(operationParameters, `${basePath}/parameters`, appendPointer(pointer, 'parameters'), context);
     }
 
-    const resolvedOperationLevel = operationParameters.map((p) =>
-      this.resolveParameterRef(p, context.componentParameters),
-    );
-    if (pathLevelQuerystringValid) {
+    const resolvedOperationLevel = operationParameters.map((p) => withTextName(this.resolveParameterRef(p, context)));
+    if (context.swagger) {
+      this.validateBodyParameters(
+        effectiveParameters(resolvedPathLevel, resolvedOperationLevel),
+        appendPointer(pointer, 'parameters'),
+        `Operation ${label}`,
+        context,
+      );
+    } else if (pathLevelQuerystringValid) {
       this.validateQuerystringUse(
         effectiveParameters(resolvedPathLevel, resolvedOperationLevel),
         appendPointer(pointer, 'parameters'),
@@ -665,6 +751,71 @@ export class Validator {
   }
 
   /**
+   * Swagger 2.0: an `in: body` parameter needs a Schema Object in `schema`;
+   * any other needs `type` (2.0 schema #/definitions/bodyParameter/required,
+   * #/definitions/nonBodyParameter/required), and `schema` is not one of its
+   * fields. `MISSING_PARAMETER_SCHEMA`, the code of a 3.x parameter that does
+   * not say what values it takes.
+   */
+  private validateSwaggerParameterType(
+    param: Record<string, unknown>,
+    location: unknown,
+    name: string,
+    paramPath: string,
+    errors: FindingList,
+  ): void {
+    if (location === 'body') {
+      if (!isSpecObject(param['schema'])) {
+        errors.push({
+          message: `Parameter '${name}' (in: body) missing schema: a body parameter is described by a Schema Object`,
+          path: `${paramPath}`,
+          code: 'MISSING_PARAMETER_SCHEMA',
+        });
+      }
+    } else if (param['type'] === undefined) {
+      const instead = param['schema'] === undefined ? '' : ' (Swagger 2.0 has no schema for it)';
+      errors.push({
+        message: `Parameter '${name}' missing type: a parameter not in: body is described by type${instead}`,
+        path: `${paramPath}`,
+        code: 'MISSING_PARAMETER_SCHEMA',
+      });
+    }
+  }
+
+  /**
+   * Swagger 2.0, across an operation's parameters merged with its path
+   * item's: at most one `in: body` parameter, and none together with
+   * `in: formData` parameters. The 2.0 text states both ("There can be one
+   * 'body' parameter at most", "Form parameters ... cannot be declared
+   * together with a body parameter"); the official 2.0 schema checks each
+   * parameter alone and cannot. Errors, with the codes the converter reports
+   * the same cases with when validation is off.
+   */
+  private validateBodyParameters(
+    parameters: unknown[],
+    pointer: string,
+    where: string,
+    context: ValidationContext,
+  ): void {
+    const objects = parameters.filter(isSpecObject);
+    const bodies = objects.filter((p) => p['in'] === 'body').length;
+    if (bodies > 1) {
+      context.errors.push({
+        message: `${where}: ${bodies} parameters are in: body (path-level ones included), but a request has one body`,
+        path: pointer,
+        code: SPEC_DIAGNOSTIC_CODES.SWAGGER_MULTIPLE_BODY_PARAMETERS,
+      });
+    }
+    if (bodies > 0 && objects.some((p) => p['in'] === 'formData')) {
+      context.errors.push({
+        message: `${where}: a parameter in: body and parameters in: formData cannot be declared together (path-level ones included)`,
+        path: pointer,
+        code: SPEC_DIAGNOSTIC_CODES.SWAGGER_BODY_AND_FORM_DATA,
+      });
+    }
+  }
+
+  /**
    * Validate parameters. `basePath` is the historical path of the list (path
    * key unescaped), `pointer` its JSON Pointer.
    */
@@ -695,12 +846,24 @@ export class Validator {
         continue;
       }
 
-      const name = valueText(param['name']);
-      if (!param['name']) {
+      // A number or boolean name (an unquoted YAML `2024`) is read as its text, with a warning;
+      // `String()` is never applied to an object, whose text can throw and is no name to send
+      const nameValue = param['name'];
+      const nameRead = readParameterName(nameValue);
+      const name = valueText(nameRead.kind === 'invalid' ? nameValue : nameRead.name);
+      if (nameRead.kind === 'coerced') {
+        warnings.push(toFinding(parameterNameNotStringDiagnostic(nameValue as number | boolean, appendPointer(pointer, i))));
+      } else if (nameValue === undefined || nameValue === null || nameValue === '') {
         errors.push({
           message: 'Parameter missing name',
           path: `${paramPath}/name`,
           code: 'MISSING_PARAMETER_NAME',
+        });
+      } else if (nameRead.kind === 'invalid') {
+        errors.push({
+          message: `Parameter name must be a string, found ${describeValue(nameValue)}`,
+          path: appendPointer(pointer, i, 'name'),
+          code: 'INVALID_PARAMETER_NAME',
         });
       }
 
@@ -712,9 +875,10 @@ export class Validator {
           code: 'MISSING_PARAMETER_IN',
         });
       } else if (!(profile.parameterLocations as readonly unknown[]).includes(location)) {
-        // A location a later version defines is a newer feature, not an error
+        // A location a later OpenAPI 3 version defines is a newer feature, not an error. Not in
+        // Swagger 2.0, whose parameters are converted: an OpenAPI 3 location is not 2.0
         const feature =
-          typeof location === 'string' && Object.hasOwn(LOCATION_FEATURES, location)
+          typeof location === 'string' && Object.hasOwn(LOCATION_FEATURES, location) && !context.swagger
             ? LOCATION_FEATURES[location]
             : undefined;
         const newer =
@@ -723,7 +887,7 @@ export class Validator {
           warnings.push(toFinding(newer));
         } else {
           errors.push({
-            message: `Invalid parameter location: ${valueText(location)}. OpenAPI ${profile.family} allows ${profile.parameterLocations.join(', ')}`,
+            message: `Invalid parameter location: ${valueText(location)}. ${specName(profile.family)} allows ${profile.parameterLocations.join(', ')}`,
             path: `${paramPath}/in`,
             code: 'INVALID_PARAMETER_IN',
           });
@@ -736,6 +900,13 @@ export class Validator {
           path: `${paramPath}/required`,
           code: 'PATH_PARAMETER_NOT_REQUIRED',
         });
+      }
+
+      if (context.swagger) {
+        // Swagger 2.0: a body parameter is described by `schema`, any other by `type` (2.0 schema
+        // #/definitions/bodyParameter/required, #/definitions/nonBodyParameter/required)
+        this.validateSwaggerParameterType(param, location, name, paramPath, errors);
+        continue;
       }
 
       if (location === 'querystring') {
@@ -756,7 +927,7 @@ export class Validator {
             code: 'QUERYSTRING_PARAMETER_WITHOUT_CONTENT',
           });
         }
-      } else if (!param['schema'] && !param['content']) {
+      } else if (!isPresentSchema(param['schema']) && !param['content']) {
         errors.push({
           message: `Parameter '${name}' missing schema or content`,
           path: `${paramPath}`,
@@ -769,7 +940,7 @@ export class Validator {
     }
 
     // A list must not repeat a parameter (`name` and `in`)
-    for (const { dropped, kept } of analyzeParameters(parameters, []).duplicates) {
+    for (const { dropped, kept } of analyzeParameters(parameters.map(withTextName), []).duplicates) {
       warnings.push(toFinding(duplicateParameterDiagnostic(dropped, kept, pointer)));
     }
   }

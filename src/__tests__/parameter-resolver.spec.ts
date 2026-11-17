@@ -401,6 +401,13 @@ describe('ParameterResolver: parameters defined with content', () => {
   it('accepts a boolean schema in the media type', () => {
     const { inputSchema } = resolve({ parameters: [{ name: 'a', in: 'query', content: { 'application/json': { schema: true } } }] });
     expect((inputSchema.properties as any).a).toEqual({ 'x-parameter-location': 'query', 'x-parameter-content-type': 'application/json' });
+    // `false` accepts no value
+    const never = resolve({ parameters: [{ name: 'a', in: 'query', content: { 'application/json': { schema: false } } }] });
+    expect((never.inputSchema.properties as any).a).toEqual({
+      not: {},
+      'x-parameter-location': 'query',
+      'x-parameter-content-type': 'application/json',
+    });
   });
 
   it('carries the media type encoding when it is a non-empty map', () => {
@@ -676,5 +683,72 @@ describe('collectExampleValues: Example Object data', () => {
     const entry = Object.create({ dataValue: 'inherited' });
     entry.value = 'own';
     expect(collectExampleValues(undefined, { entry })).toEqual(['own']);
+  });
+});
+
+describe('ParameterResolver: boolean schemas', () => {
+  it('reads a parameter schema false as an input that accepts no value', () => {
+    const { inputSchema, mapper } = resolve({
+      parameters: [
+        { name: 'id', in: 'path', required: true, schema: false, description: 'gone' },
+        { name: 'q', in: 'query', schema: true },
+      ],
+    });
+    expect(inputSchema.properties).toEqual({
+      id: { not: {}, description: 'gone', 'x-parameter-location': 'path' },
+      q: { 'x-parameter-location': 'query' },
+    });
+    expect(inputSchema.required).toEqual(['id']);
+    expect(mapper.map((m) => m.inputKey)).toEqual(['id', 'q']);
+  });
+
+  it('keeps a false body property as an input no value satisfies, required when the body requires it', () => {
+    const body = (required: boolean) =>
+      resolve({
+        requestBody: {
+          required,
+          content: {
+            'application/json': {
+              schema: { type: 'object', properties: { gone: false, any: true, name: { type: 'string' } }, required: ['gone'] },
+            },
+          },
+        },
+      });
+    const { inputSchema, mapper } = body(true);
+    expect(inputSchema.properties).toEqual({
+      gone: { not: {}, 'x-parameter-location': 'body' },
+      any: { 'x-parameter-location': 'body' },
+      name: { type: 'string', 'x-parameter-location': 'body' },
+    });
+    expect(inputSchema.required).toEqual(['gone']);
+    expect(mapper.map((m) => [m.inputKey, m.required, m.wholeBody])).toEqual([
+      ['gone', true, undefined],
+      ['any', false, undefined],
+      ['name', false, undefined],
+    ]);
+    expect(body(false).inputSchema.required).toBeUndefined();
+  });
+
+  it('reads a false form body as a whole body, and false allOf members as adding no property', () => {
+    const form = resolve({ requestBody: { content: { 'application/x-www-form-urlencoded': { schema: false } } } });
+    expect(form.inputSchema.properties).toEqual({ body: { not: {}, 'x-parameter-location': 'body' } });
+    expect(form.mapper[0].serialization).toEqual({ contentType: 'application/x-www-form-urlencoded' });
+
+    const allOf = resolve({
+      requestBody: {
+        content: { 'application/json': { schema: { allOf: [false, { type: 'object', properties: { a: false } }] } } },
+      },
+    });
+    expect(allOf.inputSchema.properties).toEqual({ a: { not: {}, 'x-parameter-location': 'body' } });
+  });
+
+  it('still takes no body input for a media type without a schema, or one that is not a schema', () => {
+    for (const schema of [undefined, null, 0, '']) {
+      const { inputSchema, mapper } = resolve({ requestBody: { content: { 'application/json': { schema } } } });
+      expect(inputSchema.properties).toEqual({});
+      expect(mapper).toEqual([]);
+    }
+    // A truthy value that is not a schema is passed over, as before
+    expect(resolve({ requestBody: { content: { 'application/json': { schema: 'x' } } } }).mapper).toEqual([]);
   });
 });

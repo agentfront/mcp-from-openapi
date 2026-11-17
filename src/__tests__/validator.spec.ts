@@ -3,6 +3,7 @@
  */
 
 import { Validator } from '../validator';
+import { swagger2SkippedOperations } from '../spec';
 import { LEGACY_PATH_KEY_MAX_LENGTH, MAX_DIAGNOSTICS } from '../types';
 import type { OpenAPIDocument } from '../types';
 
@@ -874,11 +875,15 @@ describe('version-aware validation (issue #55)', () => {
     });
 
     it.each([
-      ['another major', doc('4.0.0'), '/openapi', 'Unsupported version: OpenAPI "4.0.0". Expected OpenAPI 3.0.x, 3.1.x or 3.2.x'],
+      [
+        'another major',
+        doc('4.0.0'),
+        '/openapi',
+        'Unsupported version: OpenAPI "4.0.0". Expected Swagger 2.0 or OpenAPI 3.0.x, 3.1.x or 3.2.x (a later 3.x is read with the 3.2 rules)',
+      ],
       ['an old major', doc('2.0.0'), '/openapi', 'Unsupported version: OpenAPI "2.0.0".'],
       ['a version without a patch', doc('3.1'), '/openapi', 'Malformed version: `openapi` must be a version string'],
       ['a number', doc(3.1), '/openapi', 'found 3.1.'],
-      ['Swagger 2.0', { swagger: '2.0', info: { title: 'T', version: '1' }, paths: {} }, '/swagger', 'Swagger 2.0 documents are not supported'],
       ['Swagger 1.2', { swagger: '1.2', info: { title: 'T', version: '1' }, paths: {} }, '/swagger', 'Unsupported version: Swagger "1.2".'],
     ])('rejects %s with INVALID_OPENAPI_VERSION', async (_label, document, path, message) => {
       const result = await validate(document);
@@ -891,7 +896,9 @@ describe('version-aware validation (issue #55)', () => {
       expect(result.errors).toContainEqual({
         code: 'MISSING_OPENAPI_VERSION',
         path: '/openapi',
-        message: expect.stringContaining('Missing version: the document has no `openapi` field. Expected OpenAPI 3.0.x'),
+        message:
+          'Missing version: the document has neither an `openapi` nor a `swagger` field. Expected Swagger 2.0 or ' +
+          'OpenAPI 3.0.x, 3.1.x or 3.2.x (a later 3.x is read with the 3.2 rules)',
       });
     });
 
@@ -1248,11 +1255,93 @@ describe('version-aware validation (issue #55)', () => {
       expect(result.errors).toBeUndefined();
     });
 
-    it('matches path parameters by name only when the name is a string', async () => {
+    it('matches path parameters by the text of a number or boolean name', async () => {
       const result = await validate(
         doc('3.0.3', { '/a/{5}': { get: { operationId: 'a', responses: ok, parameters: [{ name: 5, in: 'path', required: true, schema: {} }] } } }),
       );
-      expect(result.errors?.map((e) => e.code)).toEqual(['MISSING_PATH_PARAMETER']);
+      expect(result).toEqual({
+        valid: true,
+        errors: undefined,
+        warnings: [
+          {
+            code: 'PARAMETER_NAME_NOT_STRING',
+            path: '/paths/~1a~1{5}/get/parameters/0/name',
+            message: 'Parameter name 5 is a number, not a string (YAML reads an unquoted number so); it is read as "5"',
+          },
+        ],
+      });
+      const object = await validate(
+        doc('3.0.3', { '/a/{5}': { get: { operationId: 'a', responses: ok, parameters: [{ name: {}, in: 'path', required: true, schema: {} }] } } }),
+      );
+      expect(object.errors?.map((e) => e.code)).toEqual(['INVALID_PARAMETER_NAME', 'MISSING_PATH_PARAMETER']);
+    });
+
+    it('reads a number or boolean name as its text, so it merges and repeats like any name', async () => {
+      const result = await validate(
+        doc('3.1.0', {
+          '/a': {
+            parameters: [{ name: 2024, in: 'query', schema: {} }],
+            get: {
+              operationId: 'a',
+              responses: ok,
+              parameters: [{ name: '2024', in: 'query', schema: {} }, { name: 0, in: 'header', schema: {} }, { name: false, in: 'header', schema: {} }, { name: '0', in: 'header', schema: {} }],
+            },
+          },
+        }),
+      );
+      expect(result.valid).toBe(true);
+      expect(result.warnings?.map((w) => [w.code, w.path])).toEqual([
+        ['PARAMETER_NAME_NOT_STRING', '/paths/~1a/parameters/0/name'],
+        ['PARAMETER_NAME_NOT_STRING', '/paths/~1a/get/parameters/1/name'],
+        ['PARAMETER_NAME_NOT_STRING', '/paths/~1a/get/parameters/2/name'],
+        ['DUPLICATE_PARAMETER', '/paths/~1a/get/parameters/1'],
+      ]);
+    });
+
+    it('rejects a parameter name that is not a string, never coercing it', async () => {
+      const hostile = {
+        toString() {
+          throw new Error('coerced');
+        },
+      };
+      const names: unknown[] = [{ toString: 0 }, hostile, Object.create(null), ['a']];
+      const result = await validate(
+        doc('3.1.0', {
+          '/a': {
+            parameters: names.map((name) => ({ name, in: 'query', schema: {} })),
+            get: { operationId: 'a', responses: ok, parameters: names.map((name) => ({ name, in: 'header', schema: {} })) },
+          },
+        }),
+      );
+      expect(result.valid).toBe(false);
+      const errors = result.errors!.filter((e) => e.code === 'INVALID_PARAMETER_NAME');
+      expect(errors).toHaveLength(names.length * 2);
+      expect(errors.slice(0, names.length)).toEqual(
+        ['an object', 'an object', 'an object', 'an array'].map((found, index) => ({
+          message: `Parameter name must be a string, found ${found}`,
+          path: `/paths/~1a/parameters/${index}/name`,
+          code: 'INVALID_PARAMETER_NAME',
+        })),
+      );
+      expect(errors[names.length].path).toBe('/paths/~1a/get/parameters/0/name');
+      // A missing or empty name keeps its own code
+      const missing = await validate(opParameters('3.1.0', [{ name: '', in: 'query', schema: {} }, { in: 'query', schema: {} }]));
+      expect(missing.errors?.map((e) => e.code)).toEqual(['MISSING_PARAMETER_NAME', 'MISSING_PARAMETER_NAME']);
+    });
+
+    it('reads a boolean parameter schema as a schema', async () => {
+      const result = await validate(
+        opParameters('3.1.0', [
+          { name: 'a', in: 'query', schema: false },
+          { name: 'b', in: 'query', schema: true },
+        ]),
+      );
+      expect(result.errors).toBeUndefined();
+      // Still missing: no schema, or a value that is not one
+      for (const schema of [undefined, null, 0, '']) {
+        const missing = await validate(opParameters('3.1.0', [{ name: 'a', in: 'query', schema }]));
+        expect(missing.errors?.map((e) => e.code)).toEqual(['MISSING_PARAMETER_SCHEMA']);
+      }
     });
 
     it('requires a querystring parameter content to hold a media type', async () => {
@@ -1487,5 +1576,240 @@ describe('version-aware validation (issue #55)', () => {
         message: `Only the first ${MAX_DIAGNOSTICS} warnings are listed; the document has more`,
       });
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Swagger 2.0 (validated with its own rules, as written)
+// ---------------------------------------------------------------------------
+
+describe('Swagger 2.0 validation', () => {
+  const ok = { '200': { description: 'OK' } };
+  const swagger = (paths: Record<string, unknown> = {}, extra: Record<string, unknown> = {}): any => ({
+    swagger: '2.0',
+    info: { title: 'T', version: '1.0.0' },
+    host: 'api.example.com',
+    paths,
+    ...extra,
+  });
+  const operation = (parameters: unknown[], extra: Record<string, unknown> = {}) => ({
+    operationId: 'op',
+    parameters,
+    responses: ok,
+    ...extra,
+  });
+  const validate = (document: object) => new Validator().validate(document);
+  const errors = async (document: object) => (await validate(document)).errors ?? [];
+  const errorCodes = async (document: object) => (await errors(document)).map((e) => e.code);
+  const warningCodes = async (document: object) => ((await validate(document)).warnings ?? []).map((w) => w.code);
+  const VALID = { valid: true, errors: undefined, warnings: undefined };
+
+  it('accepts a Swagger 2.0 document, declared as text or as the number YAML reads', async () => {
+    const pets = {
+      '/pets/{petId}': {
+        parameters: [{ name: 'petId', in: 'path', required: true, type: 'string' }],
+        get: operation([{ name: 'limit', in: 'query', type: 'integer', format: 'int32' }]),
+        put: operation([{ name: 'pet', in: 'body', required: true, schema: { $ref: '#/definitions/Pet' } }]),
+        post: operation([
+          { name: 'name', in: 'formData', type: 'string' },
+          { name: 'photo', in: 'formData', type: 'file' },
+          { name: 'X-Trace', in: 'header', type: 'string' },
+        ]),
+      },
+    };
+    const definitions = { Pet: { type: 'object', discriminator: 'kind', properties: { kind: { type: 'string' } } } };
+    expect(await validate(swagger(pets, { definitions }))).toEqual(VALID);
+    expect(await validate({ ...swagger(pets, { definitions }), swagger: 2 })).toEqual(VALID);
+  });
+
+  it('allows the 2.0 locations and no other, naming Swagger 2.0', async () => {
+    const result = await validate(
+      swagger({
+        '/a': {
+          get: operation([
+            { name: 'c', in: 'cookie', type: 'string' },
+            { name: 'q', in: 'querystring', content: { 'application/json': { schema: {} } } },
+          ]),
+        },
+      }),
+    );
+    // `querystring` is not a newer feature here: a 2.0 parameter is converted, not read as OpenAPI 3
+    expect(result.errors).toEqual([
+      {
+        code: 'INVALID_PARAMETER_IN',
+        path: '/paths//a/get/parameters/0/in',
+        message: 'Invalid parameter location: cookie. Swagger 2.0 allows path, query, header, formData, body',
+      },
+      {
+        code: 'INVALID_PARAMETER_IN',
+        path: '/paths//a/get/parameters/1/in',
+        message: 'Invalid parameter location: querystring. Swagger 2.0 allows path, query, header, formData, body',
+      },
+      {
+        code: 'MISSING_PARAMETER_SCHEMA',
+        path: '/paths//a/get/parameters/1',
+        message: "Parameter 'q' missing type: a parameter not in: body is described by type",
+      },
+    ]);
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it('needs type for a parameter not in: body, and a Schema Object for one in: body', async () => {
+    const result = await validate(
+      swagger({
+        '/a': {
+          get: operation([
+            { name: 'q', in: 'query', schema: { type: 'string' } },
+            { name: 'h', in: 'header' },
+            { name: 'b', in: 'body' },
+            { name: 'c', in: 'body', schema: true },
+          ]),
+        },
+      }),
+    );
+    expect(result.errors).toEqual([
+      {
+        code: 'MISSING_PARAMETER_SCHEMA',
+        path: '/paths//a/get/parameters/0',
+        message: "Parameter 'q' missing type: a parameter not in: body is described by type (Swagger 2.0 has no schema for it)",
+      },
+      {
+        code: 'MISSING_PARAMETER_SCHEMA',
+        path: '/paths//a/get/parameters/1',
+        message: "Parameter 'h' missing type: a parameter not in: body is described by type",
+      },
+      {
+        code: 'MISSING_PARAMETER_SCHEMA',
+        path: '/paths//a/get/parameters/2',
+        message: "Parameter 'b' (in: body) missing schema: a body parameter is described by a Schema Object",
+      },
+      {
+        code: 'MISSING_PARAMETER_SCHEMA',
+        path: '/paths//a/get/parameters/3',
+        message: "Parameter 'c' (in: body) missing schema: a body parameter is described by a Schema Object",
+      },
+      // Two body parameters as well
+      expect.objectContaining({ code: 'SWAGGER_MULTIPLE_BODY_PARAMETERS' }),
+    ]);
+    // `content` is not a 2.0 field: no OpenAPI 3 content warning
+    expect(await warningCodes(swagger({ '/a': { get: operation([{ name: 'q', in: 'query', type: 'string', content: {} }]) } }))).toEqual([]);
+  });
+
+  it('allows one body parameter per operation, path-level ones included, and none with formData', async () => {
+    const body = (name: string) => ({ name, in: 'body', schema: { type: 'object' } });
+    const form = { name: 'f', in: 'formData', type: 'string' };
+    // An operation-level body of the same name overrides the path-level one
+    expect(await validate(swagger({ '/a': { parameters: [body('b')], post: operation([body('b')]) } }))).toEqual(VALID);
+    expect(await errors(swagger({ '/a': { parameters: [body('b')], post: operation([body('c')]) } }))).toEqual([
+      {
+        code: 'SWAGGER_MULTIPLE_BODY_PARAMETERS',
+        path: '/paths/~1a/post/parameters',
+        message: 'Operation POST /a: 2 parameters are in: body (path-level ones included), but a request has one body',
+      },
+    ]);
+    expect(await errors(swagger({ '/a': { parameters: [form], post: operation([body('b')]) } }))).toEqual([
+      {
+        code: 'SWAGGER_BODY_AND_FORM_DATA',
+        path: '/paths/~1a/post/parameters',
+        message:
+          'Operation POST /a: a parameter in: body and parameters in: formData cannot be declared together ' +
+          '(path-level ones included)',
+      },
+    ]);
+    // Form parameters alone, and references to the root `parameters`
+    expect(await validate(swagger({ '/a': { post: operation([form, { ...form, name: 'g' }]) } }))).toEqual(VALID);
+    const parameters = { B: body('b'), C: body('c') };
+    expect(
+      await errorCodes(swagger({ '/a': { post: operation([{ $ref: '#/parameters/B' }, { $ref: '#/parameters/C' }]) } }, { parameters })),
+    ).toEqual(['SWAGGER_MULTIPLE_BODY_PARAMETERS']);
+  });
+
+  it('applies the rules 2.0 shares with OpenAPI 3: required path parameters and responses', async () => {
+    expect(
+      await errorCodes(swagger({ '/a/{id}': { get: operation([{ name: 'id', in: 'path', type: 'string' }]) } })),
+    ).toEqual(['PATH_PARAMETER_NOT_REQUIRED']);
+    expect(await errorCodes(swagger({ '/a': { get: { operationId: 'a' } } }))).toEqual(['NO_RESPONSES']);
+    expect(await errorCodes(swagger({ '/a': { get: { operationId: 'a', responses: {} } } }))).toEqual(['NO_RESPONSES']);
+    expect(await errorCodes(swagger({ '/a/{id}': { get: operation([]) } }))).toEqual(['MISSING_PATH_PARAMETER']);
+  });
+
+  it('reads local parameter references in #/parameters', async () => {
+    const parameters = { Id: { name: 'id', in: 'path', required: true, type: 'string' } };
+    expect(await validate(swagger({ '/a/{id}': { get: operation([{ $ref: '#/parameters/Id' }]) } }, { parameters }))).toEqual(VALID);
+    // A 3.x pointer names nothing in a 2.0 document: the path check waits for dereferencing
+    expect(
+      await errorCodes(swagger({ '/a/{id}': { get: operation([{ $ref: '#/components/parameters/Id' }]) } }, { parameters })),
+    ).toEqual([]);
+    expect(await errorCodes(swagger({ '/a/{id}': { get: operation([{ $ref: '#/parameters/Other' }]) } }, { parameters }))).toEqual([]);
+  });
+
+  it('warns about the operation fields Swagger 2.0 does not have, as the converter does', async () => {
+    const result = await validate(
+      swagger({ '/a': { get: operation([]), trace: operation([]), query: operation([]), additionalOperations: { LINK: {} } } }),
+    );
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toEqual(
+      swagger2SkippedOperations({ trace: {}, query: {}, additionalOperations: {} }, '/paths/~1a').map((d) => ({
+        message: d.message,
+        path: d.path,
+        code: d.code,
+      })),
+    );
+    expect(result.warnings!.map((w) => w.path)).toEqual(['/paths/~1a/trace', '/paths/~1a/query', '/paths/~1a/additionalOperations']);
+    expect(result.warnings![0].message).toBe(
+      'The `trace` operation needs OpenAPI 3.0 or later and is not part of Swagger 2.0; it is not converted',
+    );
+    // A path holding only them has no operation
+    expect(await warningCodes(swagger({ '/b': { trace: operation([]) } }))).toEqual([
+      'FEATURE_NEWER_THAN_DECLARED_VERSION',
+      'NO_OPERATIONS',
+    ]);
+  });
+
+  it('warns about a missing host and about security without securityDefinitions', async () => {
+    const { host: _host, ...hostless } = swagger({ '/a': { get: operation([]) } });
+    expect((await validate(hostless)).warnings).toEqual([
+      {
+        code: 'NO_SERVERS',
+        path: '/host',
+        message:
+          'No host defined: the API is on the host serving the document, known only when it is loaded with fromURL ' +
+          'or LoadOptions.documentUri. You may need to provide a baseUrl option.',
+      },
+    ]);
+    // `servers` means nothing in 2.0
+    expect(await warningCodes({ ...hostless, servers: [{ url: 'https://x' }] })).toEqual(['NO_SERVERS']);
+    const secured = swagger({ '/a': { get: operation([]) } }, { security: [{ key: [] }] });
+    expect(await warningCodes(secured)).toEqual(['NO_SECURITY_SCHEMES']);
+    expect(await validate({ ...secured, securityDefinitions: { key: { type: 'apiKey', name: 'k', in: 'header' } } })).toEqual(VALID);
+    expect(await warningCodes({ ...secured, components: { securitySchemes: { key: {} } } })).toEqual(['NO_SECURITY_SCHEMES']);
+  });
+
+  it('rejects a basePath without a leading "/" or that a URL cannot carry (the official pattern is ^/)', async () => {
+    const pets = { '/a': { get: operation([]) } };
+    expect(await validate(swagger(pets, { basePath: '/api/v1/' }))).toEqual(VALID);
+    expect(await errors(swagger(pets, { basePath: 'api/v1' }))).toEqual([
+      { code: 'INVALID_BASE_PATH', path: '/basePath', message: 'basePath must start with "/", found "api/v1"' },
+    ]);
+    for (const basePath of ['/{v}', '/a b', '/a?x', '/a#f', '/a/../b', '/%2e', 7]) {
+      const [error] = await errors(swagger(pets, { basePath }));
+      expect(error).toMatchObject({ code: 'INVALID_BASE_PATH', path: '/basePath', message: expect.stringMatching(/^basePath cannot be used: it /) });
+    }
+    // Not a 2.0 field in OpenAPI 3: not checked there
+    expect((await validate({ openapi: '3.0.3', info: { title: 'T', version: '1' }, servers: [{ url: 'https://x' }], paths: pets, basePath: 'x' })).valid).toBe(true);
+  });
+
+  it('no longer reports the OpenAPI 3 findings a Swagger 2.0 document used to get', async () => {
+    const result = await validate(
+      swagger({
+        '/pets': {
+          post: operation([
+            { name: 'pet', in: 'body', schema: { type: 'object' } },
+            { name: 'limit', in: 'query', type: 'integer' },
+          ]),
+        },
+      }),
+    );
+    expect(result).toEqual(VALID);
   });
 });

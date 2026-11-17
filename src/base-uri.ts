@@ -150,11 +150,84 @@ export function isSameDocument(url: URL, base: DocumentBase): boolean {
 }
 
 /**
- * `text` with the user information of a URI it starts with replaced by
- * `***`, for a message: user information may be a real credential.
+ * The schemes a URL parser (WHATWG) reads an authority for even without
+ * `//`: `https:user:pw@host` is a URL with a user and a password.
+ */
+const SPECIAL_SCHEMES: ReadonlySet<string> = new Set(['http', 'https', 'ws', 'wss', 'ftp', 'file']);
+
+/**
+ * The start of a URI-like text: leading C0 controls and spaces (a URL parser
+ * strips them), a scheme, and the slashes or backslashes after it.
+ */
+const URI_START = /^([\u0000-\u0020]*)(?:([A-Za-z][A-Za-z0-9+.-]*):)?([\\/]*)/;
+
+/**
+ * A path segment that starts with a special scheme and holds an `@` before
+ * the next `/`, `\`, `?` or `#`: a URL with user information that ended up
+ * inside a path, such as the local path a reference written
+ * `https:user:pw@host/x` (no `//`) resolves to.
+ */
+const SEGMENT_WITH_USER_INFO = /(^|[\\/])((?:https?|wss?|ftp|file):[\\/]*)[^\\/?#]*@/gi;
+
+/**
+ * `text` with any user information replaced by `***`, for a message: user
+ * information may be a real credential. The rule is what a URL parser reads
+ * as user information, conservatively:
+ *
+ * - tabs and line breaks are removed first, and leading C0 controls and
+ *   spaces skipped, as a URL parser does (`https:/\t/u:p@h` is
+ *   `https://u:p@h`);
+ * - the authority starts after a special scheme (`http`, `https`, `ws`,
+ *   `wss`, `ftp`, `file`, any case) and any slashes or backslashes, after
+ *   another scheme followed by `//`, or after a leading `//`; everything in
+ *   it up to its last `@` goes;
+ * - anywhere in the text, a path segment starting with a special scheme and
+ *   holding an `@` before the next `/`, `\`, `?` or `#` is redacted the same
+ *   way (`/srv/https:u:p@host/x`).
+ *
+ * Text a parser does not read as user information comes back exactly as
+ * given: a relative path (`pet@v2.yaml`, `@scope/x.yaml`), a file name with a
+ * scheme-like prefix that is not special (`a:b@c.yaml`), or an opaque URI
+ * (`mailto:a@b`).
  */
 export function redactUserInfo(text: string): string {
-  return text.replace(/^((?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\/)[^/?#]*@/, '$1***@');
+  const { redacted, flat } = scanUserInfo(text);
+  return redacted === flat ? text : redacted;
+}
+
+/**
+ * The user information `redactUserInfo` removes from `text`, each stretch as
+ * it appears once tabs and line breaks are removed. A reference resolved
+ * into a path no longer has it where `redactUserInfo` looks
+ * (`https:u:p@h/x` read as a local file becomes `/srv/u:p@h/x`), so a
+ * message about the resolved path removes these stretches from it too.
+ */
+export function userInfoOf(text: string): string[] {
+  return scanUserInfo(text).parts;
+}
+
+/** `text` without tabs and line breaks, the same with its user information redacted, and what was removed. */
+function scanUserInfo(text: string): { flat: string; redacted: string; parts: string[] } {
+  const flat = text.replace(/[\t\n\r]/g, '');
+  const parts: string[] = [];
+  const [start, , scheme, slashes] = URI_START.exec(flat) as RegExpExecArray;
+  let redacted = flat;
+  const special = scheme !== undefined && SPECIAL_SCHEMES.has(scheme.toLowerCase());
+  if (special || slashes.startsWith('//')) {
+    const rest = flat.slice(start.length);
+    // A special URL's authority also ends at a backslash; another's does not
+    const end = rest.search(special ? /[/\\?#]/ : /[/?#]/);
+    const at = (end === -1 ? rest : rest.slice(0, end)).lastIndexOf('@');
+    if (at !== -1) {
+      parts.push(rest.slice(0, at));
+      redacted = `${flat.slice(0, start.length)}***${rest.slice(at)}`;
+    }
+  }
+  redacted = redacted.replace(SEGMENT_WITH_USER_INFO, (match: string, before: string, prefix: string) => {
+    parts.push(match.slice(before.length + prefix.length, -1));
+    return `${before}${prefix}***@`;
+  });
+  return { flat, redacted, parts: parts.filter((part) => part !== '' && part !== '***') };
 }
 
 /**
@@ -212,7 +285,11 @@ export type SelfField =
   /** `$self` is a URI reference without a fragment, as the specification requires. */
   | { kind: 'reference'; value: string };
 
-/** A warning about `$self` at `/$self`, ending with what happens to it. */
+/**
+ * A warning about `$self` at `/$self`, ending with what happens to it. A
+ * message that quotes `$self` quotes it through `redactUserInfo`: a malformed
+ * value can still hold a credential.
+ */
 function selfDiagnostic(code: string, problem: string): SpecDiagnostic {
   return {
     severity: 'warning',
@@ -259,7 +336,7 @@ export function readSelfField(document: unknown, version: SpecVersionInfo): Self
       kind: 'invalid',
       diagnostic: selfDiagnostic(
         DIAGNOSTIC_CODES.INVALID_SELF,
-        `must be a URI reference (RFC 3986), found ${describeValue(value)}`,
+        `must be a URI reference (RFC 3986), found ${describeValue(redactUserInfo(value))}`,
       ),
     };
   }
@@ -268,7 +345,7 @@ export function readSelfField(document: unknown, version: SpecVersionInfo): Self
       kind: 'invalid',
       diagnostic: selfDiagnostic(
         DIAGNOSTIC_CODES.INVALID_SELF,
-        `must not contain a fragment, found ${describeValue(value)}`,
+        `must not contain a fragment, found ${describeValue(redactUserInfo(value))}`,
       ),
     };
   }
@@ -375,7 +452,10 @@ function usableSelf(
       : 'the document has no retrieval URI to resolve it against (load it with fromURL or fromFile, or pass ' +
         'LoadOptions.documentUri)';
     diagnostics.push(
-      selfDiagnostic(DIAGNOSTIC_CODES.UNRESOLVABLE_SELF, `is a relative reference (${describeValue(value)}), but ${why}`),
+      selfDiagnostic(
+        DIAGNOSTIC_CODES.UNRESOLVABLE_SELF,
+        `is a relative reference (${describeValue(redactUserInfo(value))}), but ${why}`,
+      ),
     );
     return undefined;
   }
@@ -449,6 +529,14 @@ export interface SelfReference {
   readonly tokens: readonly string[];
   /** The tokens of where the `$ref` itself is, from the document root */
   location(): string[];
+  /**
+   * The `$ref` is inside a Schema Object with its own `$id` (or is next to
+   * one). Only an absolute reference is found there: it names the document
+   * whatever that `$id` says. A dereferencer applying `$id` scopes reads a
+   * `#` reference there against the `$id`, so such a reference can be made
+   * local only for a dereferencer that does not (see `refParserScopesIds`).
+   */
+  readonly scoped: boolean;
 }
 
 /** What `findSelfReferences` found, and how much URI work it did. */
@@ -483,9 +571,11 @@ function identityBases(base: DocumentBase): string[] {
  * the same-document reference of RFC 3986, names the whole document.
  *
  * A Schema Object with its own non-empty `$id` sets the base of its
- * references and its subschemas' (JSON Schema 2020-12 section 8.2), so
- * nothing under it is taken. Walks with its own stack, visiting each object
- * once; each distinct `$ref` string is resolved once.
+ * references and its subschemas' (JSON Schema 2020-12 section 8.2), so a
+ * relative reference under it is not taken; an absolute one (with a scheme)
+ * means the same whatever the base, so it is, marked `scoped`. Walks with its
+ * own stack, visiting each object once; each distinct `$ref` string is
+ * resolved once.
  */
 export function findSelfReferences(root: unknown, base: DocumentBase): SelfReferenceScan {
   const bases = identityBases(base);
@@ -511,6 +601,8 @@ export function findSelfReferences(root: unknown, base: DocumentBase): SelfRefer
     node: unknown;
     parent: Visit | null;
     key: string;
+    /** Under (or at) a Schema Object with its own `$id` */
+    scoped: boolean;
   }
   const locationOf = (visit: Visit): string[] => {
     const tokens: string[] = [];
@@ -519,29 +611,53 @@ export function findSelfReferences(root: unknown, base: DocumentBase): SelfRefer
   };
   const references: SelfReference[] = [];
   const seen = new Set<object>();
-  const stack: Visit[] = [{ node: root, parent: null, key: '' }];
+  const stack: Visit[] = [{ node: root, parent: null, key: '', scoped: false }];
   while (stack.length > 0) {
     const visit = stack.pop() as Visit;
     const { node } = visit;
     if (node === null || typeof node !== 'object' || seen.has(node)) continue;
     seen.add(node);
     const record = node as Record<string, unknown>;
+    let scoped = visit.scoped;
     if (!Array.isArray(node)) {
       const id = ownProperty(record, '$id');
-      if (typeof id === 'string' && id !== '') continue;
+      if (typeof id === 'string' && id !== '') scoped = true;
       const ref = ownProperty(record, '$ref');
-      if (typeof ref === 'string' && !ref.startsWith('#') && bases.length > 0) {
+      // Under an `$id`, only a reference that does not depend on the base
+      if (typeof ref === 'string' && !ref.startsWith('#') && bases.length > 0 && (!scoped || HAS_SCHEME.test(ref))) {
         const found = resolve(ref);
-        if (found !== null) references.push({ node: record, ref, ...found, location: () => locationOf(visit) });
+        if (found !== null) {
+          references.push({ node: record, ref, ...found, location: () => locationOf(visit), scoped });
+        }
       }
     }
     // Pushed in reverse, so they are visited in document order
     const keys = Object.keys(record);
     for (let index = keys.length - 1; index >= 0; index--) {
-      stack.push({ node: record[keys[index]], parent: visit, key: keys[index] });
+      stack.push({ node: record[keys[index]], parent: visit, key: keys[index], scoped });
     }
   }
   return { references, resolutions };
+}
+
+/**
+ * Whether `$RefParser` (the dereferencer of documents that reference other
+ * documents) reads `document` with nested `$id` scopes, where a `#` reference
+ * inside a Schema Object with its own `$id` is resolved against that `$id`,
+ * not against the document. It does for a root that declares `openapi: 3.1.x`,
+ * a JSON Schema dialect in `$schema` (draft-04 to 2020-12, or the OpenAPI 3.1
+ * one), or an identifier of its own (`$id`; `id` under draft-04), and for no
+ * other document. Mirrors `usesDynamicIdScope` of
+ * `@apidevtools/json-schema-ref-parser` 16.
+ */
+export function refParserScopesIds(document: unknown): boolean {
+  const schema = ownProperty(document, '$schema');
+  const dialect = typeof schema === 'string' ? schema : '';
+  const id = ownProperty(document, dialect.includes('draft-04/') ? 'id' : '$id');
+  if (typeof id === 'string' && id !== '') return true;
+  if (/draft-0[467]\/|draft\/2019-09\/|draft\/2020-12\/|oas\/3\.1\//.test(dialect)) return true;
+  const openapi = ownProperty(document, 'openapi');
+  return typeof openapi === 'string' && /^3\.1(?:\.|$)/.test(openapi);
 }
 
 /**

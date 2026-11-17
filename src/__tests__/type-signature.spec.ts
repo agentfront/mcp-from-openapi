@@ -34,6 +34,14 @@ describe('emitToolTypeScript type printing', () => {
     expect(outputType({ type: 'null' })).toBe('null');
   });
 
+  it('prints a schema that accepts nothing ({ not: {} }, a converted false) as never', () => {
+    expect(outputType({ not: {} })).toBe('never');
+    expect(outputType({ type: 'string', not: true, description: 'x' })).toBe('never');
+    expect(outputType({ type: 'object', properties: { a: { not: {} }, b: { not: { type: 'string' } } } })).toBe(
+      '{ a?: never; b?: unknown }',
+    );
+  });
+
   it('prints boolean schemas as unknown/never', () => {
     expect(outputType(true)).toBe('unknown');
     expect(outputType(false)).toBe('never');

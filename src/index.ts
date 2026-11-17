@@ -114,6 +114,7 @@ export type {
   ParameterMapper,
   ToolMetadata,
   ResponseHints,
+  ResponseStatusRange,
   ResponseStreamInfo,
   FrontMcpExtensionData,
   SerializationInfo,
@@ -167,9 +168,14 @@ export type {
 } from './types';
 
 // OpenAPI object types per specification version, under the spec's own names
-// (`OAS31.OperationObject`, `OAS32.MediaTypeObject`, ...), and the view that
-// reads a spec object's `x-` extensions
-export type { OAS30, OAS31, OAS32, WithExtensions, ExtensionName } from './spec';
+// (`OAS20.SwaggerObject`, `OAS31.OperationObject`, `OAS32.MediaTypeObject`,
+// ...), and the view that reads a spec object's `x-` extensions
+export type { OAS20, OAS30, OAS31, OAS32, WithExtensions, ExtensionName } from './spec';
+
+// Swagger 2.0 to OpenAPI 3.0: the conversion the generator applies to a 2.0
+// document once it is dereferenced, as a standalone function
+export { MAX_CONVERSION_ENTRIES, MAX_MEDIA_TYPES_PER_LIST, upgradeSwagger2 } from './spec';
+export type { UpgradeSwagger2Options, UpgradeSwagger2Result } from './spec';
 
 // OpenAPI versions, operations and diagnostics: the declared version of a
 // document (`generator.getSpecVersion()`), the walk over a Path Item's

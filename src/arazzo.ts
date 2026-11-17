@@ -19,6 +19,7 @@ import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolve
 import { emitToolTypeScript } from './type-signature';
 import { DIAGNOSTIC_CODES, toJsonSchema } from './types';
 import {
+  describeValue,
   detectSpecVersion,
   getOperation,
   isHttpToken,
@@ -29,6 +30,7 @@ import {
   toStandardMethod,
   wireMethod,
 } from './spec';
+import { fragmentPointerTokens } from './base-uri';
 import * as yaml from 'yaml';
 import type {
   GenerateOptions,
@@ -97,6 +99,11 @@ export interface FromArazzoOptions {
    * holds them and under its own `refResolution`, so there is no need to
    * generate tools first. A reference that cannot be read is an
    * `ArazzoError` carrying the reason.
+   *
+   * A Swagger 2.0 source works like any other: its operations (those of a
+   * 2.0 Path Item, so no `trace`) are found by `operationId` or by
+   * `#/paths/<path>/<method>` pointer, and each step's tool is built from its
+   * OpenAPI 3.0 conversion, as `generateTool` builds it.
    */
   sources: Record<string, object | OpenAPIToolGenerator>;
 
@@ -533,7 +540,8 @@ async function documentToIndex(
   );
   if (unreadable !== undefined) {
     err(
-      `Failed to dereference source "${name}": ${unreadable.message}`,
+      // The name is a checked id ([A-Za-z0-9_-]+); described, so a long one is cut too
+      `Failed to dereference source ${describeValue(name)}: ${unreadable.message}`,
       `/sourceDescriptions/${doc.sourceDescriptions.findIndex((source) => source.name === name)}`,
       { source: name, ...(unreadable.path !== undefined && { sourcePath: unreadable.path }) },
     );
@@ -615,13 +623,14 @@ function parseOperationPath(value: string, path: string): { source: string; path
   }
   const source = ast.path[0];
   const rest = value.slice(close + 1);
-  if (!rest.startsWith('#/')) {
+  // The fragment is a JSON Pointer, percent-encoded (RFC 6901 section 6):
+  // decoded first (`%4CINK` is `LINK`, `%7B` is `{`), then split and
+  // unescaped. Decoding is lenient as for `$ref` fragments: a `%` that does
+  // not start a valid escape stays as written
+  const segments = rest.startsWith('#') ? fragmentPointerTokens(rest.slice(1)) : undefined;
+  if (segments === undefined || segments.length === 0) {
     err(`operationPath "${value}" requires a "#/paths/..." JSON Pointer after the source expression`, path);
   }
-  const segments = rest
-    .slice(2)
-    .split('/')
-    .map((segment) => segment.replace(/~1/g, '/').replace(/~0/g, '~'));
   // #/paths/<path>/<method> for a fixed field, or (OpenAPI 3.2)
   // #/paths/<path>/additionalOperations/<METHOD> for an additional operation.
   // The method of an additional operation is its key exactly as written, so

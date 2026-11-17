@@ -28,6 +28,7 @@ import type {
   ToolIcon,
   SecuritySchemeObject,
   ReferenceObject,
+  ResponseStatusRange,
 } from './types';
 import { DIAGNOSTIC_CODES, MAX_DIAGNOSTICS } from './types';
 import {
@@ -40,8 +41,12 @@ import {
   jsonPointer,
   listOperations,
   ownProperty,
+  parameterNameNotStringDiagnostic,
+  readParameterName,
   resolveOperationLayout,
   toStandardMethod,
+  MAX_CONVERSION_ENTRIES,
+  upgradeSwagger2,
   wireMethod,
   diagnosticKey,
   type OperationEntry,
@@ -51,7 +56,7 @@ import {
   type WithExtensions,
 } from './spec';
 import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
-import { isReferenceObject } from './types';
+import { isNeverSchema, isPresentSchema, isReferenceObject } from './types';
 import {
   ParameterResolver,
   analyzeParameters,
@@ -101,6 +106,9 @@ import {
   fragmentPointerTokens,
   parseDocumentUri,
   pointerTargetProblem,
+  redactUserInfo,
+  refParserScopesIds,
+  userInfoOf,
   resolveDocumentBase,
   resolveSecuritySchemeUri,
   retrievalUriOf,
@@ -167,6 +175,13 @@ function fromValidationWarning(warning: ValidationWarning): SpecDiagnostic {
     path: warning.path,
   };
 }
+
+/**
+ * The most dropped findings remembered (by their bounded `diagnosticKey`) so
+ * a finding found again is not counted twice in `DIAGNOSTICS_TRUNCATED`;
+ * past it, a finding found again counts again.
+ */
+const MAX_DROPPED_KEYS = 10_000;
 
 /** Longest stretch of the first validation error quoted in a `ParseError` message. */
 const PARSE_ERROR_DETAIL_MAX_LENGTH = 512;
@@ -424,15 +439,21 @@ class ExternalRefError extends Error {
           ? ''
           : (target.baseUrl as string).slice(hash);
     const base = (hash === -1 ? target.baseUrl : target.baseUrl?.slice(0, hash))?.replace(/\?.*$/s, '?...');
-    const resolved = withoutQuery(target.url);
+    // A reference can carry user information, which may be a real credential: never quoted, also where
+    // resolving moved it into a path (`https:u:p@h/x` read as the local file `<cwd>/u:p@h/x`)
+    const secrets = target.reference === undefined ? [] : userInfoOf(target.reference);
+    const scrub = (text: string): string =>
+      secrets.reduce((scrubbed, secret) => scrubbed.split(secret).join('***'), redactUserInfo(text));
+    const resolved = scrub(withoutQuery(target.url));
+    const reference = target.reference === undefined ? undefined : redactUserInfo(target.reference);
     const quote = (text: string): string => describeValue(text, REF_TEXT_MAX_LENGTH);
     const what =
-      target.reference === undefined
+      reference === undefined
         ? `external $ref ${quote(resolved)}`
-        : `$ref ${quote(target.reference)}${at === '' || at === '#' ? '' : ` at ${quote(at)}`}` +
+        : `$ref ${quote(reference)}${at === '' || at === '#' ? '' : ` at ${quote(at)}`}` +
           `${base === undefined ? '' : ` resolved against ${quote(base)}`} to ${quote(resolved)}`;
     // A relative reference of a document that has no base URI resolves against the working directory
-    const relative = target.reference !== undefined && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(target.reference);
+    const relative = reference !== undefined && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(reference);
     const hint =
       !options.documentHasBase && relative
         ? ' (the document has no base URI, so its relative references resolve against the working directory: ' +
@@ -443,7 +464,7 @@ class ExternalRefError extends Error {
     const bounded = (text: string): string => messageText(text, REF_TEXT_MAX_LENGTH);
     this.details = {
       rule: refusal.rule,
-      ...(target.reference === undefined ? {} : { reference: bounded(target.reference) }),
+      ...(reference === undefined ? {} : { reference: bounded(reference) }),
       ...(base === undefined ? {} : { base: bounded(base) }),
       resolved: bounded(resolved),
     };
@@ -587,9 +608,11 @@ function detectResponseHints(
 /**
  * Whether a schema allows only JSON numbers, booleans and `null`: its
  * `type` is one of `number`, `integer`, `boolean`, `null`, or a list of
- * them. Without a `type` (or for a boolean schema) anything is allowed.
+ * them. Without a `type` (or for `true`) anything is allowed; `false`
+ * allows nothing, so nothing a cookie cannot carry.
  */
 function onlyScalarJson(schema: unknown): boolean {
+  if (schema === false) return true;
   const type = ownProperty(schema, 'type');
   const types: unknown[] | undefined = typeof type === 'string' ? [type] : Array.isArray(type) ? type : undefined;
   return (
@@ -799,16 +822,19 @@ export function normalizeToolName(raw: string, maxLength: number, fallbackSeed: 
  * Main class for generating MCP tools from OpenAPI specifications
  */
 export class OpenAPIToolGenerator {
+  /** The document as loaded, after overlays */
   private document: OpenAPIDocument;
+  /** `document` dereferenced, still in its declared version (Swagger 2.0 included) */
   private dereferencedDocument?: OpenAPIDocument;
+  /**
+   * Swagger 2.0 only: `dereferencedDocument` converted to OpenAPI 3.0
+   * (`upgradeSwagger2`), the document generation and lint read
+   */
+  private upgradedDocument?: OpenAPIDocument;
+  /** The document declares Swagger 2.0: it is converted to OpenAPI 3.0 once dereferenced */
+  private readonly swagger: boolean;
   /** The dereference in progress, so concurrent callers share one (and its fetches) */
   private dereferencing?: Promise<void>;
-  /**
-   * The copy of the document that is dereferenced, its self-references made
-   * local, made once per generator (kept for a retry until a dereference
-   * succeeds)
-   */
-  private prepared?: PreparedDocument;
   private options: Required<Omit<LoadOptions, 'overlays' | 'documentUri'>> & Pick<LoadOptions, 'overlays'>;
   /** The version the document declares, read once after overlays apply */
   private readonly specVersion: SpecVersionInfo;
@@ -824,8 +850,16 @@ export class OpenAPIToolGenerator {
   private validation?: Promise<ValidationResult>;
   /** Diagnostics in the order first noticed, keyed by `diagnosticKey`; at most `MAX_DIAGNOSTICS` */
   private readonly diagnostics = new Map<string, SpecDiagnostic>();
-  /** Whether a diagnostic was refused because the list was full */
-  private diagnosticsTruncated = false;
+  /** The keys of the `info` entries of `diagnostics`, in the order recorded: a warning can take the last one's place */
+  private readonly infoKeys: string[] = [];
+  /** Findings not recorded because the list was full, by severity */
+  private readonly dropped = { warning: 0, info: 0 };
+  /** Keys of the findings counted in `dropped`, so one found again is not counted twice (bounded) */
+  private readonly droppedKeys = new Set<string>();
+  /** Swagger 2.0: the source index of each entry of a converted `parameters` list (`upgradeSwagger2`) */
+  private parameterIndexes?: WeakMap<object, readonly number[]>;
+  /** Swagger 2.0: why the document could not be converted, once that is known */
+  private upgradeError?: ParseError;
   /** Paths (`pathKey`) whose Path Item diagnostics are recorded */
   private readonly walkedPaths = new Set<string>();
 
@@ -866,6 +900,7 @@ export class OpenAPIToolGenerator {
     // version fields), and why it cannot be processed if it cannot — an error
     // when validation runs, a warning to read when `validate: false` skips it
     this.specVersion = detectSpecVersion(this.document);
+    this.swagger = this.specVersion.family === '2.0';
     this.operationLayout = resolveOperationLayout(this.specVersion);
     for (const diagnostic of this.specVersion.diagnostics) this.addDiagnostic(diagnostic);
     const problem = versionError(this.specVersion);
@@ -888,10 +923,27 @@ export class OpenAPIToolGenerator {
     const key = diagnosticKey(diagnostic);
     if (this.diagnostics.has(key)) return;
     if (this.diagnostics.size >= MAX_DIAGNOSTICS) {
-      this.diagnosticsTruncated = true;
-      return;
+      // Full: a warning takes the place of the latest info, if there is one; an info is not recorded
+      const evicted = diagnostic.severity === 'info' ? undefined : this.infoKeys.pop();
+      if (evicted === undefined) {
+        this.countDropped(key, diagnostic.severity);
+        return;
+      }
+      this.countDropped(evicted, 'info');
+      this.diagnostics.delete(evicted);
     }
-    this.diagnostics.set(key, { ...diagnostic });
+    // For Swagger 2.0, which of its two documents `path` points into (the 2.0 one unless the caller says otherwise)
+    const entry = { ...diagnostic };
+    if (this.swagger && entry.path !== undefined) entry.document ??= 'source';
+    this.diagnostics.set(key, entry);
+    if (entry.severity === 'info') this.infoKeys.push(key);
+  }
+
+  /** Counts a finding left out of the full list, once per finding as far as `MAX_DROPPED_KEYS` allows. */
+  private countDropped(key: string, severity: SpecDiagnostic['severity']): void {
+    if (this.droppedKeys.has(key)) return;
+    if (this.droppedKeys.size < MAX_DROPPED_KEYS) this.droppedKeys.add(key);
+    this.dropped[severity]++;
   }
 
   /**
@@ -913,6 +965,12 @@ export class OpenAPIToolGenerator {
    *    ...). Validation errors never reach it: they throw `ParseError`.
    *    Validation runs once per generator and is not re-run if the document
    *    returned by `getDocument()` is changed;
+   * 2b. for a Swagger 2.0 document, at the first generation or `lint()`
+   *    (after validation): what its conversion to OpenAPI 3.0 could not
+   *    carry over exactly, with the `SWAGGER_*` codes (`upgradeSwagger2`), and
+   *    a `FEATURE_NEWER_THAN_DECLARED_VERSION` for a `trace`, `query` or
+   *    `additionalOperations` field, which Swagger 2.0 does not have. Their
+   *    `path` points into the 2.0 document as written;
    * 3. while generating — `generateTools()` for every path, `generateTool()`
    *    (and Arazzo steps, which use it) for the path item and operation it
    *    builds:
@@ -949,8 +1007,23 @@ export class OpenAPIToolGenerator {
    *    - `UNSUPPORTED_STREAMING_REQUEST_BODY`: a request body declares only
    *      `itemSchema` (a streamed upload); the tool takes no body input.
    *
-   * At most `MAX_DIAGNOSTICS` entries are kept; past that, one final
-   * `DIAGNOSTICS_TRUNCATED` entry. Every severity is `warning`.
+   * At most `MAX_DIAGNOSTICS` entries are kept, warnings in preference to
+   * infos: once the list is full, a new warning takes the place of the most
+   * recently recorded info (while there is one) and a new info is not
+   * recorded. So the list holds every warning found while there was room,
+   * and the infos that still fit, each in the order found. One final
+   * `DIAGNOSTICS_TRUNCATED` entry then says how many warnings and infos were
+   * not recorded. Every severity is `warning`, except Swagger 2.0 conversion
+   * notes that change nothing a tool does (`SWAGGER_UNKNOWN_FIELD`,
+   * `SWAGGER_ASSUMED_MEDIA_TYPE`, ...), which are `info`.
+   *
+   * For a Swagger 2.0 document every entry with a `path` has `document`:
+   * `'source'` when `path` points into the 2.0 document as written, which
+   * every finding about a construct that exists there does (generation
+   * findings about a parameter name its index in the 2.0 list, not in the
+   * converted one), and `'converted'` for a construct only the conversion
+   * has (its request body); no finding of this release points there for a
+   * converted document. Other documents never set `document`.
    *
    * `path` comes in two forms, like `ValidationErrorDetail.path`: a
    * forwarded validator warning whose code predates OpenAPI 3.2 support
@@ -963,11 +1036,14 @@ export class OpenAPIToolGenerator {
    */
   getDiagnostics(): SpecDiagnostic[] {
     const diagnostics = [...this.diagnostics.values()].map((diagnostic) => ({ ...diagnostic }));
-    if (this.diagnosticsTruncated) {
+    const { warning, info } = this.dropped;
+    if (warning + info > 0) {
       diagnostics.push({
         severity: 'warning',
         code: DIAGNOSTIC_CODES.DIAGNOSTICS_TRUNCATED,
-        message: `Only the first ${MAX_DIAGNOSTICS} diagnostics are kept; later findings were not recorded`,
+        message:
+          `Only ${MAX_DIAGNOSTICS} diagnostics are kept, warnings in preference to infos; ${warning} ` +
+          `${warning === 1 ? 'warning' : 'warnings'} and ${info} ${info === 1 ? 'info' : 'infos'} were not recorded`,
       });
     }
     return diagnostics;
@@ -976,9 +1052,11 @@ export class OpenAPIToolGenerator {
   /**
    * The OpenAPI version the document declares (read after overlays), as
    * `detectSpecVersion` reports it: its `status` (`supported`,
-   * `newer-minor`, `swagger-2.0`, `unsupported`, `malformed`, `missing`), the
-   * declared value, and the `family` (`3.0`, `3.1`, `3.2`) whose rules the
-   * validator applies, `undefined` when the version cannot be processed.
+   * `newer-minor`, `unsupported`, `malformed`, `missing`), the declared
+   * value, and the `family` (`2.0`, `3.0`, `3.1`, `3.2`) whose rules the
+   * validator applies, `undefined` when the version cannot be processed. A
+   * Swagger 2.0 document reports `{ status: 'supported', field: 'swagger',
+   * family: '2.0' }` before and after its conversion to OpenAPI 3.0.
    * Returns a copy.
    */
   getSpecVersion(): SpecVersionInfo {
@@ -1105,11 +1183,25 @@ export class OpenAPIToolGenerator {
   }
 
   /**
-   * Create generator from a JSON object
+   * Create generator from a JSON object. The object is copied as JSON (so
+   * later changes to it do not reach the generator); one that cannot be
+   * copied throws a `ParseError`: nested too deeply for `JSON.stringify`
+   * (maximum call stack size exceeded), containing itself, or holding a
+   * value JSON has no form for (a `BigInt`).
    */
   static async fromJSON(json: object, options: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
-    // Clone to avoid mutations
-    const document = JSON.parse(JSON.stringify(json));
+    let document: OpenAPIDocument;
+    try {
+      document = JSON.parse(JSON.stringify(json));
+    } catch (error: unknown) {
+      // JSON throws an Error for each: a RangeError for the call stack (or a text too long), a TypeError, ...
+      const message = String((error as Error).message);
+      const detail =
+        error instanceof RangeError && /call stack/i.test(message)
+          ? 'it is nested too deeply to copy (maximum call stack size exceeded)'
+          : messageText(message, DEREFERENCE_ERROR_MAX_LENGTH);
+      throw new ParseError(`Failed to read the JSON document: ${detail}`, { originalError: error });
+    }
     return new OpenAPIToolGenerator(document, options);
   }
 
@@ -1120,9 +1212,38 @@ export class OpenAPIToolGenerator {
    * object, not a copy. Validation runs once per generator, so changing this
    * document afterwards is not re-validated, and neither the declared
    * version (`getSpecVersion()`) nor `getDiagnostics()` is recomputed.
+   *
+   * A Swagger 2.0 document has a third state: once generation or linting
+   * has run, this is the OpenAPI 3.0 document it was converted to
+   * (`openapi: "3.0.3"`, see `upgradeSwagger2`), which is what tools are
+   * generated from; before that it is the 2.0 document as loaded or (after
+   * `validate()` read the documents it references) dereferenced.
+   * `getSpecVersion()` keeps reporting the declared Swagger 2.0.
    */
   getDocument(): OpenAPIDocument {
+    return this.upgradedDocument ?? this.dereferencedDocument ?? this.document;
+  }
+
+  /** The document in its declared version: dereferenced once that has run, else as loaded. What validation reads. */
+  private declaredDocument(): OpenAPIDocument {
     return this.dereferencedDocument ?? this.document;
+  }
+
+  /**
+   * `DEREFERENCE_REQUIRED`: a Swagger 2.0 document loaded with
+   * `dereference: false`, which the converter cannot read. The one error of
+   * `validate()`, and `context.errors` of the `ParseError` of generation and
+   * lint.
+   */
+  private dereferenceRequired(): ValidationErrorDetail {
+    return {
+      message:
+        'A Swagger 2.0 document needs LoadOptions.dereference: true (the default): it is converted to OpenAPI 3.0 ' +
+        'once its $refs are resolved. To read no other document, keep dereferencing on and set secureDefaults: ' +
+        'true (or refResolution.allowedProtocols: [])',
+      path: '/swagger',
+      code: DIAGNOSTIC_CODES.DEREFERENCE_REQUIRED,
+    };
   }
 
   /**
@@ -1152,13 +1273,22 @@ export class OpenAPIToolGenerator {
    * result earlier releases gave. The validator follows local parameter
    * references itself.
    *
+   * A Swagger 2.0 document is validated as written (dereferenced like any
+   * other), with the 2.0 rules: `validate()` never converts it. Loaded with
+   * `dereference: false`, which generation cannot convert, the result is
+   * `{ valid: false, errors: [{ code: 'DEREFERENCE_REQUIRED', message, path: '/swagger' }] }`
+   * and nothing else, as for a reference that cannot be read.
+   *
    * Does not add to `getDiagnostics()`.
    */
   async validate(): Promise<ValidationResult> {
     const validator = new Validator();
+    if (this.swagger && !this.options.dereference) {
+      return { valid: false, errors: [this.dereferenceRequired()] };
+    }
     if (this.options.dereference && OpenAPIToolGenerator.hasExternalRefs(this.document)) {
       try {
-        await this.initialize(false);
+        await this.dereferenceOnce();
       } catch (error: unknown) {
         if (!(error instanceof ParseError) || error.context?.['rule'] === undefined) throw error;
         const path: unknown = error.context['path'];
@@ -1173,7 +1303,7 @@ export class OpenAPIToolGenerator {
           ],
         };
       }
-      return validator.validate(this.getDocument());
+      return validator.validate(this.declaredDocument());
     }
     return validator.validate(this.document);
   }
@@ -1182,7 +1312,10 @@ export class OpenAPIToolGenerator {
    * Lint the loaded document for agent-readiness (missing operationIds,
    * vague descriptions, unpaginated lists, oversized schemas, ...). Runs
    * after overlays and dereferencing so findings reflect what tools would
-   * actually be generated from.
+   * actually be generated from: a Swagger 2.0 document is converted first
+   * and its OpenAPI 3.0 form is linted (the operations and their labels are
+   * the same). Throws the `ParseError` generation throws for a 2.0 document
+   * loaded with `dereference: false`.
    */
   async lint(): Promise<LintResult> {
     // Diagnostics must run on the imperfect specs they exist to diagnose:
@@ -1397,6 +1530,11 @@ export class OpenAPIToolGenerator {
    * Every other `$ref` keeps the reading it always had here (no
    * percent-decoding, empty tokens skipped, `{}` for a pointer that leads
    * nowhere).
+   *
+   * A `$ref` to a boolean schema (`false`, `true`) becomes that boolean, as
+   * `$RefParser` makes it: an object placeholder would turn `false` (no value)
+   * into `{}` (any value). A boolean has no children, so no cycle reaches it.
+   * A `$ref` to any other non-object value still becomes `{}`.
    */
   private static dereferenceInternal(
     root: OpenAPIDocument,
@@ -1428,6 +1566,19 @@ export class OpenAPIToolGenerator {
     }
     const frames: WalkFrame[] = [];
     const pending = {};
+    // The value of a `$ref` (cached under `key`) to `target`: a boolean schema
+    // as it is; else a placeholder, cached first so a cycle back to it sees
+    // it, filled once its walked target is known
+    const refTo = (key: string, target: unknown): unknown => {
+      if (typeof target === 'boolean') {
+        cache.set(key, target);
+        return target;
+      }
+      const placeholder: Record<string, unknown> = {};
+      cache.set(key, placeholder);
+      frames.push({ children: [target], keys: null, next: 0, out: [], placeholder });
+      return pending;
+    };
     // A node's walked value — or `pending`, with a frame pushed to walk it
     const enter = (node: unknown): unknown => {
       if (node === null || typeof node !== 'object') return node;
@@ -1442,21 +1593,15 @@ export class OpenAPIToolGenerator {
         const key = `\u0000${JSON.stringify(tokens)}`;
         const cached = cache.get(key);
         if (cached !== undefined) return cached;
-        const placeholder: Record<string, unknown> = {};
-        cache.set(key, placeholder);
         let target: unknown = root;
         for (const token of tokens) target = (target as Record<string, unknown>)[token];
-        frames.push({ children: [target], keys: null, next: 0, out: [], placeholder });
-        return pending;
+        return refTo(key, target);
       }
       const ref = (node as { $ref?: unknown }).$ref;
       if (typeof ref === 'string' && ref.startsWith('#')) {
         const cached = cache.get(ref);
         if (cached !== undefined) return cached;
-        const placeholder: Record<string, unknown> = {};
-        cache.set(ref, placeholder); // break cycles: self-refs see the placeholder
-        frames.push({ children: [resolvePointer(ref)], keys: null, next: 0, out: [], placeholder });
-        return pending;
+        return refTo(ref, resolvePointer(ref));
       }
       const record = node as Record<string, unknown>;
       const keys = Object.keys(record);
@@ -1497,7 +1642,9 @@ export class OpenAPIToolGenerator {
   }
 
   /**
-   * The copy of the document to dereference, made once per generator:
+   * The copy of the document to dereference, made afresh for each attempt
+   * (`$RefParser` replaces references inside it as it goes, so a failed
+   * attempt can leave some resolved):
    *
    * - every `$ref` that names the document itself (its retrieval URI or
    *   `$self`, see `src/base-uri.ts`) is made local: its fragment is
@@ -1506,14 +1653,17 @@ export class OpenAPIToolGenerator {
    *   `ParseError` (rule `missing-target`) naming the reference, whichever
    *   dereferencer runs. Like every local reference, it drops the keywords
    *   next to it (a `description` beside the `$ref`). Without a base URI
-   *   nothing is rewritten;
+   *   nothing is rewritten. Inside a Schema Object with its own `$id`, only an
+   *   absolute reference names the document, and it is rewritten unless
+   *   `$RefParser` will read this document with `$id` scopes (another
+   *   document is needed and `refParserScopesIds`): it would resolve the
+   *   `#` form against the `$id`, so the reference is left as written;
    * - with a retrieval URI too long to be used, a relative reference to
    *   another document fails the load (rule `base-too-long`): it is never
    *   resolved against the working directory instead;
    * - whether a `$ref` to another document remains.
    */
   private prepare(): PreparedDocument {
-    if (this.prepared !== undefined) return this.prepared;
     let copy: OpenAPIDocument;
     try {
       copy = JSON.parse(JSON.stringify(this.document)) as OpenAPIDocument;
@@ -1528,7 +1678,19 @@ export class OpenAPIToolGenerator {
     const exact = new Map<object, readonly string[]>();
     const base = this.documentBase;
     if (base !== undefined) {
-      for (const reference of findSelfReferences(copy, base).references) {
+      const references = findSelfReferences(copy, base).references;
+      // A reference inside a schema with its own `$id` can be made local only if the dereferencer
+      // that runs reads `#` from the document root: the internal one always does, `$RefParser`
+      // unless it applies `$id` scopes to this document. It runs when another document is needed
+      let localScoped = true;
+      if (references.some((reference) => reference.scoped) && refParserScopesIds(copy)) {
+        for (const reference of references) reference.node['$ref'] = `#${reference.fragment}`;
+        localScoped = !OpenAPIToolGenerator.hasExternalRefs(copy);
+        for (const reference of references) reference.node['$ref'] = reference.ref;
+      }
+      for (const reference of references) {
+        // Left as written: read like any other absolute reference
+        if (reference.scoped && !localScoped) continue;
         const problem = pointerTargetProblem(copy, reference.tokens);
         if (problem !== undefined) {
           throw dereferenceError(
@@ -1559,8 +1721,7 @@ export class OpenAPIToolGenerator {
         );
       }
     }
-    this.prepared = { copy, external: OpenAPIToolGenerator.hasExternalRefs(copy), exact };
-    return this.prepared;
+    return { copy, external: OpenAPIToolGenerator.hasExternalRefs(copy), exact };
   }
 
   /** Dereferences the document into `dereferencedDocument`, throwing a `ParseError` on failure. */
@@ -1572,7 +1733,6 @@ export class OpenAPIToolGenerator {
     // refs → `$RefParser` (Node-only file/http resolvers).
     if (!external) {
       this.dereferencedDocument = OpenAPIToolGenerator.dereferenceInternal(copy, exact);
-      this.prepared = undefined;
       return;
     }
     let refParser: typeof import('@apidevtools/json-schema-ref-parser') | undefined;
@@ -1587,9 +1747,9 @@ export class OpenAPIToolGenerator {
         ? refParser.default.dereference(copy, refParserOptions)
         : refParser.default.dereference(root, copy, refParserOptions))) as OpenAPIDocument;
     } catch (error: unknown) {
+      // A retry prepares a new copy: this one may hold references resolved before the failure
       throw dereferenceError(error, refParser);
     }
-    this.prepared = undefined;
   }
 
   /**
@@ -1604,10 +1764,8 @@ export class OpenAPIToolGenerator {
     return fileURLToPath(base);
   }
 
-  /**
-   * Initialize the generator (dereference if needed, then validate)
-   */
-  private async initialize(runValidation: boolean = this.options.validate): Promise<void> {
+  /** Dereferences the document once (when `dereference` is on): concurrent callers share one run. */
+  private async dereferenceOnce(): Promise<void> {
     if (this.options.dereference && !this.dereferencedDocument) {
       // One dereference at a time: concurrent callers share it (and its
       // fetches); after a failure the next call tries again
@@ -1616,6 +1774,19 @@ export class OpenAPIToolGenerator {
       });
       await this.dereferencing;
     }
+  }
+
+  /**
+   * Initialize the generator: dereference if needed, then validate (the
+   * document as declared), then, for Swagger 2.0, convert it to OpenAPI 3.0.
+   * A 2.0 document with `dereference: false` fails first, whatever it holds.
+   */
+  private async initialize(runValidation: boolean = this.options.validate): Promise<void> {
+    if (this.swagger && !this.options.dereference) {
+      const detail = this.dereferenceRequired();
+      throw new ParseError(detail.message, { errors: [detail] });
+    }
+    await this.dereferenceOnce();
 
     if (runValidation) {
       const result = await this.validateOnce();
@@ -1624,16 +1795,47 @@ export class OpenAPIToolGenerator {
         throw new ParseError(invalidDocumentMessage(result.errors!), { errors: result.errors });
       }
     }
+
+    if (this.swagger) this.upgradeOnce();
+  }
+
+  /**
+   * Converts the dereferenced Swagger 2.0 document to OpenAPI 3.0, once,
+   * recording the converter's diagnostics. A document without `host` gets
+   * its server from the URI it was retrieved from (`fromURL`'s final URL, or
+   * `LoadOptions.documentUri`), as the 2.0 specification says; without one
+   * (or with a `file:` one) its server URL stays relative
+   * (`SWAGGER_RELATIVE_SERVER_URL`).
+   */
+  private upgradeOnce(): void {
+    if (this.upgradedDocument !== undefined) return;
+    if (this.upgradeError !== undefined) throw this.upgradeError;
+    const retrievalUri = this.documentBase?.retrievalUri;
+    const result = upgradeSwagger2(this.dereferencedDocument, { documentUri: retrievalUri });
+    for (const diagnostic of result.diagnostics) this.addDiagnostic(diagnostic);
+    if (result.tooLarge) {
+      // Abandoned at MAX_CONVERSION_ENTRIES: the document cannot be read, now or on a later call
+      this.upgradeError = new ParseError(
+        `Cannot convert the Swagger 2.0 document to OpenAPI 3.0: it needs more than ${MAX_CONVERSION_ENTRIES} media ` +
+          'type, encoding, header and form property entries (MAX_CONVERSION_ENTRIES), as its `consumes`, `produces` ' +
+          'and path-level parameters apply to every operation',
+        { code: DIAGNOSTIC_CODES.SWAGGER_CONVERSION_TOO_LARGE, maxEntries: MAX_CONVERSION_ENTRIES },
+      );
+      throw this.upgradeError;
+    }
+    this.parameterIndexes = result.parameterIndexes;
+    this.upgradedDocument = result.document as unknown as OpenAPIDocument;
   }
 
   /**
    * Validates the document generation reads (dereferenced when dereferencing
    * is on) once per generator, recording its warnings as diagnostics. Every
    * `generateTool` call goes through `initialize()`; without this the
-   * validator re-ran for each operation.
+   * validator re-ran for each operation. A Swagger 2.0 document is validated
+   * in its declared version, never its OpenAPI 3.0 conversion.
    */
   private validateOnce(): Promise<ValidationResult> {
-    this.validation ??= new Validator().validate(this.getDocument()).then((result) => {
+    this.validation ??= new Validator().validate(this.declaredDocument()).then((result) => {
       for (const warning of result.warnings ?? []) this.addDiagnostic(fromValidationWarning(warning));
       return result;
     });
@@ -1837,41 +2039,88 @@ export class OpenAPIToolGenerator {
   }
 
   /**
-   * The first parameter of an operation (path-level ones first, as merged)
-   * whose location the generator does not map, as a diagnostic; `undefined`
-   * when every location is mapped. Reference Objects (left by
-   * `dereference: false`) are not checked, as the resolver has always
-   * passed them through. Feature-driven: a `querystring` parameter is mapped
-   * whatever version the document declares.
+   * The index a parameter of a `parameters` list has in the document as the
+   * user wrote it: for a Swagger 2.0 document, the index in the 2.0 list (its
+   * `in: body` and `in: formData` parameters became the request body, so the
+   * converted list can be shorter); otherwise `index` itself.
    */
-  private unsupportedParameterLocation(
-    pathStr: string,
-    entry: OperationEntry,
-    pathItem: unknown,
-  ): SpecDiagnostic | undefined {
+  private sourceIndex(list: unknown, index: number): number {
+    // A WeakMap finds nothing for a value that is not an object
+    return this.parameterIndexes?.get(list as object)?.[index] ?? index;
+  }
+
+  /**
+   * The first parameter of an operation (path-level ones first, as merged)
+   * that cannot be mapped to a request, as a diagnostic; `undefined` when
+   * every one can. Reference Objects (left by `dereference: false`) are not
+   * checked, as the resolver has always passed them through.
+   *
+   * - `UNSUPPORTED_PARAMETER_LOCATION`: its location is not mapped.
+   *   Feature-driven: a `querystring` parameter is mapped whatever version
+   *   the document declares.
+   * - `INVALID_PARAMETER_NAME`: its `name` cannot be a name (absent, `null`,
+   *   `''`, an object, an array). A number or a boolean is a name (its text).
+   */
+  private unmappableParameter(pathStr: string, entry: OperationEntry, pathItem: unknown): SpecDiagnostic | undefined {
     const lists: Array<[unknown, string]> = [
       [ownProperty(pathItem, 'parameters'), jsonPointer('paths', pathStr, 'parameters')],
       [ownProperty(entry.operation, 'parameters'), appendPointer(operationPointer(pathStr, entry), 'parameters')],
     ];
+    let unnamed: SpecDiagnostic | undefined;
     for (const [parameters, pointer] of lists) {
       if (!Array.isArray(parameters)) continue;
       for (let index = 0; index < parameters.length; index++) {
         const parameter: unknown = parameters[index];
         if (isReferenceObject(parameter)) continue;
+        const name = ownProperty(parameter, 'name');
+        const at = appendPointer(pointer, this.sourceIndex(parameters, index));
+        if (unnamed === undefined && readParameterName(name).kind === 'invalid') {
+          unnamed = {
+            severity: 'warning',
+            code: DIAGNOSTIC_CODES.INVALID_PARAMETER_NAME,
+            message:
+              `${operationLabel(entry.method, pathStr)}: a parameter's name must be a non-empty string, found ` +
+              `${describeValue(name)}, so it cannot be sent; the operation makes no tool`,
+            path: appendPointer(at, 'name'),
+          };
+        }
         const location = ownProperty(parameter, 'in');
         if (typeof location === 'string' && MAPPED_PARAMETER_LOCATIONS.includes(location)) continue;
         return {
           severity: 'warning',
           code: DIAGNOSTIC_CODES.UNSUPPORTED_PARAMETER_LOCATION,
           message:
-            `${operationLabel(entry.method, pathStr)}: parameter ${describeValue(ownProperty(parameter, 'name'))} has ` +
+            `${operationLabel(entry.method, pathStr)}: parameter ${describeValue(name)} has ` +
             `location (in) ${describeValue(location)}, which is not mapped to a request ` +
             `(supported: ${MAPPED_PARAMETER_LOCATIONS.join(', ')}); the operation makes no tool`,
-          path: appendPointer(pointer, index),
+          path: at,
         };
       }
     }
-    return undefined;
+    return unnamed;
+  }
+
+  /**
+   * A parameter list with each number or boolean `name` read as its text,
+   * recording `PARAMETER_NAME_NOT_STRING` for each (`pointer` locates the
+   * list). The list itself when nothing changes.
+   */
+  private withTextNames(list: unknown[], pointer: string): unknown[] {
+    let changed = false;
+    const named = list.map((parameter, index) => {
+      if (!isSpecObject(parameter) || isReferenceObject(parameter)) return parameter;
+      const name = readParameterName(parameter['name']);
+      if (name.kind !== 'coerced') return parameter;
+      changed = true;
+      this.addDiagnostic(
+        parameterNameNotStringDiagnostic(
+          parameter['name'] as number | boolean,
+          appendPointer(pointer, this.sourceIndex(list, index)),
+        ),
+      );
+      return { ...parameter, name: name.name };
+    });
+    return changed ? named : list;
   }
 
   /**
@@ -1880,7 +2129,8 @@ export class OpenAPIToolGenerator {
    * Returns the diagnostic of a reason to skip the operation, `undefined`
    * when it can be built:
    *
-   * - `UNSUPPORTED_PARAMETER_LOCATION` (see `unsupportedParameterLocation`);
+   * - `UNSUPPORTED_PARAMETER_LOCATION`, `INVALID_PARAMETER_NAME` (see
+   *   `unmappableParameter`);
    * - the OpenAPI 3.2 querystring rules the validator enforces, for
    *   `validate: false` (a mapper breaking one could not be serialized): more
    *   than one `in: querystring` parameter (`MULTIPLE_QUERYSTRING_PARAMETERS`),
@@ -1888,15 +2138,20 @@ export class OpenAPIToolGenerator {
    *   (`QUERYSTRING_WITH_QUERY_PARAMETERS`), or one without `content` holding
    *   a media type (`QUERYSTRING_PARAMETER_WITHOUT_CONTENT`).
    *
-   * Records as warnings each parameter dropped for repeating a `name` and
-   * `in` in its own list (`DUPLICATE_PARAMETER`) and, for each parameter
-   * that applies, the problems of its `content` (`INVALID_PARAMETER_CONTENT`:
-   * the validator's findings, and a media type left as an unresolved
-   * Reference Object) and a JSON cookie value no cookie can carry
-   * (`COOKIE_CONTENT_NOT_SENDABLE`).
+   * Records as warnings each number or boolean `name`, read as its text
+   * (`PARAMETER_NAME_NOT_STRING`), each parameter dropped for repeating a
+   * `name` and `in` in its own list (`DUPLICATE_PARAMETER`) and, for each
+   * parameter that applies, the problems of its `content`
+   * (`INVALID_PARAMETER_CONTENT`: the validator's findings, and a media type
+   * left as an unresolved Reference Object) and a JSON cookie value no cookie
+   * can carry (`COOKIE_CONTENT_NOT_SENDABLE`). For a Swagger 2.0 document,
+   * each points at the parameter's place in the 2.0 document
+   * (`sourceIndex`).
    *
    * Returns the merge as well, with a pointer for each parameter, for the
-   * checks that need the operation's security (`wholeQueryCredentialDiagnostics`).
+   * checks that need the operation's security (`wholeQueryCredentialDiagnostics`),
+   * and the two lists with their names read as text, which the tool is built
+   * from.
    */
   private checkParameters(
     pathStr: string,
@@ -1904,23 +2159,31 @@ export class OpenAPIToolGenerator {
     pathItem: unknown,
   ):
     | { skip: SpecDiagnostic }
-    | { skip?: undefined; analysis: ParameterAnalysis; pointerOf: (slot: ParameterSlot) => string } {
-    const unsupported = this.unsupportedParameterLocation(pathStr, entry, pathItem);
-    if (unsupported !== undefined) return { skip: unsupported };
+    | {
+        skip?: undefined;
+        analysis: ParameterAnalysis;
+        pointerOf: (slot: ParameterSlot) => string;
+        pathLevel: unknown[];
+        operationLevel: unknown[];
+      } {
+    const unmappable = this.unmappableParameter(pathStr, entry, pathItem);
+    if (unmappable !== undefined) return { skip: unmappable };
 
-    const pathLevel = ownProperty(pathItem, 'parameters');
-    const operationLevel = ownProperty(entry.operation, 'parameters');
+    const pathList = ownProperty(pathItem, 'parameters');
+    const operationList = ownProperty(entry.operation, 'parameters');
+    const listOf = (level: ParameterSlot['level']): unknown => (level === 'path' ? pathList : operationList);
     const listPointer = (level: ParameterSlot['level']): string =>
       level === 'path'
         ? jsonPointer('paths', pathStr, 'parameters')
         : appendPointer(operationPointer(pathStr, entry), 'parameters');
-    const pointerOf = (slot: ParameterSlot): string => appendPointer(listPointer(slot.level), slot.index);
-    const analysis = analyzeParameters(
-      Array.isArray(pathLevel) ? pathLevel : [],
-      Array.isArray(operationLevel) ? operationLevel : [],
-    );
+    // A slot as the user wrote it: its index in the source list
+    const source = (slot: ParameterSlot): ParameterSlot => ({ ...slot, index: this.sourceIndex(listOf(slot.level), slot.index) });
+    const pointerOf = (slot: ParameterSlot): string => appendPointer(listPointer(slot.level), source(slot).index);
+    const pathLevel = this.withTextNames(Array.isArray(pathList) ? pathList : [], listPointer('path'));
+    const operationLevel = this.withTextNames(Array.isArray(operationList) ? operationList : [], listPointer('operation'));
+    const analysis = analyzeParameters(pathLevel, operationLevel);
     for (const { dropped, kept } of analysis.duplicates) {
-      this.addDiagnostic(duplicateParameterDiagnostic(dropped, kept, listPointer(dropped.level)));
+      this.addDiagnostic(duplicateParameterDiagnostic(source(dropped), source(kept), listPointer(dropped.level)));
     }
     if (analysis.querystring) {
       return { skip: this.querystringDiagnostic(pathStr, entry, analysis.querystring, pointerOf(analysis.querystring.slot)) };
@@ -1931,7 +2194,7 @@ export class OpenAPIToolGenerator {
       const generationOnly = this.parameterUseDiagnostic(slot.parameter, pointer);
       if (generationOnly !== undefined) this.addDiagnostic(generationOnly);
     }
-    return { analysis, pointerOf };
+    return { analysis, pointerOf, pathLevel, operationLevel };
   }
 
   /**
@@ -2048,6 +2311,26 @@ export class OpenAPIToolGenerator {
   }
 
   /**
+   * `REQUIRED_INPUT_ACCEPTS_NOTHING`, one per required input (a parameter, a
+   * body property or a whole body) whose schema accepts no value: `false`, or
+   * `{ not: {} }` (`isNeverSchema`). No call of the tool can be valid; it is
+   * still made, as the document describes it.
+   */
+  private requiredInputDiagnostics(pathStr: string, entry: OperationEntry, inputSchema: JsonSchema): SpecDiagnostic[] {
+    const required = Array.isArray(inputSchema.required) ? inputSchema.required : [];
+    return required
+      .filter((key) => isNeverSchema(ownProperty(inputSchema.properties, key)))
+      .map((key) => ({
+        severity: 'warning' as const,
+        code: DIAGNOSTIC_CODES.REQUIRED_INPUT_ACCEPTS_NOTHING,
+        message:
+          `${operationLabel(entry.method, pathStr)}: the required input ${describeValue(key)} accepts no value (its ` +
+          `schema is false, or { not: {} }), so no call of the tool can succeed; the tool is still made`,
+        path: operationPointer(pathStr, entry),
+      }));
+  }
+
+  /**
    * `UNSUPPORTED_STREAMING_REQUEST_BODY` when the media type a request body
    * is read in declares `itemSchema` (OpenAPI 3.2, a streamed upload) and no
    * `schema`: the body is left out of the tool's input.
@@ -2056,9 +2339,9 @@ export class OpenAPIToolGenerator {
     const content = ownProperty(ownProperty(entry.operation, 'requestBody'), 'content');
     if (!isSpecObject(content)) return undefined;
     const mediaType = selectRequestMediaType(content);
-    // The resolver reads the body when its media type has a schema
+    // The resolver reads the body when its media type has a schema (`false` included)
     const media = mediaType === undefined ? undefined : ownProperty(content, mediaType);
-    if (!isSpecObject(media) || media['schema']) return undefined;
+    if (!isSpecObject(media) || isPresentSchema(media['schema'])) return undefined;
     const itemSchema = ownProperty(media, 'itemSchema');
     if (itemSchema === undefined || itemSchema === null) return undefined;
     return {
@@ -2068,6 +2351,10 @@ export class OpenAPIToolGenerator {
         `${operationLabel(entry.method, pathStr)}: the request body's media type ${describeValue(mediaType)} ` +
         `declares only itemSchema (a streamed body), which is not supported; the tool takes no body input`,
       path: appendPointer(operationPointer(pathStr, entry), 'requestBody', 'content', mediaType!, 'itemSchema'),
+      // A Swagger 2.0 document has no request body: it is one of the conversion's, which never
+      // declares itemSchema, so this is defensive
+      /* c8 ignore next */
+      ...(this.swagger ? { document: 'converted' as const } : {}),
     };
   }
 
@@ -2141,19 +2428,26 @@ export class OpenAPIToolGenerator {
 
     // Filter out ReferenceObjects from parameters (an operation was found, so
     // the path item is an object)
+    // The lists as checked: a number or boolean `name` read as its text
     let pathParameters: ParameterObject[] | undefined = undefined;
     if (pathItem.parameters) {
-      pathParameters = pathItem.parameters.filter(
-        (p): p is ParameterObject => !isReferenceObject(p),
-      );
+      const list = Array.isArray(pathItem.parameters)
+        ? (parameterCheck.pathLevel as typeof pathItem.parameters)
+        : pathItem.parameters;
+      pathParameters = list.filter((p): p is ParameterObject => !isReferenceObject(p));
     }
+    const resolvedOperation =
+      Array.isArray(operation.parameters) && parameterCheck.operationLevel !== operation.parameters
+        ? { ...operation, parameters: parameterCheck.operationLevel as typeof operation.parameters }
+        : operation;
 
     const { inputSchema, mapper } = parameterResolver.resolve(
-      operation,
+      resolvedOperation,
       pathParameters,
       securityRequirements,
       options.includeSecurityInInput,
     );
+    for (const diagnostic of this.requiredInputDiagnostics(pathStr, entry, inputSchema)) this.addDiagnostic(diagnostic);
 
     // Build response schema, and the streamed response's item schema (OpenAPI
     // 3.2 `itemSchema`), which is reported in metadata, never as outputSchema
@@ -2541,17 +2835,20 @@ export class OpenAPIToolGenerator {
       metadata.servers = [{ url: this.options.baseUrl }];
     }
 
-    // Extract response status codes (preserve 0 for default responses)
+    // Extract response status codes (preserve 0 for default responses); a
+    // range (`'2XX'`) is a string, listed apart
     const schemaObj = outputSchema as Record<string, unknown> | undefined;
-    if (schemaObj && Array.isArray(schemaObj['oneOf'])) {
-      const codes = (schemaObj['oneOf'] as Record<string, unknown>[])
-        .map((schema) => schema['x-status-code'])
-        .filter((code): code is number => code !== undefined && code !== null);
-      if (codes.length > 0) {
-        metadata.responseStatusCodes = codes;
-      }
-    } else if (schemaObj && schemaObj['x-status-code'] !== undefined && schemaObj['x-status-code'] !== null) {
-      metadata.responseStatusCodes = [schemaObj['x-status-code'] as number];
+    const statuses: unknown[] =
+      schemaObj && Array.isArray(schemaObj['oneOf'])
+        ? (schemaObj['oneOf'] as Record<string, unknown>[]).map((schema) => schema['x-status-code'])
+        : [schemaObj?.['x-status-code']];
+    const codes = statuses.filter((code): code is number => typeof code === 'number');
+    if (codes.length > 0) {
+      metadata.responseStatusCodes = codes;
+    }
+    const ranges = statuses.filter((code): code is ResponseStatusRange => typeof code === 'string');
+    if (ranges.length > 0) {
+      metadata.responseStatusRanges = ranges;
     }
 
     // External docs

@@ -148,8 +148,19 @@ const SCHEMA_SINGLE_KEYWORDS = [
  * - OpenAPI 3.0 boolean `exclusiveMinimum`/`exclusiveMaximum` -> numeric form
  * - OpenAPI `example` (singular) -> `examples` array (2020-12 keyword)
  * - OpenAPI-only `xml` metadata is dropped
- * - A boolean schema (OpenAPI 3.1 and later) converts to `{}`; for `false`
- *   that is a known gap, as the result accepts everything
+ * - Swagger 2.0 constructs, whatever version the document declares:
+ *   `x-nullable` (without `nullable`) reads as `nullable`, `type: file` is
+ *   `type: string, format: binary`, and a string `discriminator` becomes
+ *   `{ propertyName }`
+ * - A boolean schema (JSON Schema 2020-12, so OpenAPI 3.1 and later) becomes
+ *   an object schema with the same meaning: `true` (any value) converts to
+ *   `{}`, `false` (no value) to `{ not: {} }`. This holds at the root and
+ *   wherever a subschema is converted (`properties`, `items`, `prefixItems`,
+ *   `allOf`/`anyOf`/`oneOf` members, `not: true`, `$defs`, `definitions`,
+ *   `patternProperties`, `dependentSchemas`); where JSON Schema allows a
+ *   boolean keyword value and conversion copies it (`additionalProperties`,
+ *   `items: false`, `not: false`, `contains`, `propertyNames`, `if`/`then`/
+ *   `else`, `contentSchema`, `unevaluated*`), the boolean is kept as written
  *
  * A subschema shared by several parents (a `$ref` target, after
  * dereferencing) is converted once and the result is reused, so the output
@@ -170,9 +181,32 @@ export function toJsonSchema(schema: object | boolean, options: SchemaConversion
     lowWater: Infinity,
   };
   // Any object converts (a Schema or Reference Object of any version, or a
-  // schema-shaped object the caller built); a boolean takes visitSchema's
-  // non-object path
+  // schema-shaped object the caller built); a boolean becomes its object form
   return convertSchema(schema as SchemaObject | ReferenceObject, 0, state);
+}
+
+/**
+ * Whether a media type's `schema` is read: any truthy value, as always, and
+ * the boolean schema `false` (OpenAPI 3.1 and later), which `toJsonSchema`
+ * converts to `{ not: {} }`. A request body, a response and the stream check
+ * of a request body all decide by it. Internal (not part of the public barrel).
+ */
+export function isPresentSchema(value: unknown): boolean {
+  return Boolean(value) || value === false;
+}
+
+/**
+ * Whether a converted schema accepts no value because of its `not`: `{ not: {} }`
+ * (what `toJsonSchema` makes of `false`, and how OpenAPI 3.0 writes "never"),
+ * or `{ not: true }`, whatever other keywords it has. Internal.
+ */
+export function isNeverSchema(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const not = (value as Record<string, unknown>)['not'];
+  return (
+    not === true ||
+    (not !== null && typeof not === 'object' && !Array.isArray(not) && Object.keys(not).length === 0)
+  );
 }
 
 /** Absent or non-finite limits mean "unbounded"; finite ones floor, with a minimum. */
@@ -318,8 +352,16 @@ function visitSchema(
     return {} as JsonSchema;
   }
   const node: unknown = schema;
+  if (typeof node === 'boolean') {
+    // A boolean schema keeps its meaning as an object schema, so every later
+    // step sees objects: `true` accepts any value (`{}`), `false` none. Its
+    // one keyword is charged like a converted schema's
+    if (node) return {} as JsonSchema;
+    charge(state, 1);
+    return { not: {} } as JsonSchema;
+  }
   if (node === null || typeof node !== 'object') {
-    // Boolean/degenerate schemas have no children to share or cycle through
+    // Degenerate schemas have no children to share or cycle through
     return enterSchema(schema, depth, null, state, frames);
   }
   const cached = state.cache.get(node);
@@ -548,6 +590,42 @@ function findCyclicNodes(root: object, maxDepth: number, maxNodes: number): Set<
 }
 
 /**
+ * Rewrites, in a schema's result being built, the Swagger 2.0 constructs that
+ * OpenAPI 3 spells differently, and returns whether the schema is nullable.
+ * Applied whatever version the document declares, like `nullable` itself:
+ *
+ * - `x-nullable: <boolean>` stands for `nullable` when the schema has no
+ *   `nullable` (the extension is then dropped, as `nullable` is);
+ * - `type: file` (or `file` in a `type` list) is a binary string: `type:
+ *   string, format: binary`;
+ * - a string `discriminator` (the 2.0 form, a property name) becomes the
+ *   OpenAPI 3 object `{ propertyName }`, so no later step meets a string.
+ *
+ * `nullable` is the schema's own `nullable` keyword (already taken out).
+ */
+function normalizeSwaggerKeywords(result: Record<string, unknown>, nullable: unknown): boolean {
+  let effective = nullable;
+  const xNullable = result['x-nullable'];
+  if (nullable === undefined && typeof xNullable === 'boolean') {
+    effective = xNullable;
+    delete result['x-nullable'];
+  }
+
+  const type = result['type'];
+  if (type === 'file') {
+    result['type'] = 'string';
+    result['format'] = 'binary';
+  } else if (Array.isArray(type) && type.includes('file')) {
+    result['type'] = [...new Set(type.map((name: unknown) => (name === 'file' ? 'string' : name)))];
+    result['format'] = 'binary';
+  }
+
+  const discriminator = result['discriminator'];
+  if (typeof discriminator === 'string') result['discriminator'] = { propertyName: discriminator };
+  return effective === true;
+}
+
+/**
  * Start converting a schema: build its result without the children, and list
  * the children to convert — returning the finished result right away when
  * there are none, or `PENDING` with the frame pushed.
@@ -597,11 +675,15 @@ function enterSchema(
   delete result['xml'];
   frame.result = result;
 
+  // Swagger 2.0 constructs, read whatever version the document declares (a
+  // 2.0 document is converted before this, but a 3.x one can carry them too)
+  const isNullable = normalizeSwaggerKeywords(result, nullable);
+
   // OpenAPI 3.0 `nullable: true` -> JSON Schema type union with 'null'.
   // Type-less nullable schemas (compositions, enum-only) can't take a type
   // union — they are wrapped in `anyOf: [<schema>, { type: 'null' }]` at the
   // end of processing instead, so nullability is never silently lost.
-  if (nullable === true) {
+  if (isNullable) {
     const type = result['type'];
     if (type === undefined) {
       frame.wrapNullable = true;
@@ -1067,9 +1149,18 @@ export interface ToolMetadata {
   servers?: ServerInfo[];
 
   /**
-   * Response status codes included in output schema
+   * Response status codes included in output schema: each explicit code
+   * (`200`), and 0 for `default`. A range (`2XX`) is not a number, so it is
+   * listed in `responseStatusRanges` instead.
    */
   responseStatusCodes?: number[];
+
+  /**
+   * Response status ranges included in output schema (`2XX`, `4XX`: OpenAPI
+   * range keys, any case in the document, upper-cased here), in output order.
+   * Absent when the output holds no range.
+   */
+  responseStatusRanges?: ResponseStatusRange[];
 
   /**
    * External documentation
@@ -1150,20 +1241,30 @@ export interface ResponseHints {
 }
 
 /**
+ * An OpenAPI response range key (`1XX` to `5XX`; the document may write it in
+ * any case), as the output gives it: `x-status-code` of an output schema,
+ * `ToolMetadata.responseStatusRanges`, `ResponseStreamInfo.statusCode`.
+ */
+export type ResponseStatusRange = '1XX' | '2XX' | '3XX' | '4XX' | '5XX';
+
+/**
  * A streamed response (`ToolMetadata.responseStream`): an OpenAPI 3.2 Media
  * Type Object with `itemSchema`.
  *
  * - The response is chosen among an operation's streamed responses as
  *   `GenerateOptions.includeAllResponses: false` chooses one output schema
- *   (`preferredStatusCodes` order, then any 2xx, any 3xx, the first;
- *   `default` only when no status code streams).
+ *   (see `GenerateOptions.preferredStatusCodes`; `default` only when no
+ *   status code or range streams).
  * - Within it, the media type is the first one in the response's `content`, in
  *   the document's key order, that declares `itemSchema`; it is chosen
  *   independently of the media type the output schema comes from.
  */
 export interface ResponseStreamInfo {
-  /** The response's status code, as `responseStatusCodes` reads it (0 for `default`) */
-  statusCode: number;
+  /**
+   * The response's status code as the output schema's `x-status-code` gives
+   * it: the code (`200`), the range upper-cased (`'2XX'`), or 0 for `default`
+   */
+  statusCode: number | ResponseStatusRange;
 
   /** The sequential media type, as the document writes it (`text/event-stream`, `application/jsonl`, ...) */
   contentType: string;
@@ -1535,7 +1636,20 @@ export interface GenerateOptions {
   namingStrategy?: NamingStrategy;
 
   /**
-   * Preferred response status codes (in order of preference)
+   * Preferred response status codes (in order of preference), for the one
+   * output schema of `includeAllResponses: false` and for the streamed
+   * response. The response chosen is the first that matches:
+   *
+   * 1. an explicit status code in this list, in its order;
+   * 2. any explicit 2xx status code (the success class);
+   * 3. a range key (`2XX`, any case) covering a code in this list, in its
+   *    order, else the `2XX` range;
+   * 4. any explicit 3xx status code, else the `3XX` range;
+   * 5. the first response with a schema (`default` only when nothing else
+   *    has one).
+   *
+   * An explicit code therefore always wins over a range of its own class:
+   * `{ 299, 2XX }` gives 299, although `2XX` covers the preferred 200.
    * @default [200, 201, 204, 202, 203, 206]
    */
   preferredStatusCodes?: number[];
@@ -1848,9 +1962,11 @@ export const LEGACY_PATH_KEY_MAX_LENGTH = 1024;
 
 /**
  * Every code a diagnostic from `generator.getDiagnostics()` can carry, with
- * what it means, and `UNREADABLE_REFERENCE`, the validation error
- * `generator.validate()` returns for a reference it cannot read. Values
- * never change once released.
+ * what it means (the Swagger 2.0 conversion's `SWAGGER_*` codes among them),
+ * and the two validation errors only `generator.validate()` returns:
+ * `UNREADABLE_REFERENCE` for a reference it cannot read and
+ * `DEREFERENCE_REQUIRED` for a Swagger 2.0 document loaded with
+ * `dereference: false`. Values never change once released.
  */
 export const DIAGNOSTIC_CODES = Object.freeze({
   // Spec layer: the declared version, the Path Item walk, newer features
@@ -1915,8 +2031,29 @@ export const DIAGNOSTIC_CODES = Object.freeze({
    * `getDiagnostics()` entry.
    */
   UNREADABLE_REFERENCE: 'UNREADABLE_REFERENCE',
+  /**
+   * A Swagger 2.0 document was loaded with `LoadOptions.dereference: false`:
+   * it is converted to OpenAPI 3.0 once its references are resolved, so it
+   * cannot be read. The one error `generator.validate()` returns, and the
+   * `context.errors` entry of the `ParseError` that generation and
+   * `generator.lint()` throw. Never a `getDiagnostics()` entry.
+   */
+  DEREFERENCE_REQUIRED: 'DEREFERENCE_REQUIRED',
   /** A Security Requirement is not an object; it is dropped. */
   INVALID_SECURITY_REQUIREMENT: 'INVALID_SECURITY_REQUIREMENT',
+  /**
+   * A parameter's `name` cannot be a name: absent, `null`, `''`, an object or
+   * an array (a number or a boolean is read as its text, see
+   * `PARAMETER_NAME_NOT_STRING`). The operation makes no tool. A validation
+   * error (`MISSING_PARAMETER_NAME` for an absent, `null` or empty one).
+   */
+  INVALID_PARAMETER_NAME: 'INVALID_PARAMETER_NAME',
+  /**
+   * A required input of a tool (a parameter, a body property, a whole body)
+   * has a schema that accepts no value (`false`, or `{ not: {} }`), so no
+   * call of the tool can succeed. The tool is still made.
+   */
+  REQUIRED_INPUT_ACCEPTS_NOTHING: 'REQUIRED_INPUT_ACCEPTS_NOTHING',
   /**
    * Every Security Requirement of an operation was dropped, so no way to
    * authenticate is known: the operation makes no tool.

@@ -885,7 +885,7 @@ describe('Integration: OpenAPI 3.2 documents (issue #55)', () => {
   });
 
   it('exports the version, operation and diagnostic helpers', () => {
-    expect(lib.SUPPORTED_SPEC_VERSIONS).toEqual(['3.0.x', '3.1.x', '3.2.x']);
+    expect(lib.SUPPORTED_SPEC_VERSIONS).toEqual(['2.0', '3.0.x', '3.1.x', '3.2.x']);
     expect(lib.MAX_DIAGNOSTICS).toBe(1000);
     expect(lib.LEGACY_PATH_KEY_MAX_LENGTH).toBe(1024);
     expect(lib.DIAGNOSTIC_CODES).toMatchObject({
@@ -910,6 +910,27 @@ describe('Integration: OpenAPI 3.2 documents (issue #55)', () => {
     expect(lib.detectSpecVersion({ openapi: '3.3.0' })).toMatchObject({ status: 'newer-minor', family: '3.2' });
     expect(lib.getOperation(pathItem, 'LINK')).toMatchObject({ method: 'LINK', source: 'additional' });
     expect(lib.getOperation(pathItem, 'link')).toBeUndefined();
+  });
+
+  it('exports the Swagger 2.0 converter, and generates from a 2.0 document', async () => {
+    const swagger = {
+      swagger: '2.0',
+      info: { title: 'Pets', version: '1' },
+      host: 'api.example.com',
+      schemes: ['https'],
+      paths: { '/pets': { get: { operationId: 'listPets', responses: { 200: { description: 'ok' } } } } },
+    };
+    const { document, diagnostics } = lib.upgradeSwagger2(swagger);
+    expect(document).toMatchObject({ openapi: '3.0.3', servers: [{ url: 'https://api.example.com' }] });
+    expect(diagnostics).toEqual([]);
+    const generator = await lib.OpenAPIToolGenerator.fromJSON(swagger);
+    expect((await generator.generateTools()).map((t: { name: string }) => t.name)).toEqual(['listPets']);
+    expect(generator.getSpecVersion()).toMatchObject({ field: 'swagger', family: '2.0' });
+    expect(generator.getDocument()).toEqual(document);
+    expect(lib.DIAGNOSTIC_CODES).toMatchObject({
+      SWAGGER_NOT_CONVERTED: 'SWAGGER_NOT_CONVERTED',
+      DEREFERENCE_REQUIRED: 'DEREFERENCE_REQUIRED',
+    });
   });
 });
 

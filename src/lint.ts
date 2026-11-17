@@ -4,9 +4,11 @@ import { analyzeParameters } from './parameter-resolver';
 import {
   detectSpecVersion,
   isSpecObject,
+  isSwagger2,
   listOperations,
   ownProperty,
   resolveOperationLayout,
+  upgradeSwagger2,
   wireMethod,
 } from './spec';
 
@@ -185,8 +187,14 @@ function readParameters(value: unknown): ParameterObject[] {
  * ones the declared version has (`query` and `additionalOperations` from
  * OpenAPI 3.2; the eight historical methods when the version is older,
  * missing or malformed).
+ *
+ * A Swagger 2.0 document is converted to OpenAPI 3.0 first (`upgradeSwagger2`,
+ * whose diagnostics are not reported here), so its findings are those of the
+ * tools it generates; pass it dereferenced, as `generator.lint()` does: a
+ * `$ref` left in it is not followed.
  */
 export function lintDocument(document: object): LintResult {
+  if (isSwagger2(document)) return lintDocument(upgradeSwagger2(document).document);
   const findings: LintFinding[] = [];
   const operationIds = new Map<string, string[]>();
 

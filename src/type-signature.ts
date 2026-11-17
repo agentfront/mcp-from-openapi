@@ -9,6 +9,7 @@
  * wrap the type themselves.
  */
 import type { JsonSchema } from './types';
+import { isNeverSchema } from './types';
 
 /** TypeScript rendering of one tool's call contract. */
 export interface ToolTypeScriptInfo {
@@ -164,6 +165,10 @@ function typeExpr(schema: unknown, ctx: PrintContext, depth: number, indent: str
   }
   if (!isSchemaRecord(schema)) {
     return 'unknown';
+  }
+  // `{ not: {} }` (a `false` schema, after conversion) accepts no value, whatever else it says
+  if (isNeverSchema(schema)) {
+    return 'never';
   }
   if (ctx.stack.has(schema)) {
     return 'unknown';
