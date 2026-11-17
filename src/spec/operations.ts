@@ -170,6 +170,18 @@ export type OperationEntry =
 /** Where an operation was found. */
 export type OperationSource = OperationEntry['source'];
 
+/**
+ * The layout `options` name, read the way a malformed document is: options
+ * that are not an object, or a `layout` that is not one with a
+ * `fixedMethods` list, count as absent (`FULL_OPERATION_LAYOUT`).
+ */
+function layoutOption(options: unknown): OperationLayout {
+  const layout = ownProperty(options, 'layout');
+  return isSpecObject(layout) && Array.isArray(layout['fixedMethods'])
+    ? (layout as unknown as OperationLayout)
+    : FULL_OPERATION_LAYOUT;
+}
+
 /** Options of `listOperations`. */
 export interface ListOperationsOptions {
   /** The fields read. Default: `FULL_OPERATION_LAYOUT`; pass `resolveOperationLayout(version)` for a document. */
@@ -270,9 +282,10 @@ function operationNotObject(where: string, value: unknown, base: string, key: st
  *
  * Linear in the size of `additionalOperations`, plus sorting it.
  */
-export function listOperations(pathItem: unknown, options: ListOperationsOptions = {}): OperationList {
-  const layout = options.layout ?? FULL_OPERATION_LAYOUT;
-  const base = options.pointer ?? '';
+export function listOperations(pathItem: unknown, options?: ListOperationsOptions | null): OperationList {
+  const layout = layoutOption(options);
+  const pointerOption = ownProperty(options, 'pointer');
+  const base = typeof pointerOption === 'string' ? pointerOption : '';
   const operations: OperationEntry[] = [];
   const diagnostics: SpecDiagnostic[] = [];
   if (pathItem === undefined) return { operations, diagnostics };
@@ -324,7 +337,9 @@ export function listOperations(pathItem: unknown, options: ListOperationsOptions
     }
     additional.push({ method: key, operation: operation as OperationObject, source: 'additional' });
   }
-  operations.push(...additional.sort(byMethod));
+  // One push per entry: spreading the list into push() passes it as call
+  // arguments, which overflows the stack for a large map (about 125,000 entries)
+  for (const entry of additional.sort(byMethod)) operations.push(entry);
   return { operations, diagnostics };
 }
 
@@ -340,10 +355,10 @@ export function listOperations(pathItem: unknown, options: ListOperationsOptions
 export function getOperation(
   pathItem: unknown,
   method: string,
-  options: GetOperationOptions = {},
+  options?: GetOperationOptions | null,
 ): OperationEntry | undefined {
   if (typeof method !== 'string' || !isSpecObject(pathItem)) return undefined;
-  const layout = options.layout ?? FULL_OPERATION_LAYOUT;
+  const layout = layoutOption(options);
   const standard = toStandardMethod(method);
   if (standard !== undefined) {
     if (!layout.fixedMethods.includes(standard)) return undefined;

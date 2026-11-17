@@ -7,6 +7,12 @@
  * <pointer>`) and the specification text. The patch number never changes
  * behaviour: the specification says tooling SHOULD NOT consider it.
  *
+ * Swagger 2.0 is a family like the others (`'2.0'`, the oldest), declared by
+ * the `swagger` field instead of `openapi`. A 2.0 document is converted to
+ * OpenAPI 3.0 (`upgradeSwagger2`, `./upgrade-v2.ts`) before the library reads
+ * it; its profile describes the document as written, for validation and for
+ * the operations the converter reads.
+ *
  * Adding a minor version (3.3): add its family to `SPEC_FAMILIES`, its profile
  * to `SPEC_PROFILES`, and its new features to `SPEC_FEATURES`.
  *
@@ -23,17 +29,28 @@ import {
   type StandardMethod,
 } from './operations';
 
-/** A known OpenAPI `major.minor`, oldest first in `SPEC_FAMILIES`. */
-export type SpecFamily = '3.0' | '3.1' | '3.2';
+/**
+ * A known specification `major.minor`, oldest first in `SPEC_FAMILIES`:
+ * Swagger 2.0 (`swagger: "2.0"`) and OpenAPI 3.0, 3.1 and 3.2.
+ */
+export type SpecFamily = '2.0' | '3.0' | '3.1' | '3.2';
 
 /** The known families, oldest first. Comparisons between families use this order. */
-export const SPEC_FAMILIES: readonly SpecFamily[] = Object.freeze(['3.0', '3.1', '3.2'] as const);
+export const SPEC_FAMILIES: readonly SpecFamily[] = Object.freeze(['2.0', '3.0', '3.1', '3.2'] as const);
+
+/** The Swagger 2.0 family: the only one declared by `swagger` rather than `openapi`. */
+const SWAGGER_FAMILY = '2.0' satisfies SpecFamily;
 
 /** The newest known family. A newer 3.x minor version is processed with its profile. */
 export const LATEST_SPEC_FAMILY: SpecFamily = '3.2';
 
-/** The supported versions, as named in messages. */
-export const SUPPORTED_SPEC_VERSIONS: readonly string[] = Object.freeze(SPEC_FAMILIES.map((family) => `${family}.x`));
+/**
+ * The supported versions, as named in messages, oldest first: `2.0` (the
+ * `swagger` value Swagger 2.0 requires), then `3.0.x`, `3.1.x`, `3.2.x`.
+ */
+export const SUPPORTED_SPEC_VERSIONS: readonly string[] = Object.freeze(
+  SPEC_FAMILIES.map((family) => (family === SWAGGER_FAMILY ? family : `${family}.x`)),
+);
 
 /** Field of the root object that declares the version. */
 export type SpecVersionField = 'openapi' | 'swagger';
@@ -41,21 +58,19 @@ export type SpecVersionField = 'openapi' | 'swagger';
 /**
  * What the declared version means for the library.
  *
- * - `supported`: a known `major.minor` (3.0, 3.1, 3.2), any patch, with or
- *   without a `-suffix`.
+ * - `supported`: a known family. `openapi` 3.0, 3.1 or 3.2, any patch, with
+ *   or without a `-suffix`; or `swagger: "2.0"` (also the number `2`, as YAML
+ *   reads an unquoted `2.0`), family `2.0`.
  * - `newer-minor`: a 3.x minor version newer than the latest known one
  *   (`3.3.0`, `3.7.1`); processed with the latest profile, with a
  *   `NEWER_OPENAPI_VERSION` warning.
- * - `swagger-2.0`: `swagger: "2.0"` (or the number `2`, as YAML reads an
- *   unquoted `2.0`). Recognised but not supported yet: Swagger 2.0 support
- *   turns this into `supported` with family `2.0`.
- * - `unsupported`: a well-formed version of another major (`1.0.0`,
- *   `4.0.0`, `swagger: "1.2"`).
+ * - `unsupported`: a well-formed version of another major or minor
+ *   (`openapi: "1.0.0"`, `"2.0.0"`, `"4.0.0"`, `swagger: "1.2"`, `"3.0"`).
  * - `malformed`: a version field holding something that is not a version
  *   (`3.1`, `banana`, a number, `null`, ...).
  * - `missing`: neither field is present, or the document is not an object.
  */
-export type SpecVersionStatus = 'supported' | 'newer-minor' | 'swagger-2.0' | 'unsupported' | 'malformed' | 'missing';
+export type SpecVersionStatus = 'supported' | 'newer-minor' | 'unsupported' | 'malformed' | 'missing';
 
 /** The result of `detectSpecVersion`. */
 export interface SpecVersionInfo {
@@ -70,8 +85,9 @@ export interface SpecVersionInfo {
   minor?: number;
   /**
    * The profile the document is processed with: the declared family when
-   * `supported`, `LATEST_SPEC_FAMILY` when `newer-minor`, otherwise
-   * `undefined`. Defined exactly when the document can be processed.
+   * `supported` (`2.0` for Swagger 2.0), `LATEST_SPEC_FAMILY` when
+   * `newer-minor`, otherwise `undefined`. Defined exactly when the document
+   * can be processed.
    */
   family?: SpecFamily;
   /** `NEWER_OPENAPI_VERSION`, `CONFLICTING_VERSION_FIELDS`; never an error. */
@@ -96,8 +112,9 @@ const [LATEST_MAJOR, LATEST_MINOR] = LATEST_SPEC_FAMILY.split('.').map(Number);
 /** Longest stretch of a declared version string quoted in a message (by `describeValue`). */
 const VERSION_TEXT_MAX_LENGTH = 32;
 
-function isFamily(value: string): value is SpecFamily {
-  return (SPEC_FAMILIES as readonly string[]).includes(value);
+/** Whether `value` is a family declared by the `openapi` field (every family but Swagger 2.0). */
+function isOpenapiFamily(value: string): value is SpecFamily {
+  return value !== SWAGGER_FAMILY && (SPEC_FAMILIES as readonly string[]).includes(value);
 }
 
 /** Parses `major` and `minor`; `undefined` if either is past the safe-integer range. */
@@ -115,7 +132,7 @@ function fromOpenapiField(declared: unknown): SpecVersionInfo {
   if (numbers === undefined) return malformed;
   const { major, minor } = numbers;
   const known = `${major}.${minor}`;
-  if (isFamily(known)) {
+  if (isOpenapiFamily(known)) {
     return { status: 'supported', field: 'openapi', declared, major, minor, family: known, diagnostics: [] };
   }
   if (major === LATEST_MAJOR && minor > LATEST_MINOR) {
@@ -140,9 +157,17 @@ function fromOpenapiField(declared: unknown): SpecVersionInfo {
 }
 
 function fromSwaggerField(declared: unknown): SpecVersionInfo {
-  // The 2.0 schema allows exactly "2.0"; YAML reads an unquoted `2.0` as the number 2
+  // 2.0 schema #/properties/swagger/enum: ["2.0"]; YAML reads an unquoted `2.0` as the number 2
   if (declared === '2.0' || declared === 2) {
-    return { status: 'swagger-2.0', field: 'swagger', declared, major: 2, minor: 0, diagnostics: [] };
+    return {
+      status: 'supported',
+      field: 'swagger',
+      declared,
+      major: 2,
+      minor: 0,
+      family: SWAGGER_FAMILY,
+      diagnostics: [],
+    };
   }
   const match = typeof declared === 'string' ? SWAGGER_VERSION.exec(declared) : null;
   const numbers = match === null ? undefined : versionNumbers(match);
@@ -178,6 +203,15 @@ export function detectSpecVersion(document: unknown): SpecVersionInfo {
   return info;
 }
 
+/**
+ * Whether `document` declares Swagger 2.0 (`swagger: "2.0"`, or the number
+ * `2` from an unquoted YAML `2.0`) and no `openapi` field: the documents
+ * `upgradeSwagger2` converts. Never throws.
+ */
+export function isSwagger2(document: unknown): boolean {
+  return detectSpecVersion(document).family === SWAGGER_FAMILY;
+}
+
 /** The declared value as quoted in messages: cut, JSON-quoted and escaped by `describeValue`. */
 function versionText(declared: unknown): string {
   return describeValue(declared, VERSION_TEXT_MAX_LENGTH);
@@ -188,20 +222,21 @@ function declaredText(info: SpecVersionInfo): string {
   return `${info.field === 'swagger' ? 'Swagger' : 'OpenAPI'} ${versionText(info.declared)}`;
 }
 
-const EXPECTED_VERSIONS = `Expected OpenAPI ${SUPPORTED_SPEC_VERSIONS.slice(0, -1).join(', ')} or ${SUPPORTED_SPEC_VERSIONS[SUPPORTED_SPEC_VERSIONS.length - 1]} (a later 3.x is read with the ${LATEST_SPEC_FAMILY} rules)`;
+const OPENAPI_VERSIONS = SUPPORTED_SPEC_VERSIONS.filter((version) => version !== SWAGGER_FAMILY);
+
+const EXPECTED_VERSIONS = `Expected Swagger ${SWAGGER_FAMILY} or OpenAPI ${OPENAPI_VERSIONS.slice(0, -1).join(', ')} or ${OPENAPI_VERSIONS[OPENAPI_VERSIONS.length - 1]} (a later 3.x is read with the ${LATEST_SPEC_FAMILY} rules)`;
 
 /**
  * Why a document with this version cannot be processed, as a message naming
  * the supported versions; `undefined` when it can (`supported`,
- * `newer-minor`).
+ * `newer-minor`). `info` that is not an object reads as a missing version.
  */
 export function describeSpecVersionProblem(info: SpecVersionInfo): string | undefined {
+  if (!isSpecObject(info)) return describeSpecVersionProblem(detectSpecVersion(undefined));
   switch (info.status) {
     case 'supported':
     case 'newer-minor':
       return undefined;
-    case 'swagger-2.0':
-      return `Swagger 2.0 documents are not supported. ${EXPECTED_VERSIONS}`;
     case 'unsupported':
       return `Unsupported version: ${declaredText(info)}. ${EXPECTED_VERSIONS}`;
     case 'malformed':
@@ -209,7 +244,7 @@ export function describeSpecVersionProblem(info: SpecVersionInfo): string | unde
         ? `Malformed version: \`swagger\` must be "2.0", found ${versionText(info.declared)}. ${EXPECTED_VERSIONS}`
         : `Malformed version: \`openapi\` must be a version string such as "3.1.0", found ${versionText(info.declared)}. ${EXPECTED_VERSIONS}`;
     case 'missing':
-      return `Missing version: the document has no \`openapi\` field. ${EXPECTED_VERSIONS}`;
+      return `Missing version: the document has neither an \`openapi\` nor a \`swagger\` field. ${EXPECTED_VERSIONS}`;
   }
 }
 
@@ -218,8 +253,8 @@ export function compareSpecFamilies(a: SpecFamily, b: SpecFamily): number {
   return SPEC_FAMILIES.indexOf(a) - SPEC_FAMILIES.indexOf(b);
 }
 
-/** A Parameter Object `in` value of some version. */
-export type ParameterLocationName = 'path' | 'query' | 'querystring' | 'header' | 'cookie';
+/** A Parameter Object `in` value of some version (`formData` and `body` are Swagger 2.0's). */
+export type ParameterLocationName = 'path' | 'query' | 'querystring' | 'header' | 'cookie' | 'formData' | 'body';
 
 /**
  * What one OpenAPI version allows, for the rules the library applies. It is
@@ -252,6 +287,37 @@ export interface SpecProfile extends OperationLayout {
   /** Whether the root object has `$self`. */
   readonly self: boolean;
 }
+
+const PROFILE_2_0: SpecProfile = Object.freeze({
+  family: '2.0',
+  // 2.0 schema #/definitions/pathItem/properties: $ref, get, put, post, delete, options, head, patch,
+  // parameters (additionalProperties: false): no trace, no query
+  fixedMethods: Object.freeze(['get', 'post', 'put', 'patch', 'delete', 'head', 'options'] as const),
+  // 2.0 schema #/definitions/pathItem: no additionalOperations property, additionalProperties: false
+  additionalOperations: false,
+  // 2.0 schema #/definitions/parameter/oneOf: bodyParameter (#/definitions/bodyParameter/properties/in/enum
+  // ["body"]) and nonBodyParameter, one of headerParameterSubSchema, formDataParameterSubSchema,
+  // queryParameterSubSchema, pathParameterSubSchema (each properties/in/enum one location)
+  parameterLocations: Object.freeze(['path', 'query', 'header', 'formData', 'body'] as const),
+  querystringParameter: false,
+  // 2.0 schema #/definitions/operation/required: ["responses"]
+  operationResponsesRequired: true,
+  // 2.0 schema #/definitions/response/required: ["description"]
+  responseDescriptionRequired: true,
+  // 2.0 schema #/required: ["swagger", "info", "paths"]
+  pathsRequired: true,
+  // 2.0 schema: no root anyOf (paths is required outright)
+  rootRequiresAnyOf: Object.freeze([]),
+  // 2.0 schema #/properties: no webhooks (additionalProperties: false)
+  webhooks: false,
+  // 2.0 schema #/properties: no components (reusable objects live in definitions, parameters,
+  // responses and securityDefinitions), so no pathItems
+  componentsPathItems: false,
+  // Same: no components, so no mediaTypes
+  componentsMediaTypes: false,
+  // 2.0 schema #/properties: no $self
+  self: false,
+});
 
 const PROFILE_3_0: SpecProfile = Object.freeze({
   family: '3.0',
@@ -344,6 +410,7 @@ const PROFILE_3_2: SpecProfile = Object.freeze({
 
 /** The profile of each known family. */
 export const SPEC_PROFILES: Readonly<Record<SpecFamily, SpecProfile>> = Object.freeze({
+  '2.0': PROFILE_2_0,
   '3.0': PROFILE_3_0,
   '3.1': PROFILE_3_1,
   '3.2': PROFILE_3_2,
@@ -366,13 +433,17 @@ export function getSpecProfile(family: string | undefined): SpecProfile | undefi
  *
  * A `supported` or `newer-minor` version gets its profile's layout, so `query`
  * and `additionalOperations` are read only when the declared version defines
- * them (3.2 and later). Any other status (`missing`, `malformed`,
- * `unsupported`, `swagger-2.0`) gets `LEGACY_OPERATION_LAYOUT`, exactly what
- * the library read before OpenAPI 3.2 support.
+ * them (3.2 and later), and a Swagger 2.0 document has no `trace` (its seven
+ * methods). Any other status (`missing`, `malformed`, `unsupported`) gets
+ * `LEGACY_OPERATION_LAYOUT`, exactly what the library read before OpenAPI 3.2
+ * support.
  */
 export function resolveOperationLayout(version: SpecVersionInfo): OperationLayout {
-  const processable = version.status === 'supported' || version.status === 'newer-minor';
-  return (processable ? getSpecProfile(version.family) : undefined) ?? LEGACY_OPERATION_LAYOUT;
+  // `version` that is not an object reads as a version that cannot be processed
+  const status = ownProperty(version, 'status');
+  const processable = status === 'supported' || status === 'newer-minor';
+  return (processable ? getSpecProfile(ownProperty(version, 'family') as string | undefined) : undefined) ??
+    LEGACY_OPERATION_LAYOUT;
 }
 
 /** A Path Item field holding operations that a layout does not read. */
@@ -382,7 +453,7 @@ export interface SkippedOperationField {
   /**
    * The feature the field is (`queryMethod`, `additionalOperations`), for
    * `featureNewerThanDeclared`; `undefined` for a field no version after 3.0
-   * added (`trace` under a layout without it).
+   * added (`trace`, absent from Swagger 2.0 only).
    */
   feature?: SpecFeatureId;
   /** JSON Pointer of the field (`options.pointer` + the field name). */
@@ -410,11 +481,13 @@ export interface ListSkippedNewerOperationsOptions {
 export function listSkippedNewerOperations(
   pathItem: unknown,
   layout: OperationLayout,
-  options: ListSkippedNewerOperationsOptions = {},
+  options?: ListSkippedNewerOperationsOptions | null,
 ): SkippedOperationField[] {
-  const base = options.pointer ?? '';
+  const pointer = ownProperty(options, 'pointer');
+  const base = typeof pointer === 'string' ? pointer : '';
   const skipped: SkippedOperationField[] = [];
-  if (!isSpecObject(pathItem)) return skipped;
+  // A layout that is not one skips nothing: every field counts as read
+  if (!isSpecObject(pathItem) || !isSpecObject(layout) || !Array.isArray(layout.fixedMethods)) return skipped;
   for (const method of STANDARD_METHODS) {
     if (layout.fixedMethods.includes(method) || ownProperty(pathItem, method) === undefined) continue;
     skipped.push({
@@ -548,13 +621,15 @@ export function featureNewerThanDeclared(
   path?: string,
 ): SpecDiagnostic | undefined {
   const known = featureOf(feature);
-  if (known === undefined || version.family === undefined || compareSpecFamilies(known.since, version.family) <= 0) {
+  // A `version` that is not an object, or names no known family, cannot be processed
+  const family = getSpecProfile(ownProperty(version, 'family') as string | undefined)?.family;
+  if (known === undefined || family === undefined || compareSpecFamilies(known.since, family) <= 0) {
     return undefined;
   }
   return {
     severity: 'warning',
     code: SPEC_DIAGNOSTIC_CODES.FEATURE_NEWER_THAN_DECLARED_VERSION,
     message: `${known.label} needs OpenAPI ${known.since} or later, but the document declares ${declaredText(version)}`,
-    ...(path === undefined ? {} : { path }),
+    ...(typeof path === 'string' ? { path } : {}),
   };
 }

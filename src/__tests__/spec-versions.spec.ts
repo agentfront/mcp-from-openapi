@@ -6,6 +6,8 @@
 import * as spec from '../spec';
 import * as diagnosticsModule from '../spec/diagnostics';
 import * as operationsModule from '../spec/operations';
+import * as upgradeModule from '../spec/upgrade-v2';
+import * as parametersModule from '../spec/parameters';
 import * as versionsModule from '../spec/versions';
 import {
   DESCRIBED_VALUE_MAX_LENGTH,
@@ -30,6 +32,7 @@ import {
   featureNewerThanDeclared,
   getSpecProfile,
   isFeatureAvailable,
+  isSwagger2,
   jsonPointer,
   listSkippedNewerOperations,
   resolveOperationLayout,
@@ -43,7 +46,7 @@ import {
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-const EXPECTED = 'Expected OpenAPI 3.0.x, 3.1.x or 3.2.x (a later 3.x is read with the 3.2 rules)';
+const EXPECTED = 'Expected Swagger 2.0 or OpenAPI 3.0.x, 3.1.x or 3.2.x (a later 3.x is read with the 3.2 rules)';
 
 describe('detectSpecVersion', () => {
   it.each([
@@ -179,13 +182,26 @@ describe('detectSpecVersion', () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
-  it.each(['2.0', 2])('reads swagger %p as Swagger 2.0', (declared) => {
+  it.each(['2.0', 2])('reads swagger %p as the supported Swagger 2.0 family', (declared) => {
     expect(detectSpecVersion({ swagger: declared })).toEqual({
-      status: 'swagger-2.0',
+      status: 'supported',
       field: 'swagger',
       declared,
       major: 2,
       minor: 0,
+      family: '2.0',
+      diagnostics: [],
+    });
+    expect(getSpecProfile(detectSpecVersion({ swagger: declared }).family)).toBe(SPEC_PROFILES['2.0']);
+  });
+
+  it.each(['2.0.0', '2.0.1', '2.1.0'])('never reads openapi %p as Swagger 2.0', (openapi) => {
+    expect(detectSpecVersion({ openapi })).toEqual({
+      status: 'unsupported',
+      field: 'openapi',
+      declared: openapi,
+      major: 2,
+      minor: Number(openapi.split('.')[1]),
       diagnostics: [],
     });
   });
@@ -263,7 +279,8 @@ describe('detectSpecVersion', () => {
 
   it('reads swagger when openapi is undefined', () => {
     expect(detectSpecVersion({ openapi: undefined, swagger: '2.0' })).toMatchObject({
-      status: 'swagger-2.0',
+      status: 'supported',
+      family: '2.0',
       diagnostics: [],
     });
   });
@@ -281,9 +298,12 @@ describe('describeSpecVersionProblem', () => {
     expect(describeSpecVersionProblem(detectSpecVersion({ openapi }))).toBeUndefined();
   });
 
+  it.each(['2.0', 2])('has nothing to say about swagger %p', (swagger) => {
+    expect(describeSpecVersionProblem(detectSpecVersion({ swagger }))).toBeUndefined();
+  });
+
   it.each<[unknown, string]>([
-    [{ swagger: '2.0' }, `Swagger 2.0 documents are not supported. ${EXPECTED}`],
-    [{ swagger: 2 }, `Swagger 2.0 documents are not supported. ${EXPECTED}`],
+    [{ swagger: '3.0' }, `Unsupported version: Swagger "3.0". ${EXPECTED}`],
     [{ openapi: '4.0.0' }, `Unsupported version: OpenAPI "4.0.0". ${EXPECTED}`],
     [{ openapi: '2.0.0' }, `Unsupported version: OpenAPI "2.0.0". ${EXPECTED}`],
     [{ swagger: '1.2' }, `Unsupported version: Swagger "1.2". ${EXPECTED}`],
@@ -300,8 +320,8 @@ describe('describeSpecVersionProblem', () => {
       `Malformed version: \`openapi\` must be a version string such as "3.1.0", found an object. ${EXPECTED}`,
     ],
     [{ swagger: '2.0.0' }, `Malformed version: \`swagger\` must be "2.0", found "2.0.0". ${EXPECTED}`],
-    [{}, `Missing version: the document has no \`openapi\` field. ${EXPECTED}`],
-    [null, `Missing version: the document has no \`openapi\` field. ${EXPECTED}`],
+    [{}, `Missing version: the document has neither an \`openapi\` nor a \`swagger\` field. ${EXPECTED}`],
+    [null, `Missing version: the document has neither an \`openapi\` nor a \`swagger\` field. ${EXPECTED}`],
   ])('describes %p', (document, message) => {
     expect(describeSpecVersionProblem(detectSpecVersion(document))).toBe(message);
   });
@@ -319,14 +339,16 @@ describe('describeSpecVersionProblem', () => {
 
 describe('families', () => {
   it('lists the known families oldest first, with the latest and the supported versions', () => {
-    expect(SPEC_FAMILIES).toEqual(['3.0', '3.1', '3.2']);
+    expect(SPEC_FAMILIES).toEqual(['2.0', '3.0', '3.1', '3.2']);
     expect(LATEST_SPEC_FAMILY).toBe(SPEC_FAMILIES[SPEC_FAMILIES.length - 1]);
-    expect(SUPPORTED_SPEC_VERSIONS).toEqual(['3.0.x', '3.1.x', '3.2.x']);
+    expect(SUPPORTED_SPEC_VERSIONS).toEqual(['2.0', '3.0.x', '3.1.x', '3.2.x']);
     expect(Object.isFrozen(SPEC_FAMILIES)).toBe(true);
     expect(Object.isFrozen(SUPPORTED_SPEC_VERSIONS)).toBe(true);
   });
 
   it.each<[SpecFamily, SpecFamily, number]>([
+    ['2.0', '3.0', -1],
+    ['2.0', '3.2', -3],
     ['3.0', '3.1', -1],
     ['3.0', '3.2', -2],
     ['3.1', '3.1', 0],
@@ -338,6 +360,20 @@ describe('families', () => {
 
 describe('profiles', () => {
   const PROFILE_FIELDS: Record<SpecFamily, Omit<SpecProfile, 'family'>> = {
+    '2.0': {
+      fixedMethods: ['get', 'post', 'put', 'patch', 'delete', 'head', 'options'],
+      additionalOperations: false,
+      parameterLocations: ['path', 'query', 'header', 'formData', 'body'],
+      querystringParameter: false,
+      operationResponsesRequired: true,
+      responseDescriptionRequired: true,
+      pathsRequired: true,
+      rootRequiresAnyOf: [],
+      webhooks: false,
+      componentsPathItems: false,
+      componentsMediaTypes: false,
+      self: false,
+    },
     '3.0': {
       fixedMethods: ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'],
       additionalOperations: false,
@@ -409,17 +445,20 @@ describe('profiles', () => {
     expect(Object.isFrozen(SPEC_PROFILES)).toBe(true);
   });
 
-  it('never loosens a rule from one minor version to the next', () => {
-    // Each later minor version allows at least what the previous one did
-    for (let index = 1; index < SPEC_FAMILIES.length; index++) {
-      const older = SPEC_PROFILES[SPEC_FAMILIES[index - 1]];
-      const newer = SPEC_PROFILES[SPEC_FAMILIES[index]];
+  it('never loosens a rule from one OpenAPI 3 minor version to the next', () => {
+    // Each later minor version allows at least what the previous one did. Not
+    // Swagger 2.0 to 3.0, a new major: body and formData parameters became the
+    // request body
+    const openapi = SPEC_FAMILIES.filter((family) => family !== '2.0');
+    for (let index = 1; index < openapi.length; index++) {
+      const older = SPEC_PROFILES[openapi[index - 1]];
+      const newer = SPEC_PROFILES[openapi[index]];
       expect(newer.fixedMethods).toEqual(expect.arrayContaining([...older.fixedMethods]));
       expect(newer.parameterLocations).toEqual(expect.arrayContaining([...older.parameterLocations]));
     }
   });
 
-  it.each([undefined, '3.3', '2.0', '3', '', 'constructor', '__proto__', 'toString', 3.1, null])(
+  it.each([undefined, '3.3', '2', '2.0.0', '3', '', 'constructor', '__proto__', 'toString', 3.1, 2, null])(
     'has no profile for %p',
     (family) => {
       expect(getSpecProfile(family as any)).toBeUndefined();
@@ -428,6 +467,7 @@ describe('profiles', () => {
 
   it('gives the profile of a detected version', () => {
     expect(getSpecProfile(detectSpecVersion({ openapi: '3.1.1' }).family)).toBe(SPEC_PROFILES['3.1']);
+    expect(getSpecProfile(detectSpecVersion({ swagger: '2.0' }).family)).toBe(SPEC_PROFILES['2.0']);
     expect(getSpecProfile(detectSpecVersion({ openapi: '4.0.0' }).family)).toBeUndefined();
   });
 });
@@ -484,6 +524,8 @@ describe('features', () => {
   it.each<[SpecFeatureId, SpecFamily, boolean]>([
     ['queryMethod', '3.1', false],
     ['queryMethod', '3.2', true],
+    ['queryMethod', '2.0', false],
+    ['webhooks', '2.0', false],
     ['webhooks', '3.0', false],
     ['webhooks', '3.1', true],
     ['webhooks', '3.2', true],
@@ -532,10 +574,22 @@ describe('featureNewerThanDeclared', () => {
     }
   });
 
+  it('reports a feature against a Swagger 2.0 document by its swagger field', () => {
+    expect(featureNewerThanDeclared('additionalOperations', detectSpecVersion({ swagger: '2.0' }), '/x')).toEqual({
+      severity: 'warning',
+      code: SPEC_DIAGNOSTIC_CODES.FEATURE_NEWER_THAN_DECLARED_VERSION,
+      message: 'Path Item `additionalOperations` needs OpenAPI 3.2 or later, but the document declares Swagger "2.0"',
+      path: '/x',
+    });
+    expect(featureNewerThanDeclared('webhooks', detectSpecVersion({ swagger: 2 }))?.message).toBe(
+      'The `webhooks` field needs OpenAPI 3.1 or later, but the document declares Swagger 2',
+    );
+  });
+
   it.each<[unknown]>([
     [{ openapi: '4.0.0' }],
     [{ openapi: 'banana' }],
-    [{ swagger: '2.0' }],
+    [{ swagger: '1.2' }],
     [{}],
   ])('reports nothing for a version that cannot be processed: %p', (document) => {
     expect(featureNewerThanDeclared('queryMethod', detectSpecVersion(document))).toBeUndefined();
@@ -564,8 +618,26 @@ describe('diagnostic helpers', () => {
       'METHOD_CASE_VARIANT',
       'NEWER_OPENAPI_VERSION',
       'OPERATION_NOT_OBJECT',
+      'PARAMETER_NAME_NOT_STRING',
       'PATH_ITEM_NOT_OBJECT',
       'REFUSED_METHOD',
+      'SWAGGER_ASSUMED_MEDIA_TYPE',
+      'SWAGGER_ASSUMED_SCHEME',
+      'SWAGGER_BODY_AND_FORM_DATA',
+      'SWAGGER_CONVERSION_TOO_LARGE',
+      'SWAGGER_DUPLICATE_FORM_DATA_PARAMETER',
+      'SWAGGER_FILE_OUTSIDE_FORM_DATA',
+      'SWAGGER_FORM_MEDIA_TYPE_ADDED',
+      'SWAGGER_INVALID_VALUE',
+      'SWAGGER_MEDIA_TYPE_LIMIT',
+      'SWAGGER_MULTIPLE_BODY_PARAMETERS',
+      'SWAGGER_NOT_CONVERTED',
+      'SWAGGER_RELATIVE_SERVER_URL',
+      'SWAGGER_UNKNOWN_FIELD',
+      'SWAGGER_UNRESOLVED_REFERENCE',
+      'SWAGGER_UNSUPPORTED_COLLECTION_FORMAT',
+      'SWAGGER_UNSUPPORTED_SECURITY_SCHEME',
+      'SWAGGER_VERSION_NOT_2_0',
     ]);
   });
 
@@ -728,7 +800,15 @@ describe('resolveOperationLayout', () => {
     expect(resolveOperationLayout(detectSpecVersion({ openapi }))).toBe(SPEC_PROFILES[family]);
   });
 
-  it.each<[unknown]>([[{}], [{ openapi: 'banana' }], [{ openapi: '4.0.0' }], [{ swagger: '2.0' }], [null]])(
+  it.each(['2.0', 2])('reads swagger %p with the 2.0 profile: seven methods, no trace', (swagger) => {
+    const layout = resolveOperationLayout(detectSpecVersion({ swagger }));
+
+    expect(layout).toBe(SPEC_PROFILES['2.0']);
+    expect(layout.fixedMethods).not.toContain('trace');
+    expect(layout.additionalOperations).toBe(false);
+  });
+
+  it.each<[unknown]>([[{}], [{ openapi: 'banana' }], [{ openapi: '4.0.0' }], [{ swagger: '1.2' }], [null]])(
     'reads %p with the legacy layout',
     (document) => {
       expect(resolveOperationLayout(detectSpecVersion(document))).toBe(LEGACY_OPERATION_LAYOUT);
@@ -780,6 +860,16 @@ describe('listSkippedNewerOperations', () => {
     expect(listSkippedNewerOperations(value, LEGACY_OPERATION_LAYOUT)).toEqual([]);
   });
 
+  it('names trace, query and additionalOperations under the Swagger 2.0 layout', () => {
+    expect(
+      listSkippedNewerOperations({ get: op, trace: op, query: op, additionalOperations: {} }, SPEC_PROFILES['2.0']),
+    ).toEqual([
+      { field: 'trace', path: '/trace' },
+      { field: 'query', feature: 'queryMethod', path: '/query' },
+      { field: 'additionalOperations', feature: 'additionalOperations', path: '/additionalOperations' },
+    ]);
+  });
+
   it('names a left-out field no later version added without a feature', () => {
     const layout: OperationLayout = { fixedMethods: ['get', 'post'], additionalOperations: true };
     const [skipped] = listSkippedNewerOperations({ trace: op }, layout);
@@ -802,6 +892,34 @@ describe('listSkippedNewerOperations', () => {
     ]);
     expect(report({ openapi: '3.2.0' })).toEqual([]);
     expect(report({ openapi: 'banana' })).toEqual([]);
+    expect(report({ swagger: '2.0' }).map((d) => d.message)).toEqual([
+      'The `query` operation needs OpenAPI 3.2 or later, but the document declares Swagger "2.0"',
+      'Path Item `additionalOperations` needs OpenAPI 3.2 or later, but the document declares Swagger "2.0"',
+    ]);
+  });
+});
+
+describe('isSwagger2', () => {
+  it.each([{ swagger: '2.0' }, { swagger: 2 }, { swagger: '2.0', openapi: undefined }])(
+    'says yes to %p',
+    (document) => {
+      expect(isSwagger2(document)).toBe(true);
+    },
+  );
+
+  it.each([
+    { swagger: '2.0', openapi: '3.0.3' },
+    { swagger: '1.2' },
+    { swagger: '2.0.0' },
+    { openapi: '2.0.0' },
+    { openapi: '3.0.3' },
+    {},
+    null,
+    'swagger: "2.0"',
+    [{ swagger: '2.0' }],
+    Object.create({ swagger: '2.0' }),
+  ])('says no to %p', (document) => {
+    expect(isSwagger2(document)).toBe(false);
   });
 });
 
@@ -846,14 +964,26 @@ describe('the spec barrel', () => {
       'featureNewerThanDeclared',
       'getSpecProfile',
       'isFeatureAvailable',
+      'isSwagger2',
       'listSkippedNewerOperations',
       'resolveOperationLayout',
     ],
+    upgrade: [
+      'MAX_CONVERSION_ENTRIES',
+      'MAX_MEDIA_TYPES_PER_LIST',
+      'UPGRADED_OPENAPI_VERSION',
+      'readSwagger2BasePath',
+      'swagger2SkippedOperations',
+      'upgradeSwagger2',
+    ],
+    parameters: ['parameterNameNotStringDiagnostic', 'readParameterName'],
   };
   const modules: Record<keyof typeof RUNTIME_EXPORTS, Record<string, unknown>> = {
     diagnostics: diagnosticsModule,
     operations: operationsModule,
     versions: versionsModule,
+    upgrade: upgradeModule,
+    parameters: parametersModule,
   };
 
   it('exports every runtime value of the layer and nothing else', () => {
@@ -869,4 +999,54 @@ describe('the spec barrel', () => {
       expect(Object.keys(modules[module]).sort()).toEqual([...RUNTIME_EXPORTS[module]].sort());
     },
   );
+});
+
+describe('malformed options and version infos (review round 2)', () => {
+  const pathItem = { get: {}, trace: {}, query: {}, additionalOperations: { LINK: {} } };
+
+  it('reads options that are not an object, or hold values of the wrong kind, as absent', () => {
+    const full = spec.listOperations(pathItem).operations.map((e) => e.method);
+    for (const options of [null, 'x', 3, [], { layout: null, pointer: 7 }, { layout: { fixedMethods: 'get' } }]) {
+      expect(spec.listOperations(pathItem, options as any).operations.map((e) => e.method)).toEqual(full);
+      expect(spec.getOperation(pathItem, 'LINK', options as any)?.method).toBe('LINK');
+    }
+    expect(spec.listOperations(null, { pointer: 7 } as any).diagnostics[0].path).toBe('');
+    for (const options of [null, 'x', { pointer: ['a'] }]) {
+      expect(spec.listSkippedNewerOperations(pathItem, spec.SPEC_PROFILES['3.0'], options as any).map((f) => f.path)).toEqual([
+        '/query',
+        '/additionalOperations',
+      ]);
+    }
+    for (const layout of [null, 'x', {}]) {
+      expect(spec.listSkippedNewerOperations(pathItem, layout as any)).toEqual([]);
+    }
+    expect(spec.swagger2SkippedOperations(pathItem, 5 as any).map((d) => d.path)).toEqual([
+      '/trace',
+      '/query',
+      '/additionalOperations',
+    ]);
+  });
+
+  it('reads a version info that is not an object as one that cannot be processed', () => {
+    for (const info of [null, undefined, 'x', { status: 'supported', family: '9.9' }]) {
+      expect(spec.resolveOperationLayout(info as any)).toBe(spec.LEGACY_OPERATION_LAYOUT);
+      expect(spec.featureNewerThanDeclared('queryMethod', info as any, '/q')).toBeUndefined();
+    }
+    expect(spec.describeSpecVersionProblem(null as any)).toMatch(/^Missing version/);
+    const v30 = spec.detectSpecVersion({ openapi: '3.0.3' });
+    expect(spec.featureNewerThanDeclared('queryMethod', v30, 7 as any)).not.toHaveProperty('path');
+  });
+
+  it('reads a parameter name as text when it is a number or a boolean, and not at all otherwise', () => {
+    expect(spec.readParameterName('id')).toEqual({ kind: 'string', name: 'id' });
+    expect(spec.readParameterName(2024)).toEqual({ kind: 'coerced', name: '2024' });
+    expect(spec.readParameterName(false)).toEqual({ kind: 'coerced', name: 'false' });
+    for (const value of ['', null, undefined, {}, [], 1n]) expect(spec.readParameterName(value)).toEqual({ kind: 'invalid' });
+    expect(spec.parameterNameNotStringDiagnostic(true, null as any)).toEqual({
+      severity: 'warning',
+      code: 'PARAMETER_NAME_NOT_STRING',
+      message: 'Parameter name true is a boolean, not a string (YAML reads an unquoted boolean so); it is read as "true"',
+      path: '/name',
+    });
+  });
 });

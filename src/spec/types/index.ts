@@ -2,11 +2,14 @@
  * OpenAPI object types, one namespace per specification version, plus the
  * cross-version unions the library works with.
  *
- * - `OAS30`, `OAS31`, `OAS32`: each version's objects under the
- *   specification's own names (`OAS32.ParameterObject`, ...).
- * - The unions accept an object of any supported version. Reading a field
+ * - `OAS20`, `OAS30`, `OAS31`, `OAS32`: each version's objects under the
+ *   specification's own names (`OAS20.SwaggerObject`,
+ *   `OAS32.ParameterObject`, ...).
+ * - The unions accept an object of any OpenAPI 3 version. Reading a field
  *   that only some versions define needs narrowing, which is deliberate: the
- *   union states what a document of any version may hold.
+ *   union states what a document of any version may hold. Swagger 2.0 is not
+ *   in them: a 2.0 document is converted to OpenAPI 3.0 (`upgradeSwagger2`)
+ *   before the library reads it, so its types appear only under `OAS20`.
  *
  * Field names follow the official OAI JSON Schemas exactly. Value types
  * deviate from them on purpose, because these are reader types (the
@@ -43,6 +46,7 @@ import type * as OAS30 from './v3_0';
 import type * as OAS31 from './v3_1';
 import type * as OAS32 from './v3_2';
 
+export type * as OAS20 from './v2_0';
 export type * as OAS30 from './v3_0';
 export type * as OAS31 from './v3_1';
 export type * as OAS32 from './v3_2';

@@ -30,5 +30,20 @@ export type FreeFormValue = any;
  * `Base` with the fields named in `Changes` replaced by (or, when `Base` lacks
  * them, added as) the ones in `Changes`. A version module uses it to state
  * only what changed since the previous version.
+ *
+ * The result is one object type, not the intersection
+ * `Omit<Base, keyof Changes> & Changes`. When `Changes` replaces every field
+ * of `Base`, that `Omit` is the empty type `{}`, and an intersection with `{}`
+ * escapes TypeScript's weak-type check (a type whose fields are all optional
+ * rejects a value that shares none of them): the 3.2 Response, Components and
+ * OAuth Flows Objects accepted a string, a number, a boolean or an array.
+ * Flattening keeps every field, with its optionality, `readonly` and type,
+ * and restores the check.
+ *
+ * The mapped type is written here rather than through a helper alias, so the
+ * result keeps the name of the alias declaring it (`ComponentsObject`), where
+ * a `Flatten<...>` helper would print as its expansion.
  */
-export type Override<Base, Changes> = Omit<Base, keyof Changes> & Changes;
+export type Override<Base, Changes> = {
+  [Key in keyof (Omit<Base, keyof Changes> & Changes)]: (Omit<Base, keyof Changes> & Changes)[Key];
+};

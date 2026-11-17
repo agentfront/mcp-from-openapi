@@ -60,6 +60,7 @@ export {
   featureNewerThanDeclared,
   getSpecProfile,
   isFeatureAvailable,
+  isSwagger2,
   listSkippedNewerOperations,
   resolveOperationLayout,
 } from './versions';
@@ -75,3 +76,16 @@ export type {
   SpecVersionInfo,
   SpecVersionStatus,
 } from './versions';
+
+export {
+  MAX_CONVERSION_ENTRIES,
+  MAX_MEDIA_TYPES_PER_LIST,
+  UPGRADED_OPENAPI_VERSION,
+  readSwagger2BasePath,
+  swagger2SkippedOperations,
+  upgradeSwagger2,
+} from './upgrade-v2';
+export type { Swagger2BasePath, UpgradeSwagger2Options, UpgradeSwagger2Result } from './upgrade-v2';
+
+export { parameterNameNotStringDiagnostic, readParameterName } from './parameters';
+export type { ParameterName } from './parameters';

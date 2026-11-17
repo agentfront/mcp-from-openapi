@@ -31,6 +31,16 @@ export interface SpecDiagnostic {
    * segment is for display only (see `escapePointerSegment`).
    */
   path?: string;
+  /**
+   * Which document `path` points into, set only by the generator for a
+   * Swagger 2.0 document, which has two: `'source'`, the 2.0 document as
+   * written (every finding about a construct that exists there, parameter
+   * indexes included), or `'converted'`, its OpenAPI 3.0 conversion
+   * (`generator.getDocument()` once generation has run) for a construct only
+   * the conversion has, such as a request body. Absent for every other
+   * document, and on a diagnostic without `path`.
+   */
+  document?: 'source' | 'converted';
 }
 
 /**
@@ -67,6 +77,48 @@ export const SPEC_DIAGNOSTIC_CODES = Object.freeze({
   METHOD_CASE_VARIANT: 'METHOD_CASE_VARIANT',
   /** An `additionalOperations` key names a method this library never sends (`CONNECT`); it is ignored. */
   REFUSED_METHOD: 'REFUSED_METHOD',
+  /**
+   * A parameter's `name` is a number or a boolean (YAML reads an unquoted
+   * `2024` or `true` so); it is read as its text.
+   */
+  PARAMETER_NAME_NOT_STRING: 'PARAMETER_NAME_NOT_STRING',
+
+  // Swagger 2.0 to OpenAPI 3.0 conversion (`upgradeSwagger2`, `./upgrade-v2.ts`)
+
+  /** The document given to `upgradeSwagger2` does not declare Swagger 2.0; it is converted as if it did. */
+  SWAGGER_VERSION_NOT_2_0: 'SWAGGER_VERSION_NOT_2_0',
+  /** A Swagger 2.0 field holds a value of the wrong kind, or a required one is missing; it is ignored or replaced as the message says. */
+  SWAGGER_INVALID_VALUE: 'SWAGGER_INVALID_VALUE',
+  /** An object holds fields Swagger 2.0 does not define there (other than `x-` extensions); they are not converted. */
+  SWAGGER_UNKNOWN_FIELD: 'SWAGGER_UNKNOWN_FIELD',
+  /** A Swagger 2.0 construct has no OpenAPI 3.0 equivalent; it is dropped or approximated as the message says. */
+  SWAGGER_NOT_CONVERTED: 'SWAGGER_NOT_CONVERTED',
+  /** A `$ref` is left in a document the converter expects dereferenced; the object holding it is ignored. */
+  SWAGGER_UNRESOLVED_REFERENCE: 'SWAGGER_UNRESOLVED_REFERENCE',
+  /** No usable `host` and no document URI: the server URL is relative to wherever the document is served from. */
+  SWAGGER_RELATIVE_SERVER_URL: 'SWAGGER_RELATIVE_SERVER_URL',
+  /** No `schemes` and no document URI to take a scheme from: `https` is assumed. */
+  SWAGGER_ASSUMED_SCHEME: 'SWAGGER_ASSUMED_SCHEME',
+  /** No `consumes` or `produces` applies to a body: `application/json` is assumed. */
+  SWAGGER_ASSUMED_MEDIA_TYPE: 'SWAGGER_ASSUMED_MEDIA_TYPE',
+  /** Form parameters under a `consumes` list naming no form media type: one is added. */
+  SWAGGER_FORM_MEDIA_TYPE_ADDED: 'SWAGGER_FORM_MEDIA_TYPE_ADDED',
+  /** An operation has more than one `in: body` parameter; the last one is the body. */
+  SWAGGER_MULTIPLE_BODY_PARAMETERS: 'SWAGGER_MULTIPLE_BODY_PARAMETERS',
+  /** An operation has both `in: body` and `in: formData` parameters; the body parameter is the body. */
+  SWAGGER_BODY_AND_FORM_DATA: 'SWAGGER_BODY_AND_FORM_DATA',
+  /** Two `in: formData` parameters of one list share a name; the last one is used. */
+  SWAGGER_DUPLICATE_FORM_DATA_PARAMETER: 'SWAGGER_DUPLICATE_FORM_DATA_PARAMETER',
+  /** A `collectionFormat` OpenAPI 3.0 cannot express where it is used; the stated fallback applies. */
+  SWAGGER_UNSUPPORTED_COLLECTION_FORMAT: 'SWAGGER_UNSUPPORTED_COLLECTION_FORMAT',
+  /** `type: file` outside an `in: formData` parameter; it is converted to a binary string anyway. */
+  SWAGGER_FILE_OUTSIDE_FORM_DATA: 'SWAGGER_FILE_OUTSIDE_FORM_DATA',
+  /** A security scheme of an unknown `type` or OAuth2 `flow`; it is not converted. */
+  SWAGGER_UNSUPPORTED_SECURITY_SCHEME: 'SWAGGER_UNSUPPORTED_SECURITY_SCHEME',
+  /** `consumes` or `produces` lists hold more distinct media types than `MAX_MEDIA_TYPES_PER_LIST`; the rest are ignored (one diagnostic per document). */
+  SWAGGER_MEDIA_TYPE_LIMIT: 'SWAGGER_MEDIA_TYPE_LIMIT',
+  /** The conversion would create more than `MAX_CONVERSION_ENTRIES` entries; it is abandoned. */
+  SWAGGER_CONVERSION_TOO_LARGE: 'SWAGGER_CONVERSION_TOO_LARGE',
 } as const);
 
 /** One of this layer's diagnostic codes. */

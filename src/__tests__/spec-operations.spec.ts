@@ -544,14 +544,33 @@ describe('listOperations', () => {
     expect(methodsOf(pathItem, getSpecProfile('3.2'))).toEqual(['get', 'query', 'LINK']);
   });
 
-  it('serves a Swagger 2.0 style layout: fixed fields without trace, query or additionalOperations', () => {
-    const layout: OperationLayout = {
-      fixedMethods: ['get', 'put', 'post', 'delete', 'options', 'head', 'patch'],
-      additionalOperations: false,
+  it('serves the Swagger 2.0 profile layout: fixed fields without trace, query or additionalOperations', () => {
+    const layout = getSpecProfile('2.0');
+    const pathItem = {
+      trace: op('trace'),
+      patch: op('patch'),
+      get: op('get'),
+      query: op('query'),
+      additionalOperations: { LINK: op('link') },
     };
-    const pathItem = { trace: op('trace'), patch: op('patch'), get: op('get'), query: op('query') };
 
     expect(methodsOf(pathItem, layout)).toEqual(['get', 'patch']);
+  });
+
+  it('appends a map larger than the call stack allows as arguments (200,000 additional operations)', () => {
+    // Spreading the sorted entries into push() threw RangeError (Maximum call
+    // stack size exceeded) from about 125,000 entries on Node 24
+    const additionalOperations: Record<string, unknown> = {};
+    const shared = op('shared');
+    for (let index = 0; index < 200_000; index++) additionalOperations[`M${index}`] = shared;
+
+    const { operations, diagnostics } = listOperations({ get: op('get'), additionalOperations });
+
+    expect(diagnostics).toEqual([]);
+    expect(operations).toHaveLength(200_001);
+    expect(operations[0]).toEqual({ method: 'get', operation: op('get'), source: 'fixed' });
+    expect(operations[1]).toEqual({ method: 'M0', operation: shared, source: 'additional' });
+    expect(operations[200_000].method).toBe('M99999');
   });
 
   it('keeps STANDARD_METHODS order whatever the order of the layout list', () => {
