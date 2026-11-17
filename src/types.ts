@@ -28,6 +28,7 @@ import type {
 } from './spec';
 import { SPEC_DIAGNOSTIC_CODES } from './spec';
 import { SchemaError } from './errors';
+import { isExtensionKey, referenceAt } from './reference-sites';
 
 /**
  * An OpenAPI version string of a supported `major.minor`: any `3.0.x`,
@@ -678,6 +679,19 @@ function enterSchema(
   // Swagger 2.0 constructs, read whatever version the document declares (a
   // 2.0 document is converted before this, but a 3.x one can carry them too)
   const isNullable = normalizeSwaggerKeywords(result, nullable);
+
+  // A specification extension the document wrote as a `$ref` is given back as
+  // written: a `$ref` there is no Reference Object, and the value resolved in
+  // its place can be a whole schema graph (src/reference-sites.ts). A `$ref`
+  // deeper inside an extension is given back when the value is copied
+  // (`SchemaBuilder.truncateDepth`)
+  if (node) {
+    for (const key of Object.keys(result)) {
+      if (!isExtensionKey(key)) continue;
+      const ref = referenceAt(node, key, result[key]);
+      if (ref !== undefined) result[key] = { $ref: ref };
+    }
+  }
 
   // OpenAPI 3.0 `nullable: true` -> JSON Schema type union with 'null'.
   // Type-less nullable schemas (compositions, enum-only) can't take a type
@@ -1686,14 +1700,18 @@ export interface GenerateOptions {
    * Node budget for each generated input/output schema. Shared `$ref` targets
    * are converted once, but the emitted schema spells every occurrence out,
    * so a small spec that references the same schema many times can still
-   * expand into an enormous tree. Generating a tool fails with a
-   * `SchemaError` once one of its schemas exceeds this many nodes — every
-   * JSON value in it counts — or so does the conversion work for one
+   * expand into an enormous tree. The budget bounds each of the tool's
+   * schemas — every JSON value in it counts — and the conversion work for one
    * parameter, request body, or response (each schema visited, plus each
-   * keyword of each schema converted), the spec values the tool copies
-   * (title, metadata, mapper objects, extension meta), or a client target's
-   * inlining of local `$ref`s. `generateTools()` skips that tool with a
-   * warning, like any other per-tool failure. `Infinity` disables the budget.
+   * keyword of each schema converted). A schema over it at `maxSchemaDepth`
+   * is built again at the deepest depth that fits, with a
+   * `SCHEMA_DEPTH_REDUCED` warning. Generating the tool fails with a
+   * `SchemaError` when not even depth 1 fits, or when the spec values the
+   * tool copies (title, metadata, mapper objects, extension meta) or a client
+   * target's inlining of local `$ref`s exceed it; `generateTools()` skips that
+   * tool with a warning, like any other per-tool failure. A `$ref` inside a
+   * schema's `x-` extension is kept as written, so it costs two nodes, not
+   * the graph it names. `Infinity` disables the budget.
    * @default 100000
    */
   maxSchemaNodes?: number;
@@ -2060,6 +2078,13 @@ export const DIAGNOSTIC_CODES = Object.freeze({
    * call of the tool can succeed. The tool is still made.
    */
   REQUIRED_INPUT_ACCEPTS_NOTHING: 'REQUIRED_INPUT_ACCEPTS_NOTHING',
+  /**
+   * A tool's input, output or stream item schema exceeds `maxSchemaNodes` at
+   * `maxSchemaDepth`, so it is cut at the deepest depth where it fits (the
+   * message names it). The tool is still made; when not even depth 1 fits,
+   * generating the tool fails with a `SchemaError`.
+   */
+  SCHEMA_DEPTH_REDUCED: 'SCHEMA_DEPTH_REDUCED',
   /**
    * Every Security Requirement of an operation was dropped, so no way to
    * authenticate is known: the operation makes no tool.

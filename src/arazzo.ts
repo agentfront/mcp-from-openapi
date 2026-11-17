@@ -1065,7 +1065,12 @@ function deriveOutputsSchema(
 // Tool assembly
 // ---------------------------------------------------------------------------
 
-/** The exact generateTool post-pipeline: formats → depth → trims → target. */
+/**
+ * The generateTool post-pipeline: formats → depth → trims → target. Unlike
+ * `generateTool`, a schema over `maxSchemaNodes` at `maxSchemaDepth` fails
+ * (an `ArazzoError`) instead of being cut shallower: `fromArazzo` has no
+ * diagnostics to report a shallower cut in.
+ */
 function applySchemaPipeline(schema: JsonSchema, options: ArazzoGenerateOptions, isInputRoot: boolean): JsonSchema {
   const formatResolvers = {
     ...(options.resolveFormats ? BUILTIN_FORMAT_RESOLVERS : {}),

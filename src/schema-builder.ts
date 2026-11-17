@@ -1,6 +1,7 @@
 import type { JSONSchema } from 'zod/v4/core';
 import { SchemaError } from './errors';
 import { chargeBudget, copyJsonValue, mapSlots, type CopyBudget } from './json-copy';
+import { isExtensionKey, referenceAt } from './reference-sites';
 
 /** JSON Schema type from Zod v4 */
 type JsonSchema = JSONSchema.JSONSchema;
@@ -504,6 +505,16 @@ export class SchemaBuilder {
     const childDepth = depth + 1;
     for (const key of Object.keys(copyRecord)) {
       const value = copyRecord[key];
+      const extension = isExtensionKey(key);
+      // A specification extension the document wrote as a `$ref` is given back
+      // as written (src/reference-sites.ts); `toJsonSchema` already did so for
+      // the schemas it converts, so this is for a dereferenced schema passed as is
+      const ref = extension ? referenceAt(node, key, value) : undefined;
+      if (ref !== undefined) {
+        chargeBudget(budget, 2);
+        copyRecord[key] = { $ref: ref };
+        continue;
+      }
       if (!isObject(value)) {
         chargeBudget(budget);
         continue;
@@ -526,8 +537,12 @@ export class SchemaBuilder {
       } else {
         // Any other object value (`default`, `examples`, `enum`, `x-*`, ...)
         // is copied too, so the tree shares nothing — and counted, as a `$ref`
-        // resolved inside a value can expand like a schema can
-        copyRecord[key] = copyJsonValue(value, budget, { label: `The \`${key}\` value of a schema` });
+        // resolved inside a value can expand like a schema can. Inside an
+        // extension, each `$ref` the document wrote is given back as written
+        copyRecord[key] = copyJsonValue(value, budget, {
+          label: `The \`${key}\` value of a schema`,
+          asWritten: extension,
+        });
       }
     }
     return copy;

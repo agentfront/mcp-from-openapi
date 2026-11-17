@@ -115,6 +115,7 @@ import {
   type DocumentBase,
 } from './base-uri';
 import { copyJsonValue, type CopyBudget } from './json-copy';
+import { copyReferenceSites, recordReferenceSite } from './reference-sites';
 import { classifyMediaType } from './media-type';
 
 /** MCP hard limit for tool name length (spec revision 2025-11-25, SEP-986) */
@@ -162,6 +163,44 @@ function setOwnProperty(target: Record<string, unknown>, key: string, value: unk
     Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
   } else {
     target[key] = value;
+  }
+}
+
+/** Whether `error` is a node-budget failure (`maxSchemaNodes`), which a smaller depth may avoid */
+function isNodeBudgetError(error: unknown): error is SchemaError {
+  return error instanceof SchemaError && typeof error.context?.['maxNodes'] === 'number';
+}
+
+/**
+ * `build(maxDepth)`; when that exceeds the node budget, `build` at the deepest
+ * smaller depth that fits, found by bisection: a schema cut shallower never
+ * needs more nodes (conversion visits fewer, truncation keeps a subset). When
+ * no depth from 1 fits, `exhausted` throws with the first budget error; any
+ * other error is thrown as it is.
+ */
+function fitSchemaDepth<T>(
+  maxDepth: number,
+  build: (depth: number) => T,
+  exhausted: (error: SchemaError) => never,
+): { value: T; depth: number } {
+  try {
+    return { value: build(maxDepth), depth: maxDepth };
+  } catch (error: unknown) {
+    if (!isNodeBudgetError(error)) throw error;
+    let fitted: { value: T; depth: number } | undefined;
+    let low = 1;
+    let high = maxDepth - 1;
+    while (low <= high) {
+      const depth = Math.floor((low + high) / 2);
+      try {
+        fitted = { value: build(depth), depth };
+        low = depth + 1;
+      } catch (retryError: unknown) {
+        if (!isNodeBudgetError(retryError)) throw retryError;
+        high = depth - 1;
+      }
+    }
+    return fitted ?? exhausted(error);
   }
 }
 
@@ -1645,7 +1684,20 @@ export class OpenAPIToolGenerator {
       const frame = frames[frames.length - 1];
       if (frame.next < frame.children.length) {
         const index = frame.next++;
-        const value = enter(frame.children[index]);
+        const child = frame.children[index];
+        const value = enter(child);
+        // Where a `$ref` is replaced, and by what, for a value that must be given back as written
+        // (see src/reference-sites.ts); a `$ref` frame's child is the target, not a reference.
+        // Every string `$ref` here is local (`prepare` made a self-reference so; any other one
+        // would have sent the document to `$RefParser`), so `enter` replaced it: by a cached value,
+        // or by the placeholder of the frame it pushed
+        if (frame !== top && !frame.placeholder && child !== null && typeof child === 'object') {
+          const ref = (child as { $ref?: unknown }).$ref;
+          if (typeof ref === 'string') {
+            const placed = value === pending ? frames[frames.length - 1].placeholder : value;
+            recordReferenceSite(frame.out, frame.keys ? frame.keys[index] : index, ref, placed);
+          }
+        }
         if (value !== pending) store(frame, index, value);
         continue;
       }
@@ -1658,6 +1710,8 @@ export class OpenAPIToolGenerator {
           // Not Object.assign: it would turn an own `__proto__` key into the prototype
           const record = resolved as Record<string, unknown>;
           for (const key of Object.keys(record)) setOwnProperty(frame.placeholder, key, record[key]);
+          // The placeholder is the object the document holds, so the sites go with the keys
+          copyReferenceSites(resolved, frame.placeholder);
         }
         value = frame.placeholder;
       }
@@ -1766,7 +1820,18 @@ export class OpenAPIToolGenerator {
       refParser = await import('@apidevtools/json-schema-ref-parser');
       // Its `read` is a function; the type also allows the static forms a plugin may take
       const fileResolver = refParser.FileResolver as unknown as { read(file: RefTarget): unknown };
-      const refParserOptions = this.buildRefParserOptions(fileResolver, reads.read);
+      const refParserOptions: ParserOptions = {
+        ...this.buildRefParserOptions(fileResolver, reads.read),
+        dereference: {
+          // Where each `$ref` is replaced, for a value that must be given back as written (see
+          // src/reference-sites.ts). Called for every replacement, a circular one included
+          onDereference: (ref, value, parent, key) => {
+            // Both are passed for every replacement; the type leaves them optional
+            /* c8 ignore next */
+            if (parent && key !== undefined) recordReferenceSite(parent, key, ref, value);
+          },
+        },
+      };
       const root = await this.refParserRoot();
       // Without a base URI, as in earlier releases: relative refs resolve against the working directory
       this.dereferencedDocument = (await (root === undefined
@@ -2447,13 +2512,57 @@ export class OpenAPIToolGenerator {
     // truncation cuts at (so work stays bounded by what the output keeps), and
     // both phases share the node budget
     const { maxDepth: maxSchemaDepth, maxNodes: maxSchemaNodes } = resolveSchemaLimits(options);
-    const schemaConversion = { maxDepth: maxSchemaDepth, maxNodes: maxSchemaNodes };
+    const schemaConversion = (depth: number) => ({ maxDepth: depth, maxNodes: maxSchemaNodes });
 
-    // Resolve parameters
-    const parameterResolver = new ParameterResolver(options.namingStrategy, {
-      includeExamples: options.includeExamples,
-      schemaConversion,
-    });
+    // Format resolution, then depth truncation (applied last, so the final
+    // schemas are bounded). Floor of 1: depth 0 would strip the ROOT
+    // inputSchema's properties while the mapper still lists every parameter.
+    // Truncation also materializes the conversion's shared subschemas into
+    // independent copies.
+    const formatResolvers = {
+      ...(options.resolveFormats ? BUILTIN_FORMAT_RESOLVERS : {}),
+      ...options.formatResolvers,
+    };
+    const hasFormatResolvers = Object.keys(formatResolvers).length > 0;
+    const truncateOptions = { maxNodes: maxSchemaNodes };
+    // Each schema (input, output, stream item) is converted, its formats
+    // resolved, and cut at maxSchemaDepth or, when that exceeds the node
+    // budget, at the deepest depth that fits. A conversion at maxSchemaDepth
+    // serves any smaller depth as well (truncation removes all that the two
+    // conversions differ in), so it is redone only when it was itself over the
+    // budget; otherwise only the truncation is.
+    const fit = <T>(
+      what: string,
+      convert: (depth: number) => T,
+      schemaOf: (converted: T) => JsonSchema | undefined,
+    ): { converted: T; finished: JsonSchema | undefined; depth: number } => {
+      let atMaxDepth: { converted: T; formatted: JsonSchema | undefined } | undefined;
+      const { value, depth } = fitSchemaDepth(
+        maxSchemaDepth,
+        (depth) => {
+          let prepared = atMaxDepth;
+          if (!prepared) {
+            const converted = convert(depth);
+            const schema = schemaOf(converted);
+            const formatted = schema && hasFormatResolvers ? resolveSchemaFormats(schema, formatResolvers) : schema;
+            prepared = { converted, formatted };
+            if (depth === maxSchemaDepth) atMaxDepth = prepared;
+          }
+          const finished =
+            prepared.formatted && SchemaBuilder.truncateDepth(prepared.formatted, depth, truncateOptions);
+          return { converted: prepared.converted, finished };
+        },
+        (error) => {
+          throw new SchemaError(
+            `The ${what} of ${operationLabel(method, pathStr)} exceeds the node budget of ${maxSchemaNodes} ` +
+              `(maxSchemaNodes) even cut at depth 1 (maxSchemaDepth ${maxSchemaDepth} was tried first): shared or ` +
+              `recursive $refs expand into more schema nodes than allowed. Raise maxSchemaNodes.`,
+            { ...error.context, maxNodes: maxSchemaNodes, maxSchemaDepth, schema: what },
+          );
+        },
+      );
+      return { ...value, depth };
+    };
 
     // Filter out ReferenceObjects from parameters (an operation was found, so
     // the path item is an object)
@@ -2470,19 +2579,41 @@ export class OpenAPIToolGenerator {
         ? { ...operation, parameters: parameterCheck.operationLevel as typeof operation.parameters }
         : operation;
 
-    const { inputSchema, mapper } = parameterResolver.resolve(
-      resolvedOperation,
-      pathParameters,
-      securityRequirements,
-      options.includeSecurityInInput,
+    // Resolve parameters
+    const input = fit(
+      'input schema',
+      (depth) =>
+        new ParameterResolver(options.namingStrategy, {
+          includeExamples: options.includeExamples,
+          schemaConversion: schemaConversion(depth),
+        }).resolve(resolvedOperation, pathParameters, securityRequirements, options.includeSecurityInInput),
+      (resolved) => resolved.inputSchema,
     );
+    const { inputSchema, mapper } = input.converted;
     for (const diagnostic of this.requiredInputDiagnostics(pathStr, entry, inputSchema)) this.addDiagnostic(diagnostic);
 
     // Build response schema, and the streamed response's item schema (OpenAPI
     // 3.2 `itemSchema`), which is reported in metadata, never as outputSchema
-    const responseBuilder = new ResponseBuilder(options, schemaConversion);
-    const outputSchema = responseBuilder.build(operation.responses);
-    const responseStream = responseBuilder.buildStream(operation.responses);
+    const output = fit(
+      'output schema',
+      (depth) => new ResponseBuilder(options, schemaConversion(depth)).build(operation.responses),
+      (schema) => schema,
+    );
+    const outputSchema = output.converted;
+    const stream = fit(
+      'stream item schema',
+      (depth) => new ResponseBuilder(options, schemaConversion(depth)).buildStream(operation.responses),
+      (responseStream) => responseStream?.itemSchema,
+    );
+    const responseStream = stream.converted;
+    // A schema cut shallower than maxSchemaDepth is reported once the tool is made (see the end)
+    const reducedDepths = (
+      [
+        ['input schema', input.depth, operationPointer(pathStr, entry)],
+        ['output schema', output.depth, appendPointer(operationPointer(pathStr, entry), 'responses')],
+        ['stream item schema', stream.depth, appendPointer(operationPointer(pathStr, entry), 'responses')],
+      ] as const
+    ).filter(([, depth]) => depth !== maxSchemaDepth);
 
     // Extension overrides (x-speakeasy-mcp < x-mcp < x-frontmcp); their meta
     // shares the node budget, as $refs in it are dereferenced too
@@ -2509,28 +2640,11 @@ export class OpenAPIToolGenerator {
     // Extract metadata
     const metadata = this.extractMetadata(pathStr, method, operation, document, outputSchema, securityRequirements);
 
-    // Apply format resolution if configured
-    const formatResolvers = {
-      ...(options.resolveFormats ? BUILTIN_FORMAT_RESOLVERS : {}),
-      ...options.formatResolvers,
-    };
-    const hasFormatResolvers = Object.keys(formatResolvers).length > 0;
-    let resolvedInputSchema = hasFormatResolvers ? resolveSchemaFormats(inputSchema, formatResolvers) : inputSchema;
-    let resolvedOutputSchema = hasFormatResolvers && outputSchema ? resolveSchemaFormats(outputSchema, formatResolvers) : outputSchema;
-    // The stream's item schema goes through every step an output schema does
-    let itemSchema = responseStream?.itemSchema;
-    if (hasFormatResolvers && itemSchema) itemSchema = resolveSchemaFormats(itemSchema, formatResolvers);
-
-    // Bound schema nesting depth (applied last so the final schemas are
-    // bounded). Floor of 1: depth 0 would strip the ROOT inputSchema's
-    // properties while the mapper still lists every parameter. This also
-    // materializes the conversion's shared subschemas into independent copies.
-    const truncateOptions = { maxNodes: maxSchemaNodes };
-    resolvedInputSchema = SchemaBuilder.truncateDepth(resolvedInputSchema, maxSchemaDepth, truncateOptions);
-    if (resolvedOutputSchema) {
-      resolvedOutputSchema = SchemaBuilder.truncateDepth(resolvedOutputSchema, maxSchemaDepth, truncateOptions);
-    }
-    if (itemSchema) itemSchema = SchemaBuilder.truncateDepth(itemSchema, maxSchemaDepth, truncateOptions);
+    // The schemas with formats resolved and depth bounded (see `finishSchema`);
+    // the stream's item schema goes through every step an output schema does
+    let resolvedInputSchema = input.finished!;
+    let resolvedOutputSchema = output.finished;
+    let itemSchema = stream.finished;
 
     // Trimming controls (after depth truncation, before client targets so the
     // dialect transforms see the final trimmed shape). Description caps run
@@ -2684,7 +2798,7 @@ export class OpenAPIToolGenerator {
       };
     }
 
-    return {
+    const tool: McpOpenAPITool = {
       name,
       ...(title !== undefined && { title: copyValue(title, 'The tool title') }),
       description: finalDescription,
@@ -2696,6 +2810,20 @@ export class OpenAPIToolGenerator {
       mapper: mapper.map(copyEntry),
       metadata: toolMetadata,
     };
+
+    // The tool is made: a schema cut shallower is a finding about it, never about a skipped operation
+    for (const [what, depth, path] of reducedDepths) {
+      this.addDiagnostic({
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.SCHEMA_DEPTH_REDUCED,
+        message:
+          `${operationLabel(method, pathStr)}: its ${what} exceeds the node budget of ${maxSchemaNodes} ` +
+          `(maxSchemaNodes) at maxSchemaDepth ${maxSchemaDepth}, so it is cut at depth ${depth}; raise ` +
+          `maxSchemaNodes to keep more of it`,
+        path,
+      });
+    }
+    return tool;
   }
 
   /**
