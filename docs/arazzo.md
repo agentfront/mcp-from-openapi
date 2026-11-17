@@ -82,7 +82,9 @@ const tools = await fromArazzo(doc, {
   sources: { pets: petstoreDoc },
   onDiagnostic: (diagnostic, source) => console.warn(source ?? 'arazzo', diagnostic.code, diagnostic.message),
 });
-``` Operation-filtering options have no meaning here and are not accepted.
+```
+
+Operation-filtering options have no meaning here and are not accepted.
 
 ## Errors
 
