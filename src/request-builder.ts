@@ -1365,6 +1365,30 @@ function nameClaimer(
   };
 }
 
+/** A `.` or `..` path segment, percent-encoded or not, which URL parsers resolve away */
+const DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
+
+/** Refuse a resolved path that leaves the origin, holds a dot segment, or loses a segment its template has */
+function assertPathNamesTemplateResource(template: string, path: string): void {
+  if (!/^\/(?![/\\])/.test(path)) {
+    throw new RequestBuildError(`The request path must start with a single '/': ${describeValue(path)}`, {
+      path: describeValue(path),
+    });
+  }
+  const templateSegments = template.split('/');
+  const pathSegments = path.split('/');
+  pathSegments.forEach((segment, index) => {
+    const lastIndex = pathSegments.length - 1;
+    const emptyAllowed = index === lastIndex && templateSegments[index] === '';
+    if (DOT_SEGMENT.test(segment) || (segment === '' && index > 0 && !emptyAllowed)) {
+      throw new RequestBuildError(
+        `The request path ${describeValue(path)} has an empty or dot segment where its template ${describeValue(template)} names a resource`,
+        { path: describeValue(path), template: describeValue(template) },
+      );
+    }
+  });
+}
+
 /**
  * Build an HTTP request from a generated tool and its input values — the
  * mapper applied in full: style/explode serialization (form, spaceDelimited,
@@ -1605,6 +1629,7 @@ export function buildHttpRequest(
   if (path.includes('{')) {
     throw new RequestBuildError(`Unresolved path parameters remain in '${path}'`, { path });
   }
+  assertPathNamesTemplateResource(tool.metadata.path, path);
 
   if (bodyObject !== undefined) rawBody = bodyObject;
   // A form body's fields: each one's mapper entry (a flattened body) or the

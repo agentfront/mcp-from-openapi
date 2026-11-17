@@ -582,6 +582,11 @@ export class Validator {
           path: legacyBase,
           code: 'INVALID_PATH_FORMAT',
         });
+      } else {
+        const problem = pathTemplateProblem(path);
+        if (problem !== undefined) {
+          errors.push({ message: `Path ${messageText(path)} ${problem}`, path: legacyBase, code: 'INVALID_PATH_FORMAT' });
+        }
       }
       if (!isSpecObject(pathItem)) continue;
 
@@ -944,6 +949,18 @@ export class Validator {
       warnings.push(toFinding(duplicateParameterDiagnostic(dropped, kept, pointer)));
     }
   }
+}
+
+/** Why a path key starting with `/` is no path template a URL keeps as written, or `undefined` */
+function pathTemplateProblem(path: string): string | undefined {
+  if (path.includes('\\')) return 'holds a backslash, which URL parsers read as a slash';
+  const segments = path.split('/');
+  if (segments.slice(1, -1).some((segment) => segment === '')) return 'has an empty segment (`//`)';
+  if (segments.some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment))) {
+    return 'has a `.` or `..` segment, which URL parsers resolve to another path';
+  }
+  if (!/^(?:[^{}]|\{[^{}]+\})*$/.test(path)) return 'has a `{` or `}` that is not part of a `{name}` template expression';
+  return undefined;
 }
 
 /**

@@ -44,7 +44,7 @@ await fetch(request.url, {
 | `wholeBody`     | Non-object/union bodies sent as the entire body (never wrapped)                                                                  |
 | Security        | Values applied only when present in `input`; `bearer`/`basic` get prefixes, structured schemes (digest) pass through verbatim    |
 | Methods         | A standard method is sent upper-case (`GET`, `QUERY`); an OpenAPI 3.2 `additionalOperations` method is sent exactly as written in the document (`LINK`, `M-SEARCH`) because HTTP methods are case-sensitive. The method must be an RFC 9110 token, and `CONNECT` is refused                                    |
-| Safety          | Header-injection guards (CR/LF), sendable header and cookie values, lone surrogates refused, path traversal-safe encoding, http(s)-only base URLs, unresolved path/server-template detection |
+| Safety          | Header-injection guards (CR/LF), sendable header and cookie values, lone surrogates refused, path values percent-encoded per segment, and a resolved path that starts with a single `/` and keeps every segment of its template (`.`, `..` and empty values are refused), http(s)-only base URLs, unresolved path/server-template detection |
 
 ## Result shape
 
