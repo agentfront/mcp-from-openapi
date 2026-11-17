@@ -55,20 +55,25 @@ export async function createMcpServer(options: QuickstartOptions): Promise<{ ser
       return { content: [{ type: 'text', text: `Unknown tool: ${request.params.name}` }], isError: true };
     }
 
+    // Credentials go to buildHttpRequest as input under each security mapper
+    // entry's inputKey, which places them (header, query pair or cookie). Never
+    // append them to the URL yourself: url.searchParams.append rewrites the
+    // whole query, and corrupts one that is not name=value pairs. An
+    // unresolved credential is `undefined`, overriding the model's arguments.
     const security = await resolver.resolve(tool.mapper, securityContext);
-    const built = buildHttpRequest(tool, (request.params.arguments ?? {}) as Record<string, unknown>, {
+    const where: Record<string, Record<string, string> | undefined> = {
+      header: security.headers,
+      query: security.query,
+      cookie: security.cookies,
+    };
+    const credentials = Object.fromEntries(
+      tool.mapper.filter((m) => m.security).map((m) => [m.inputKey, where[m.type]?.[m.key]]),
+    );
+    const built = buildHttpRequest(tool, { ...(request.params.arguments ?? {}), ...credentials }, {
       baseUrl: options.apiBaseUrl,
     });
 
-    const url = new URL(built.url);
-    for (const [key, value] of Object.entries(security.query)) url.searchParams.append(key, value);
-    const headers: Record<string, string> = { ...built.headers, ...security.headers };
-    const securityCookies = Object.entries(security.cookies);
-    if (securityCookies.length > 0) {
-      const extra = securityCookies.map(([name, value]) => `${name}=${value}`).join('; ');
-      headers['Cookie'] = headers['Cookie'] ? `${headers['Cookie']}; ${extra}` : extra;
-    }
-    const response = await fetch(url, { method: built.method, headers, body: built.body as never });
+    const response = await fetch(built.url, { method: built.method, headers: built.headers, body: built.body as never });
 
     // Read the body ONCE and tolerate empty/text/HTML responses — real APIs
     // return 204s and error pages, and a JSON parse crash here would surface

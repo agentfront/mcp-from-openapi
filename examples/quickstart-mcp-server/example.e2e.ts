@@ -9,8 +9,26 @@ import { createMcpServer } from './example';
 const spec: any = {
   openapi: '3.0.0',
   info: { title: 'Widget API', version: '1.0.0' },
-  components: { securitySchemes: { apiAuth: { type: 'apiKey', name: 'X-API-Key', in: 'header' } } },
+  components: {
+    securitySchemes: {
+      apiAuth: { type: 'apiKey', name: 'X-API-Key', in: 'header' },
+      queryAuth: { type: 'apiKey', name: 'api_key', in: 'query' },
+    },
+  },
   paths: {
+    '/widgets': {
+      get: {
+        operationId: 'findWidgets',
+        security: [{ queryAuth: [] }],
+        parameters: [{ name: 'limit', in: 'query', schema: { type: 'integer' } }],
+        responses: {
+          '200': {
+            description: 'OK',
+            content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } } },
+          },
+        },
+      },
+    },
     '/widgets/{widgetId}': {
       get: {
         operationId: 'getWidget',
@@ -44,7 +62,7 @@ describe('example: quickstart-mcp-server', () => {
   it('serves generated tools over MCP and proxies calls with credentials', async () => {
     const apiBaseUrl = await loopback.listen();
     const { server, tools } = await createMcpServer({ spec, apiBaseUrl, auth: { apiKey: 'secret-key' } });
-    expect(tools.map((t) => t.name)).toEqual(['getWidget']);
+    expect(tools.map((t) => t.name)).toEqual(['findWidgets', 'getWidget']);
 
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
@@ -52,7 +70,7 @@ describe('example: quickstart-mcp-server', () => {
     await client.connect(clientTransport);
     try {
       const listed = await client.listTools();
-      expect(listed.tools.map((t) => t.name)).toEqual(['getWidget']);
+      expect(listed.tools.map((t) => t.name)).toEqual(['findWidgets', 'getWidget']);
 
       const result = await client.callTool({ name: 'getWidget', arguments: { widgetId: 'w1' } });
       expect(result.isError).toBe(false);
@@ -61,6 +79,11 @@ describe('example: quickstart-mcp-server', () => {
       const captured = loopback.requests.at(-1)!;
       expect(captured.url).toBe('/widgets/w1');
       expect(captured.headers['x-api-key']).toBe('secret-key');
+
+      // A query credential joins the query buildHttpRequest built, next to the tool's own parameter
+      const found = await client.callTool({ name: 'findWidgets', arguments: { limit: 2 } });
+      expect(found.isError).toBe(false);
+      expect(loopback.requests.at(-1)!.url).toBe('/widgets?limit=2&api_key=secret-key');
 
       const unknown = await client.callTool({ name: 'nope', arguments: {} });
       expect(unknown.isError).toBe(true);
