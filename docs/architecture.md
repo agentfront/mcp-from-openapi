@@ -82,14 +82,15 @@ Which operations a document has follows its declared version (`resolveOperationL
 **Responsibility:** Extract parameters, detect conflicts, generate input schema and mapper.
 
 **Algorithm:**
-1. Collect parameters from path item + operation (path, query, header, cookie)
-2. Extract request body properties as body parameters
-3. Group all parameters by name
-4. Detect conflicts (same name in multiple locations)
-5. Apply naming strategy to resolve conflicts
-6. Build combined `inputSchema` with unique property names
-7. Create `ParameterMapper[]` entries mapping inputs to request locations
-8. Process security requirements (add to mapper, optionally to schema)
+1. Merge the parameters of the path item with the operation's (path, query, querystring, header, cookie): an operation-level parameter overrides a path-level one with the same name and location (a header name in any case), and the last of a repeated name and location wins (`analyzeParameters`, also used by the validator, the generator and lint)
+2. Read each parameter from its `schema`, or from its `content` media type when it has no `schema` (an `in: querystring` parameter is always read from `content` and becomes a whole-query entry)
+3. Extract request body properties as body parameters
+4. Group all parameters by name
+5. Detect conflicts (same name in multiple locations)
+6. Apply naming strategy to resolve conflicts
+7. Build combined `inputSchema` with unique property names
+8. Create `ParameterMapper[]` entries mapping inputs to request locations
+9. Process security requirements (add to mapper, optionally to schema)
 
 **Key files:** `src/parameter-resolver.ts`
 
@@ -102,6 +103,8 @@ Which operations a document has follows its declared version (`resolveOperationL
 - Builds `oneOf` unions for multiple responses or selects preferred
 - Annotates schemas with `x-status-code` and `x-content-type`
 - Falls back through 2xx, 3xx, then first available when preferred codes aren't found
+- Reports a streamed response (OpenAPI 3.2 `itemSchema`) apart from the output schema (`buildStream`), which the generator stores in `metadata.responseStream`
+- Uses a response's `summary` as its description when it has no `description`
 
 **Key files:** `src/response-builder.ts`
 
@@ -116,14 +119,15 @@ Which operations a document has follows its declared version (`resolveOperationL
 - Path parameters are defined and required
 - Operations have non-empty responses (`responses` is required in 3.0 only)
 - Parameters have name, a location the declared version defines, and schema/content
-- OpenAPI 3.2 rules: at most one `in: querystring` parameter, not combined with `in: query`, using `content`; in a document declaring 3.2 or newer, `additionalOperations` is an object whose keys are HTTP method tokens other than the upper-case name of a method with its own field; method fields hold objects
+- OpenAPI 3.2 rules: at most one `in: querystring` parameter, not combined with `in: query`, using `content` with a media type; in a document declaring 3.2 or newer, `additionalOperations` is an object whose keys are HTTP method tokens other than the upper-case name of a method with its own field; method fields hold objects
 
 **Checks (warnings):**
 - No paths defined
 - No servers defined
 - No operation IDs
 - Security requirements without schemes
-- A newer 3.x minor version, both `openapi` and `swagger`, or a construct newer than the declared version (`query` and `additionalOperations` in a 3.0 or 3.1 document are not read; `in: querystring`)
+- A newer 3.x minor version, both `openapi` and `swagger`, or a construct newer than the declared version (`query` and `additionalOperations` in a 3.0 or 3.1 document are not read; `in: querystring` is read all the same)
+- A parameter's `content` that does not hold exactly one media type, and a parameter list that repeats a name and location
 - Values the operation walk ignores (a path item that is not an object, a case variant of a standard method as an `additionalOperations` key, a `CONNECT` method)
 - Each list (`errors`, `warnings`) is capped at 1,000 entries, then one `DIAGNOSTICS_TRUNCATED` entry
 

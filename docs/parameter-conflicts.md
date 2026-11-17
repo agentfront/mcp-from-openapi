@@ -38,12 +38,13 @@ A flat input schema can't have three properties all named `id`. This library det
 
 ## How It Works
 
-1. **Collect** all parameters from path, query, header, cookie, and request body
-2. **Group** parameters by name
-3. **Detect** names that appear in more than one location
-4. **Rename** conflicted parameters using a naming strategy
-5. **Build** the input schema with unique property names
-6. **Create** mapper entries that map renamed keys back to original names and locations
+1. **Merge** the path item's parameters with the operation's: an operation-level parameter overrides a path-level one with the same name and location (see [Same Name and Location](#same-name-and-location-the-operation-wins))
+2. **Collect** all parameters from path, query, header, cookie, and request body
+3. **Group** parameters by name
+4. **Detect** names that appear in more than one location
+5. **Rename** conflicted parameters using a naming strategy
+6. **Build** the input schema with unique property names
+7. **Create** mapper entries that map renamed keys back to original names and locations
 
 ---
 
@@ -105,6 +106,111 @@ parameters:
 //   { inputKey: "limit",  type: "query", key: "limit" }
 // ]
 ```
+
+---
+
+## Same Name and Location: the Operation Wins
+
+Two rules look alike and are kept apart:
+
+- **Same name in different locations** is a conflict, and the rest of this page is about it: each parameter stays and is renamed by the naming strategy (`pathId`, `queryId`).
+- **Same name in the same location** is not a conflict, it is an override. A parameter on the Path Item applies to every operation of the path; an operation-level parameter with the same `name` and `in` replaces it, as the OpenAPI Operation Object says. Only one parameter reaches the input schema, and it is the operation's.
+
+```yaml
+paths:
+  /orders:
+    parameters:
+      - name: limit
+        in: query
+        description: Path-level default
+        schema: { type: integer, default: 20 }
+      - name: X-Trace
+        in: header
+        schema: { type: string }
+    get:
+      operationId: listOrders
+      parameters:
+        - name: limit
+          in: query
+          required: true
+          description: Operation-level
+          schema: { type: integer, minimum: 1, maximum: 100 }
+```
+
+Now (`inputSchema.properties` keys `X-Trace`, `limit`; `required: ['limit']`):
+
+```typescript
+// mapper:
+[
+  { inputKey: "X-Trace", type: "header", key: "X-Trace", required: false },
+  { inputKey: "limit", type: "query", key: "limit", required: true },
+]
+// input { limit: 5 } -> https://api.example.com/orders?limit=5
+```
+
+Before this release both `limit` parameters were kept as a conflict: the input key was renamed to `queryLimit` for both, the mapper held two entries with that key (one required, one not), the input schema kept only the last, and the value was sent twice:
+
+```typescript
+// inputSchema.properties keys: queryLimit, X-Trace
+// mapper: [
+//   { inputKey: "queryLimit", type: "query", key: "limit", required: false },
+//   { inputKey: "queryLimit", type: "query", key: "limit", required: true },
+//   { inputKey: "X-Trace", type: "header", key: "X-Trace", required: false },
+// ]
+// input { queryLimit: 5 } -> https://api.example.com/orders?limit=5&limit=5
+```
+
+Details:
+
+- **The override is whole.** The operation's `schema`, `required`, `description`, `style` and the rest replace the path-level ones; nothing is merged field by field. A path-level `required: true` is gone if the operation says nothing.
+- **Only the same location overrides.** Path-level `id` parameters in the path and in the query, with an operation-level `id` in a header, are three parameters, and the conflict rule renames them (`pathId`, `queryId`, `headerId`). An override and a conflict can happen together: with path-level `id` in the path and in the query and an operation-level `id` in the query, the operation's query `id` replaces the path-level query `id`, and the path `id` and the query `id` are then renamed (`pathId`, `queryId`; `queryId` is the operation's).
+- **Names are compared exactly, except for headers.** A query name or a cookie name is case-sensitive, so `limit` and `Limit` are two parameters. A header name is compared without regard to case, as HTTP does: a path-level `X-Trace` is overridden by an operation-level `x-trace`, and the operation's spelling is the one on the wire and in the input schema (before, both were kept and both were sent). Two spellings in one list are duplicates.
+- **Order.** The path-level parameters that were not overridden come first, then the operation's. An overriding parameter takes its place among the operation's, so the position of an input key can differ from before (in the example, `limit` now follows `X-Trace`).
+- **An override is silent.** It is what the specification says, so it records no diagnostic.
+- **Duplicates in one list.** A single list (a path item's or an operation's) that repeats a `name` and `in` (a header in any case) breaks an OpenAPI rule. The last one is used and each earlier one records a `DUPLICATE_PARAMETER` warning (also a validator warning). Before, both were kept with one input key, and the value was sent twice. An exact repeat of an `in: querystring` parameter is a duplicate too, not a second querystring parameter.
+- **Lint reads the same parameters.** `lintDocument` (and `generator.lint()`) checks the parameters that apply, merged as above, so a path-level parameter without a description that an operation overrides with a described one is not reported.
+
+---
+
+## Parameters Defined with `content`
+
+A parameter defined with `content` instead of `schema` takes its input schema from the media type's `schema` (a media type with none gives an unconstrained input for a JSON media type, an object for `application/x-www-form-urlencoded` and a string for any other), and its mapper entry says which media type serializes the value. OpenAPI says `style`, `explode` and `allowReserved` do not apply, so the entry has none of them:
+
+```yaml
+parameters:
+  - name: coordinates
+    in: query
+    content:
+      application/json:
+        schema:
+          type: object
+          properties:
+            lat: { type: number }
+            long: { type: number }
+```
+
+```typescript
+// inputSchema.properties.coordinates:
+{ type: "object", properties: { lat: ..., long: ... },
+  "x-parameter-location": "query", "x-parameter-content-type": "application/json" }
+
+// mapper:
+[{ inputKey: "coordinates", type: "query", key: "coordinates", required: false,
+   serialization: { contentType: "application/json" } }]
+```
+
+When the media type has an `encoding`, it is carried as `serialization.encoding`, as for a request body. See [Request Builder](./request-builder.md#parameters-defined-with-content) for how each media type is serialized and the diagnostics for a `content` that does not hold exactly one media type.
+
+### Whole-query parameters
+
+An OpenAPI 3.2 parameter `in: querystring` becomes one input whose value is the entire query string. Its mapper entry has `type: 'query'` and `wholeQuery: true` (like `wholeBody` for a body), and `key` is the parameter's name, which is never sent. It is defined with `content`, so its entry carries `serialization.contentType` too:
+
+```typescript
+[{ inputKey: "query", type: "query", key: "query", required: false,
+   serialization: { contentType: "application/json" }, wholeQuery: true }]
+```
+
+An operation has at most one, and no `in: query` parameter next to it (path-level ones included); see [Request Builder](./request-builder.md#whole-query-parameters) and [OpenAPI Versions](./openapi-versions.md).
 
 ---
 

@@ -36,7 +36,7 @@ getDiagnostics(): SpecDiagnostic[]
 getSpecVersion(): SpecVersionInfo
 ```
 
-**`generateTool(path, method)`**: `method` is a standard method in any case (`'get'`, `'GET'`, `'query'`) or an OpenAPI 3.2 `additionalOperations` method exactly as written in the document (`'LINK'` finds `LINK`; `'link'` does not). Only the operations the declared version defines are found: `query` and `additionalOperations` exist from 3.2 on, so `generateTool('/search', 'query')` on a 3.1 document throws `Operation not found`. The tool's `metadata.method` is the canonical form: the lowercase field name of a standard method, the key as written otherwise. It throws a `GenerationError` (context `path`, `method`, `pointer`) for an operation that `generateTools()` skips with a diagnostic: a parameter in a location the library does not map, such as `in: querystring` (`UNSUPPORTED_PARAMETER_LOCATION`), or no Security Requirement that can be satisfied (`UNSATISFIABLE_SECURITY`).
+**`generateTool(path, method)`**: `method` is a standard method in any case (`'get'`, `'GET'`, `'query'`) or an OpenAPI 3.2 `additionalOperations` method exactly as written in the document (`'LINK'` finds `LINK`; `'link'` does not). Only the operations the declared version defines are found: `query` and `additionalOperations` exist from 3.2 on, so `generateTool('/search', 'query')` on a 3.1 document throws `Operation not found`. The tool's `metadata.method` is the canonical form: the lowercase field name of a standard method, the key as written otherwise. It throws a `GenerationError` (context `path`, `method`, `pointer`) for an operation that `generateTools()` skips with a diagnostic: a parameter in a location the library does not map, such as a Swagger `in: body` (`UNSUPPORTED_PARAMETER_LOCATION`), parameters that break an OpenAPI 3.2 rule on `in: querystring` (`MULTIPLE_QUERYSTRING_PARAMETERS`, `QUERYSTRING_WITH_QUERY_PARAMETERS`, `QUERYSTRING_PARAMETER_WITHOUT_CONTENT`; with `validate: true` the validator rejects such a document first), or no Security Requirement that can be satisfied (`UNSATISFIABLE_SECURITY`).
 
 **`generateTools()` / `generateTool()` and validation**: with `validate: true` (the default) the first call validates the document (after dereferencing, when that is on) and later calls reuse the result. A document that fails throws a `ParseError` whose message is `Invalid OpenAPI document: <first error>` (with `(and N more; see the error's context.errors)` when there are more) and whose `context.errors` is the full `ValidationErrorDetail[]`. The quoted first error is cut at 512 characters and any control or bidirectional character in it is written as `\uXXXX`, so the message is safe to log; `context.errors` is not altered. `validate()` is separate: it validates the loaded document as it is (not dereferenced) each time it is called, returns the result instead of throwing, and records no diagnostics.
 
@@ -111,6 +111,26 @@ resolve(
 ): { inputSchema: JsonSchema; mapper: ParameterMapper[] }
 ```
 
+- `pathParameters` are the path item's parameters. An operation-level parameter with the same `name` and `in` overrides a path-level one (a header name in any case; the operation's spelling is used), and of several with the same `name` and `in` in one list the last is used. The same name in different locations is a conflict, renamed by the naming strategy. See [Parameter Conflicts](./parameter-conflicts.md#same-name-and-location-the-operation-wins).
+- A parameter defined with `content` takes its input schema from the media type's `schema` (a media type with none gives `{}` for a JSON media type (`application/json`, `application/*+json`), `{ type: 'object' }` for `application/x-www-form-urlencoded` and `{ type: 'string' }` otherwise); its mapper entry has `serialization.contentType` (and `encoding`) and no `style`, `explode` or `allowReserved`. A parameter with both `schema` and `content` is read as `schema`.
+- An OpenAPI 3.2 `in: querystring` parameter becomes a `type: 'query'` mapper entry with `wholeQuery: true`.
+- It throws a `GenerationError` (context `code`) when the parameters break a querystring rule: more than one `in: querystring`, one next to `in: query` parameters, or one without `content` holding a media type. `OpenAPIToolGenerator` checks the rules first and skips the operation with a diagnostic.
+
+#### Input schema annotations
+
+Each property of the input schema carries annotations that mirror its mapper entry:
+
+| Annotation | Set when |
+| --- | --- |
+| `x-parameter-location` | Every parameter and body property: `path`, `query`, `header`, `cookie` or `body` (not a security input). A whole-query parameter is `query` |
+| `x-mcp-header` | A header: the wire header name, which a conflict rename does not change |
+| `x-parameter-style` | The parameter declares a `style` (never for a parameter defined with `content`) |
+| `x-parameter-explode` | The parameter declares `explode` (never for a parameter defined with `content`) |
+| `x-parameter-content-type` | The parameter is defined with `content`: the media type its value is serialized in |
+| `x-parameter-whole-query` | `true` for an `in: querystring` parameter |
+
+Output schemas are annotated `x-status-code` and `x-content-type`. The `x-` annotations are ignored for typing ([Type Signatures](./type-signatures.md)).
+
 ---
 
 ### ResponseBuilder
@@ -127,7 +147,10 @@ new ResponseBuilder(options?: GenerateOptions, schemaConversion?: SchemaConversi
 
 ```typescript
 build(responses?: ResponsesObject): JsonSchema | undefined
+buildStream(responses?: ResponsesObject): ResponseStreamInfo | undefined
 ```
+
+`build` returns the output schema. A media type with only `itemSchema` contributes nothing to it. `buildStream` returns the streamed response (OpenAPI 3.2 `itemSchema`): of the responses with a media type that declares `itemSchema`, the one `preferredStatusCodes` prefers; within it, the first such media type in document order, chosen apart from the one `build` reads (a response offering `application/json` and `text/event-stream` gives both). The item schema is converted with the same limits. `generateTool()` calls both and stores the second in `metadata.responseStream`. A response with no `description` uses its `summary` as the description. See [Response Schemas](./response-schemas.md).
 
 #### SchemaConversionOptions
 
@@ -183,10 +206,10 @@ Errors (`valid: false`):
 | `MISSING_PARAMETER_NAME`, `MISSING_PARAMETER_IN` | A parameter has no `name` or no `in` |
 | `INVALID_PARAMETER_IN` | `in` is not a location of the declared version (3.0 and 3.1: `path`, `query`, `header`, `cookie`; 3.2 adds `querystring`) |
 | `PATH_PARAMETER_NOT_REQUIRED` | An `in: path` parameter is not `required` |
-| `MISSING_PARAMETER_SCHEMA` | A parameter has neither `schema` nor `content` (an `in: querystring` parameter needs `content`) |
-| `MULTIPLE_QUERYSTRING_PARAMETERS` | An operation has more than one `in: querystring` parameter |
-| `QUERYSTRING_WITH_QUERY_PARAMETERS` | An operation combines an `in: querystring` parameter with `in: query` parameters |
-| `QUERYSTRING_PARAMETER_WITHOUT_CONTENT` | An `in: querystring` parameter has no `content` |
+| `MISSING_PARAMETER_SCHEMA` | A parameter has neither `schema` nor `content` (an `in: querystring` parameter needs `content` with a media type) |
+| `MULTIPLE_QUERYSTRING_PARAMETERS` | An operation has more than one `in: querystring` parameter (the path item's count, after an operation-level parameter overrides a path-level one) |
+| `QUERYSTRING_WITH_QUERY_PARAMETERS` | An operation combines an `in: querystring` parameter with `in: query` parameters (the path item's included) |
+| `QUERYSTRING_PARAMETER_WITHOUT_CONTENT` | An `in: querystring` parameter has no `content`, or one that holds no media type |
 | `OPERATION_NOT_OBJECT` | A method field, or an `additionalOperations` value, is not an object (`get: "x"`). A fixed field holding `null` is skipped without a finding |
 | `ADDITIONAL_OPERATIONS_NOT_OBJECT` | `additionalOperations` is not an object (read only when the document declares 3.2 or newer) |
 | `INVALID_METHOD_TOKEN` | An `additionalOperations` key is not an HTTP method token (RFC 9110) |
@@ -199,7 +222,9 @@ Warnings:
 | `NO_PATHS`, `NO_SERVERS`, `NO_OPERATIONS`, `NO_OPERATION_ID`, `NO_SECURITY_SCHEMES` | No paths or servers, a path without operations, an operation without `operationId`, security requirements without schemes |
 | `NEWER_OPENAPI_VERSION` | The document declares a 3.x minor version newer than 3.2 |
 | `CONFLICTING_VERSION_FIELDS` | The document declares both `openapi` and `swagger` (`swagger` is ignored) |
-| `FEATURE_NEWER_THAN_DECLARED_VERSION` | A `query` operation or `additionalOperations` in a document declaring 3.0 or 3.1 (not read, so no tool and not validated), or an `in: querystring` parameter in such a document |
+| `FEATURE_NEWER_THAN_DECLARED_VERSION` | A `query` operation or `additionalOperations` in a document declaring 3.0 or 3.1 (not read, so no tool and not validated), or an `in: querystring` parameter in such a document (which is read all the same) |
+| `INVALID_PARAMETER_CONTENT` | A parameter's `content` cannot be read as OpenAPI defines it, and the message says what is done instead: several media types (one is used), none or not a map (ignored), a `schema` next to it (`schema` is used; `content` for `in: querystring`), a media type that is not an object, or one with `itemSchema` (not read for a parameter). A media type left as an unresolved `$ref` is reported by generation only |
+| `DUPLICATE_PARAMETER` | A parameter list (a path item's or an operation's) repeats a `name` and `in` (a header name in any case); the last one is used, an exact repeat of an `in: querystring` parameter included. An operation-level parameter that overrides a path-level one is not a duplicate |
 | `PATH_ITEM_NOT_OBJECT` | A path item is not an object; it holds no operations |
 | `METHOD_CASE_VARIANT` | An `additionalOperations` key is another case of a method that has its own field (`post`, `Get`); the library sends such a method upper-cased, so the key is ignored |
 | `REFUSED_METHOD` | An `additionalOperations` key is `CONNECT` in any case; it is ignored |
@@ -217,7 +242,21 @@ Build a ready-to-send HTTP request from a tool and its input values — the full
 
 ```typescript
 buildHttpRequest(tool: McpOpenAPITool, input: Record<string, unknown>, options?: BuildHttpRequestOptions): BuiltHttpRequest
+
+interface BuiltHttpRequest {
+  url: string; // base + expanded path + encoded query; authoritative: send this
+  method: string; // standard methods upper-case; additionalOperations methods as written
+  headers: Record<string, string>;
+  query: Record<string, string[]>; // pairs as sent (unencoded); {} for a non-form whole query
+  queryString?: string; // the query exactly as in `url`; set only for a non-form whole query ('' when empty)
+  cookies: Record<string, string>; // one value per name; the Cookie header carries every pair
+  contentType?: string;
+  body?: unknown;
+  rawBody?: unknown;
+}
 ```
+
+Input values are read as own properties. It refuses a name the input chooses that the tool reserves for a credential or a sibling parameter, a header value or cookie value that cannot be sent, and a lone surrogate; it leaves a `null` property out of a form. For `content` parameters, whole-query parameters (`wholeQuery`) and `style: cookie`, see [Request Builder](./request-builder.md). A `queryString` is never to be re-parsed as name/value pairs: [Do not rebuild the query string](./request-builder.md#do-not-rebuild-the-query-string).
 
 ### applyClientTarget
 
@@ -463,7 +502,7 @@ isStandardMethod("LINK"); // false
 
 ### DIAGNOSTIC_CODES / MAX_DIAGNOSTICS
 
-`DIAGNOSTIC_CODES` is the one frozen registry of every code a diagnostic from `generator.getDiagnostics()` can carry (its keys equal its values); `DiagnosticCode` is the union of those strings. It holds the codes of the version and operation-walk logic (`NEWER_OPENAPI_VERSION`, `FEATURE_NEWER_THAN_DECLARED_VERSION`, `CONFLICTING_VERSION_FIELDS`, `PATH_ITEM_NOT_OBJECT`, `OPERATION_NOT_OBJECT`, `ADDITIONAL_OPERATIONS_NOT_OBJECT`, `INVALID_METHOD_TOKEN`, `DUPLICATE_FIXED_METHOD`, `METHOD_CASE_VARIANT`, `REFUSED_METHOD`), the version errors (`INVALID_OPENAPI_VERSION`, `MISSING_OPENAPI_VERSION`), the validator warnings (`NO_PATHS`, `NO_OPERATIONS`, `NO_OPERATION_ID`, `NO_SERVERS`, `NO_SECURITY_SCHEMES`), the generator's (`UNRESOLVED_SECURITY_SCHEME`, `INVALID_SECURITY_REQUIREMENT`, `UNSATISFIABLE_SECURITY`, `UNSUPPORTED_PARAMETER_LOCATION`) and `DIAGNOSTICS_TRUNCATED`. Each is described in [OpenAPI Versions](./openapi-versions.md#diagnostics).
+`DIAGNOSTIC_CODES` is the one frozen registry of every code a diagnostic from `generator.getDiagnostics()` can carry (its keys equal its values); `DiagnosticCode` is the union of those strings. It holds the codes of the version and operation-walk logic (`NEWER_OPENAPI_VERSION`, `FEATURE_NEWER_THAN_DECLARED_VERSION`, `CONFLICTING_VERSION_FIELDS`, `PATH_ITEM_NOT_OBJECT`, `OPERATION_NOT_OBJECT`, `ADDITIONAL_OPERATIONS_NOT_OBJECT`, `INVALID_METHOD_TOKEN`, `DUPLICATE_FIXED_METHOD`, `METHOD_CASE_VARIANT`, `REFUSED_METHOD`), the version errors (`INVALID_OPENAPI_VERSION`, `MISSING_OPENAPI_VERSION`), the validator warnings (`NO_PATHS`, `NO_OPERATIONS`, `NO_OPERATION_ID`, `NO_SERVERS`, `NO_SECURITY_SCHEMES`), the generator's (`UNRESOLVED_SECURITY_SCHEME`, `INVALID_SECURITY_REQUIREMENT`, `UNSATISFIABLE_SECURITY`, `UNSUPPORTED_PARAMETER_LOCATION`, `UNSUPPORTED_STREAMING_REQUEST_BODY`), the parameter rules (`MULTIPLE_QUERYSTRING_PARAMETERS`, `QUERYSTRING_WITH_QUERY_PARAMETERS`, `QUERYSTRING_PARAMETER_WITHOUT_CONTENT`, `INVALID_PARAMETER_CONTENT`, `DUPLICATE_PARAMETER`), the generator's warnings about a tool that is made but cannot take some inputs (`COOKIE_CONTENT_NOT_SENDABLE`, `QUERYSTRING_WITH_QUERY_CREDENTIAL`) and `DIAGNOSTICS_TRUNCATED`. Each is described in [OpenAPI Versions](./openapi-versions.md#diagnostics).
 
 `MAX_DIAGNOSTICS` (`1000`) is the most findings one list keeps: `getDiagnostics()`, and each of a `ValidationResult`'s `errors` and `warnings`. `LEGACY_PATH_KEY_MAX_LENGTH` (`1024`) is the longest path key the historical validation paths and messages quote.
 
@@ -530,16 +569,21 @@ interface ParameterMapper {
   type: ParameterLocation; // 'path' | 'query' | 'header' | 'cookie' | 'body'
   key: string; // Original parameter name
   required?: boolean;
-  style?: string; // 'simple', 'form', 'matrix', etc.
-  explode?: boolean; // Array/object explosion
-  allowReserved?: boolean; // Query only: RFC 3986 reserved characters stay unencoded
-  serialization?: SerializationInfo; // Content-type, encoding rules, binary marker
+  style?: string; // 'simple', 'form', 'matrix', 'cookie', etc.; absent for a parameter defined with `content`
+  explode?: boolean; // Array/object explosion; absent for a parameter defined with `content`
+  allowReserved?: boolean; // Query only: RFC 3986 reserved characters stay unencoded; absent for `content`
+  serialization?: SerializationInfo; // Media type, encoding rules, binary marker
   wholeBody?: boolean; // Input value IS the entire request body
+  wholeQuery?: true; // Input value IS the entire query string (OpenAPI 3.2 `in: querystring`)
   security?: SecurityParameterInfo; // Auth parameter metadata
 }
 ```
 
 `wholeBody` is set for non-object bodies (arrays, primitives, binary) and root `oneOf`/`anyOf` union bodies: send `input[inputKey]` directly as the request body instead of wrapping it in `{ [key]: value }`. See [SerializationInfo](#serializationinfo) for the content-type, encoding, and binary markers.
+
+`wholeQuery` is set only on a `type: 'query'` entry, for an OpenAPI 3.2 parameter `in: querystring`: the input value is the entire query string, serialized in `serialization.contentType`, and `key` (the parameter's name) is never sent. An operation has at most one such entry and no other non-security `query` entry. See [Request Builder](./request-builder.md#whole-query-parameters).
+
+A parameter defined with `content` has `serialization.contentType` (and `encoding`) and no `style`, `explode` or `allowReserved`. Only a `path`, `query`, `header` or `cookie` entry that is defined with `content`, or is a whole-query entry, carries `serialization`; one defined with `schema` does not.
 
 ---
 
@@ -558,9 +602,34 @@ interface ToolMetadata {
   deprecated?: boolean;
   security?: SecurityRequirement[];
   servers?: ServerInfo[];
-  responseStatusCodes?: number[]; // From output schema
+  responseStatusCodes?: number[]; // From output schema (not a streamed response's)
   externalDocs?: ExternalDocumentationObject;
   frontmcp?: FrontMcpExtensionData; // x-frontmcp extension data
+  responseHints?: ResponseHints; // Paging/truncation/streaming signals; present only when there is something to say
+  responseStream?: ResponseStreamInfo; // The streamed response (OpenAPI 3.2 `itemSchema`), apart from outputSchema
+}
+```
+
+#### ResponseHints
+
+```typescript
+interface ResponseHints {
+  unboundedArray?: boolean; // The output schema holds an array with no maxItems
+  paginationParams?: string[]; // Query parameters that look like pagination controls (a whole-query parameter never counts)
+  largeResponseRisk?: boolean; // Unbounded array and no pagination controls
+  streaming?: boolean; // The operation streams its response: `responseStream` describes the items
+}
+```
+
+#### ResponseStreamInfo
+
+A streamed response: an OpenAPI 3.2 Media Type Object with `itemSchema`. It is reported here and never as `outputSchema`, because an MCP tool that declares an output schema must return structured content, which an unbounded stream is not. See [Response Schemas](./response-schemas.md#streaming-responses).
+
+```typescript
+interface ResponseStreamInfo {
+  statusCode: number; // The response's status code (0 for `default`)
+  contentType: string; // The media type as the document writes it: the first one with `itemSchema` in document order (`text/event-stream`, `application/jsonl`, ...)
+  itemSchema: JsonSchema; // The schema of each item, converted like an output schema
 }
 ```
 
@@ -610,11 +679,13 @@ Serialization details for complex parameters.
 
 ```typescript
 interface SerializationInfo {
-  contentType?: string; // Body content type
+  contentType?: string; // The media type the value is serialized in: a body's, a `content` parameter's, a whole query's
   encoding?: Record<string, EncodingObject>; // OpenAPI media-type encoding rules
   binary?: boolean; // File part / raw binary body (format: binary)
 }
 ```
+
+On a body entry, `contentType` is the request body's media type. On a `path`, `query`, `header` or `cookie` entry it is present only when the parameter is defined with `content` or is a whole-query parameter, and is then the media type of its `content`. `encoding` of a flattened body property holds that property's entry only; of a whole body, a `content` parameter or a whole query it is the media type's full map.
 
 ---
 
@@ -625,6 +696,7 @@ Server information from OpenAPI spec.
 ```typescript
 interface ServerInfo {
   url: string;
+  name?: string; // OpenAPI 3.2 Server Object `name`, when the document gives a string; kept when `baseUrl` replaces the URL
   description?: string;
   variables?: Record<string, ServerVariableObject>;
 }

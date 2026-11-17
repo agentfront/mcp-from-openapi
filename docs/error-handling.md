@@ -101,11 +101,11 @@ Thrown when tool generation fails for a specific operation.
 
 **Context fields:** `path`, `method`, `operationId`, `originalError`
 
-`generateTool()` also throws it for an operation that `generateTools()` skips with a diagnostic, with context `path`, `method` and `pointer` (a JSON Pointer to the cause): a parameter in a location the library does not map (today `in: querystring`, or a Swagger `in: body`; `UNSUPPORTED_PARAMETER_LOCATION`), or no Security Requirement that can be satisfied (`UNSATISFIABLE_SECURITY`, see [Security](./security.md)). `generateTools()` leaves such an operation out and records the diagnostic instead; see [OpenAPI Versions](./openapi-versions.md#diagnostics).
+`generateTool()` also throws it for an operation that `generateTools()` skips with a diagnostic, with context `path`, `method` and `pointer` (a JSON Pointer to the cause): a parameter in a location the library does not map (a Swagger `in: body`, a missing `in`; `UNSUPPORTED_PARAMETER_LOCATION`), parameters that break an OpenAPI 3.2 rule on `in: querystring` (`MULTIPLE_QUERYSTRING_PARAMETERS`, `QUERYSTRING_WITH_QUERY_PARAMETERS`, `QUERYSTRING_PARAMETER_WITHOUT_CONTENT`; a document with `validate: true` is rejected by the validator before this), or no Security Requirement that can be satisfied (`UNSATISFIABLE_SECURITY`, see [Security](./security.md)). `ParameterResolver.resolve()` used on its own throws a `GenerationError` with context `code` for the querystring rules. `generateTools()` leaves such an operation out and records the diagnostic instead; see [OpenAPI Versions](./openapi-versions.md#diagnostics).
 
 ### RequestBuildError
 
-Thrown by `buildHttpRequest()` for input it cannot turn into a request: a missing required parameter, a value that cannot be serialized, an unresolved path placeholder or server variable, a method that is not an RFC 9110 token or is `CONNECT`, and a mapper entry with an unknown `type`. Its `context` names the parameter or method concerned. See [Request Builder](./request-builder.md#errors).
+Thrown by `buildHttpRequest()` for input it cannot turn into a request: a missing required parameter, a value that cannot be serialized (including one its media type cannot carry, a JSON value that is cyclic or too deep, a lone surrogate, a header value or a cookie value that cannot be sent), a name chosen by the input that the tool reserves for a credential or a sibling parameter, an unresolved path placeholder or server variable, a method that is not an RFC 9110 token or is `CONNECT`, a mapper entry with an unknown `type`, and a whole-query (`wholeQuery`) entry that breaks the OpenAPI 3.2 rules. Its `context` names the parameter or method concerned. See [Request Builder](./request-builder.md#errors).
 
 ### SchemaError
 

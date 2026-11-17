@@ -26,7 +26,7 @@ const generator = await OpenAPIToolGenerator.fromURL(url, {
 | Option            | Type                                   | Default | Description                                                                                                                                                                                         |
 | ----------------- | -------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `dereference`     | `boolean`                              | `true`  | Resolve all `$ref` pointers in the spec                                                                                                                                                             |
-| `baseUrl`         | `string`                               | `''`    | Override server URLs from the spec                                                                                                                                                                  |
+| `baseUrl`         | `string`                               | `''`    | Override server URLs from the spec (each server keeps its `name` and `description`)                                                                                                                 |
 | `headers`         | `Record<string, string>`               | `{}`    | Custom HTTP headers for URL loading. Sent only to the spec URL's origin: dropped once a redirect leaves it, and never sent to external `$ref` hosts                                                 |
 | `timeout`         | `number`                               | `30000` | HTTP request timeout in milliseconds                                                                                                                                                                |
 | `validate`        | `boolean`                              | `true`  | Validate the document with the rules of the version it declares, at the first `generateTools()` / `generateTool()` — see [OpenAPI Versions](./openapi-versions.md). `false` skips it; the declared version is still recorded in `getDiagnostics()` |
@@ -73,7 +73,7 @@ const tools = await generator.generateTools({
 | `excludeOperations`                 | `string[]`                                                   | -                                | Exclude these operation IDs                                                                |
 | `filterFn`                          | `(op: OperationWithContext) => boolean`                      | -                                | Custom filter function                                                                     |
 | `namingStrategy`                    | `NamingStrategy`                                             | -                                | Custom naming for conflicts and tool names                                                 |
-| `preferredStatusCodes`              | `number[]`                                                   | `[200, 201, 204, 202, 203, 206]` | Preferred response codes (in order)                                                        |
+| `preferredStatusCodes`              | `number[]`                                                   | `[200, 201, 204, 202, 203, 206]` | Preferred response codes (in order); also picks the streamed response when several stream  |
 | `includeDeprecated`                 | `boolean`                                                    | `false`                          | Include deprecated operations                                                              |
 | `includeAllResponses`               | `boolean`                                                    | `true`                           | Include all status codes as oneOf union                                                    |
 | `maxSchemaDepth`                    | `number`                                                     | `10`                             | Maximum schema nesting depth; deeper structures are truncated with a note                  |
@@ -157,7 +157,7 @@ const tools = await generator.generateTools({
 
 ### maxSchemaDepth
 
-Input and output schemas are bounded to `maxSchemaDepth` levels of nesting (default `10`, minimum `1` — values below 1 are clamped so the root schema always keeps its properties). Nodes at the limit keep their scalar keywords (`type`, `description`, `format`, ...) but have child schemas stripped and `[Truncated: nested schema exceeds maxSchemaDepth]` appended to their description. Truncation covers all JSON Schema 2020-12 structural keywords (`properties`, `patternProperties`, `$defs`, `prefixItems`, `if`/`then`/`else`, `dependentSchemas`, compositions, ...). This keeps pathological or deeply recursive schemas from flooding an agent's context window.
+Input, output and streamed-response item schemas are bounded to `maxSchemaDepth` levels of nesting (default `10`, minimum `1` — values below 1 are clamped so the root schema always keeps its properties). Nodes at the limit keep their scalar keywords (`type`, `description`, `format`, ...) but have child schemas stripped and `[Truncated: nested schema exceeds maxSchemaDepth]` appended to their description. Truncation covers all JSON Schema 2020-12 structural keywords (`properties`, `patternProperties`, `$defs`, `prefixItems`, `if`/`then`/`else`, `dependentSchemas`, compositions, ...). This keeps pathological or deeply recursive schemas from flooding an agent's context window.
 
 The bound is applied while schemas are converted, not only afterwards: conversion stops descending once it is past `maxSchemaDepth`, and a schema reused through `$ref` (a pagination envelope, a money or address type) is converted once and reused for its other occurrences. Generation cost therefore follows the size of the output, not the number of paths through the spec — a few-KB spec whose schemas each reference the same child twice, chained dozens of levels deep, generates in milliseconds instead of minutes.
 
@@ -167,7 +167,7 @@ No step before truncation recurses once per level of nesting: dereferencing, con
 
 The emitted schemas still spell every occurrence of a shared schema out, so a small spec can describe an enormous tree — for example, five properties per level that all reference the next level keep 5^10 nodes after depth truncation. `maxSchemaNodes` (default `100000`) caps several things for each tool. Past the budget, generating that tool fails with a `SchemaError` that names the option; `generateTools()` skips the tool with a warning, like any other per-tool failure.
 
-- Each generated input/output schema: every JSON value in it counts — each schema object, each keyword's value, and everything inside those (`default`, `examples`, `enum`, `required`, `x-*`, ...). A schema with thousands of keywords, reached through many references, therefore cannot expand past the budget.
+- Each generated input/output schema (and a streamed response's item schema): every JSON value in it counts — each schema object, each keyword's value, and everything inside those (`default`, `examples`, `enum`, `required`, `x-*`, ...). A schema with thousands of keywords, reached through many references, therefore cannot expand past the budget.
 - The conversion work for each parameter, request body, and emitted response: one node per schema visited, plus one per keyword of each schema converted (a schema on a cycle is converted once per path). With `includeAllResponses: false`, the responses left out are never converted.
 - The `x-mcp`/`x-frontmcp` meta copied into a tool's `_meta` (see [Modern MCP fields](./modern-mcp-fields.md)), and the other values a tool takes from the spec: its title, `metadata`, and the objects in its `mapper`.
 - With a client [`target`](./client-targets.md), the inlining of local `$ref`s: a definition is inlined once per `$ref` to it, and every value of the result counts.
@@ -178,7 +178,7 @@ For scale, at the default depth: every tool of the full GitHub REST spec generat
 
 ### includeExamples
 
-When `true`, OpenAPI **parameter-level** and **media-type-level** `example`/`examples` values are copied into the generated schemas as JSON Schema `examples` arrays. They override schema-level examples where both exist (matching OpenAPI precedence). The `examples` map wins over the singular `example`; `$ref` example entries are skipped. For flattened object bodies, object-valued media-type examples are distributed onto the matching properties (`example: { name: 'Ada' }` → `name.examples: ['Ada']`).
+When `true`, OpenAPI **parameter-level** and **media-type-level** `example`/`examples` values are copied into the generated schemas as JSON Schema `examples` arrays. They override schema-level examples where both exist (matching OpenAPI precedence). The `examples` map wins over the singular `example`; `$ref` example entries are skipped. Of an Example Object, the data form is used: OpenAPI 3.2 `dataValue` when present, otherwise `value`; an example that has only `serializedValue` or `externalValue` is left out, since neither is data. A parameter defined with `content` takes its own `example`/`examples` first, then those of its media type. For flattened object bodies, object-valued media-type examples are distributed onto the matching properties (`example: { name: 'Ada' }` → `name.examples: ['Ada']`).
 
 Note: **schema-level** `example` keywords are always normalized to `examples` arrays by `toJsonSchema()`, regardless of this option — this option only controls the additional parameter/media-type sources.
 
@@ -212,6 +212,8 @@ When set to a **string array**, only the named schemes appear in the `inputSchem
 When `true` (default), the output schema is a `oneOf` union of all response status codes. Each variant includes an `x-status-code` annotation.
 
 When `false`, only the single preferred status code schema is used (based on `preferredStatusCodes` order).
+
+A streamed response (OpenAPI 3.2 `itemSchema`) is not part of the union either way: it is reported in `metadata.responseStream`. The response is chosen by the same status code preference; within it, the stream's media type is the first one with `itemSchema` in document order, independent of the media type the output schema comes from. See [Response Schemas](./response-schemas.md#streaming-responses).
 
 ---
 

@@ -179,6 +179,9 @@ Each mapper entry has:
 | `type` | Where to put it: `path`, `query`, `header`, `cookie`, or `body` |
 | `key` | The original parameter name |
 | `required` | Whether the parameter is required |
+| `style`, `explode`, `allowReserved` | How a parameter defined with `schema` is serialized; absent for one defined with `content` |
+| `serialization` | The media type the value is serialized in (a body's, a `content` parameter's, a whole query's), its `encoding`, and the `binary` marker |
+| `wholeBody` / `wholeQuery` | The input value IS the entire request body / query string (`wholeQuery` is an OpenAPI 3.2 `in: querystring` parameter) |
 | `security` | Present if this is an auth parameter |
 
 ---
@@ -187,7 +190,7 @@ Each mapper entry has:
 
 Use the mapper to construct the actual HTTP request:
 
-> **Prefer `buildHttpRequest`** — the built-in [request builder](./request-builder.md) applies the full OpenAPI serialization table (style/explode, deepObject, multipart, binary, `wholeBody`). The manual walkthrough below shows the mapper contract for custom integrations; it upper-cases `metadata.method`, which is right for a standard method. An OpenAPI 3.2 `additionalOperations` method (`metadata.method` is its key as written, such as `LINK`) must be sent as written, and `buildHttpRequest` does that.
+> **Prefer `buildHttpRequest`** — the built-in [request builder](./request-builder.md) applies the full OpenAPI serialization table (style/explode, deepObject, multipart, binary, `wholeBody`). The manual walkthrough below shows the mapper contract for custom integrations; it does not serialize `content` parameters or `wholeQuery` entries, and it upper-cases `metadata.method`, which is right for a standard method. An OpenAPI 3.2 `additionalOperations` method (`metadata.method` is its key as written, such as `LINK`) must be sent as written, and `buildHttpRequest` does that.
 
 ```typescript
 function buildRequest(tool: McpOpenAPITool, input: Record<string, any>) {
