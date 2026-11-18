@@ -1,5 +1,6 @@
 import { ParseError } from '../errors';
 import { OpenAPIToolGenerator } from '../generator';
+import { buildHttpRequest } from '../request-builder';
 
 const ok = { 200: { description: 'ok' } };
 const info = { title: 't', version: '1' };
@@ -97,6 +98,45 @@ describe('tools carry what the request can send', () => {
       ['https://base.example.test'],
       ['https://base.example.test'],
     ]);
+  });
+
+  it('leaves out a path parameter the path has no template expression for, with a diagnostic', async () => {
+    const { tools, generator } = await generate(
+      documentWith({
+        '/p/{id}': {
+          parameters: [{ name: 'org', in: 'path', required: true, schema: {} }],
+          get: {
+            operationId: 'p',
+            parameters: [
+              { name: 'id', in: 'path', required: true, schema: {} },
+              { name: 'org', in: 'path', required: true, schema: { type: 'string' } },
+            ],
+            responses: ok,
+          },
+        },
+      }),
+    );
+    expect(tools[0].mapper.map((entry) => entry.key)).toEqual(['id']);
+    expect(tools[0].inputSchema.required).toEqual(['id']);
+    expect(generator.getDiagnostics()).toEqual([
+      expect.objectContaining({ code: 'PARAMETER_IGNORED', path: '/paths/~1p~1{id}/get/parameters/1' }),
+    ]);
+    expect(buildHttpRequest(tools[0], { id: '7' }).url).toBe('https://api.example.test/p/7');
+  });
+
+  it.each([
+    ['are all optional', {}],
+    ['are optional but for a readOnly one', { required: ['id'], properties: { id: { readOnly: true }, a: {} } }],
+  ])('sends an empty body for a required body whose properties %s', async (_label, extra) => {
+    const schema = { type: 'object', properties: { a: { type: 'string' } }, ...extra };
+    const bodyOf = async (required: boolean) => {
+      const requestBody = { required, content: { 'application/json': { schema } } };
+      const { tools } = await generate(documentWith({ '/p': { post: { operationId: 'p', requestBody, responses: ok } } }));
+      expect(tools[0].mapper.map((entry) => entry.key)).toEqual(['a']);
+      return buildHttpRequest(tools[0], {});
+    };
+    expect(await bodyOf(true)).toMatchObject({ body: '{}', headers: { 'content-type': 'application/json' } });
+    expect((await bodyOf(false)).body).toBeUndefined();
   });
 
   it('requires a path parameter, whatever it says', async () => {

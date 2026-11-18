@@ -212,3 +212,47 @@ describe('a reference left unresolved makes no broken tool', () => {
     },
   );
 });
+
+describe('an unreadable reference is located whatever the document declares', () => {
+  it.each<[string, Record<string, unknown>]>([
+    ['3.0.3', {}],
+    ['3.1.0', {}],
+    ['3.2.0', {}],
+    ['3.0.3', { $id: 'https://api.example.test/openapi.json' }],
+    ['3.0.3', { $schema: 'https://json-schema.org/draft/2020-12/schema' }],
+  ])('in a %s document with %p', async (openapi, extra) => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      {
+        openapi,
+        info: { title: 't', version: '1' },
+        paths: {},
+        components: { schemas: { A: { type: 'object' }, B: { $ref: 'https://elsewhere.example.test/b.json' } } },
+        ...extra,
+      },
+      { refResolution: { allowedHosts: ['nothing.example'] } },
+    );
+    const result = await generator.validate();
+    expect(result.errors?.map((error) => [error.code, error.path])).toEqual([
+      ['UNREADABLE_REFERENCE', '/components/schemas/B'],
+    ]);
+  });
+
+  it.each<[unknown, string | undefined, string | undefined]>([
+    ['v1.json', 'https://api.example.test/specs/openapi.json', '/components/schemas/B'],
+    [5, undefined, '/components/schemas/B'],
+    ['v1.json', undefined, undefined],
+  ])('with an $id of %p and a documentUri of %p, at %p', async (id, documentUri, path) => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      {
+        openapi: '3.1.0',
+        $id: id,
+        info: { title: 't', version: '1' },
+        paths: {},
+        components: { schemas: { B: { $ref: 'https://elsewhere.example.test/b.json' } } },
+      },
+      { refResolution: { allowedHosts: ['nothing.example'] }, ...(documentUri && { documentUri }) },
+    );
+    const result = await generator.validate();
+    expect(result.errors?.map((error) => [error.code, error.path])).toEqual([['UNREADABLE_REFERENCE', path]]);
+  });
+});

@@ -1133,6 +1133,13 @@ export interface SerializationInfo {
    * (`format: binary`), e.g. a multipart file part or a raw binary body.
    */
   binary?: boolean;
+
+  /**
+   * On a flattened body property of a required body none of whose properties
+   * is required: `buildHttpRequest` sends an empty body when the input gives
+   * no property.
+   */
+  requiredBody?: boolean;
 }
 
 /**

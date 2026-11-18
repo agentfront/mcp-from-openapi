@@ -995,7 +995,7 @@ describe('the spec barrel', () => {
       'swagger2SkippedOperations',
       'upgradeSwagger2',
     ],
-    parameters: ['parameterNameNotStringDiagnostic', 'readParameterName', 'withTextName'],
+    parameters: ['parameterNameNotStringDiagnostic', 'pathTemplateNames', 'readParameterName', 'withTextName'],
     schemaReferences: ['wrapReferenceSiblings'],
   };
   const modules: Record<keyof typeof RUNTIME_EXPORTS, Record<string, unknown>> = {

@@ -1380,6 +1380,18 @@ function nameClaimer(
   };
 }
 
+/** A body entry's media type, `application/json` when it names none; one that is not text is refused */
+function bodyMediaType(mapper: ParameterMapper): string {
+  const declared: unknown = mapper.serialization?.contentType;
+  if (declared !== undefined && declared !== null && typeof declared !== 'string') {
+    throw new RequestBuildError(
+      `body parameter '${mapper.key}' (input key '${mapper.inputKey}') has an invalid media type ${describeValue(declared)} in serialization.contentType`,
+      { param: mapper.key, inputKey: mapper.inputKey, location: 'body' },
+    );
+  }
+  return (declared as string | null | undefined) ?? 'application/json';
+}
+
 /** Refuse a resolved path that leaves the origin, holds a dot segment, or loses a segment its template has */
 function assertPathNamesTemplateResource(template: string, path: string): void {
   if (!/^\/(?![/\\])/.test(path)) {
@@ -1618,15 +1630,9 @@ export function buildHttpRequest(
       }
 
       case 'body': {
-        const declared: unknown = mapper.serialization?.contentType;
-        if (declared !== undefined && declared !== null && typeof declared !== 'string') {
-          throw new RequestBuildError(
-            `body parameter '${mapper.key}' (input key '${mapper.inputKey}') has an invalid media type ${describeValue(declared)} in serialization.contentType`,
-            { param: mapper.key, inputKey: mapper.inputKey, location: 'body' },
-          );
-        }
+        const declared = bodyMediaType(mapper);
         hasBody = true;
-        contentType = contentType ?? (declared as string | null | undefined) ?? 'application/json';
+        contentType = contentType ?? declared;
         // `binary` on a flattened param marks a FILE PART inside a multipart
         // form; only a whole-body binary mapper makes the entire payload raw
         if (mapper.serialization?.binary && mapper.wholeBody) binaryBody = true;
@@ -1641,6 +1647,16 @@ export function buildHttpRequest(
         break;
       }
     }
+  }
+
+  // A required body is sent though the input gave none of its properties: empty
+  const requiredBody = hasBody
+    ? undefined
+    : tool.mapper.find((mapper) => mapper.type === 'body' && mapper.serialization?.requiredBody === true);
+  if (requiredBody) {
+    hasBody = true;
+    contentType = bodyMediaType(requiredBody);
+    bodyObject = {};
   }
 
   if (path.includes('{')) {

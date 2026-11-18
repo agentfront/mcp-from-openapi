@@ -343,7 +343,7 @@ try {
 }
 ```
 
-`rule` is always there. `reference`, `base` and `resolved` come with the rules that name a reference, and `path`, the JSON Pointer of the `$ref` in the document being loaded (`/paths/~1pets/get/responses/200/content/application~1json/schema`), when the resolver or the library knows it: the document of the example above declares 3.1, for which the resolver reports no location, so it has no `path`, where a 3.0 or 3.2 one does. The raw error is not kept in `context`. A failure the library cannot tie to a reference (`invalid-document`, `missing-target` in a referenced document, `unreadable`) keeps the resolver's message and has only `rule`.
+`rule` is always there. `reference`, `base` and `resolved` come with the rules that name a reference, and `path`, the JSON Pointer of the `$ref` in the document being loaded (`/paths/~1pets/get/responses/200/content/application~1json/schema`), when the resolver or the library knows it: in the entry document it always does. For a document declaring 3.1, or with a root `$id` or `$schema`, the resolver names the `$id` scope instead of the `$ref`, so the library takes the entry document's first `$ref` to the document that could not be read (one read serves them all); only a relative root `$id` with no base URI to resolve it against leaves such a reference without a `path`. The raw error is not kept in `context`. A failure the library cannot tie to a reference (`invalid-document`, `missing-target` in a referenced document, `unreadable`) keeps the resolver's message and has only `rule`.
 
 | `rule` | The reference could not be read because | To allow it |
 |--------|-----------------------------------------|-------------|

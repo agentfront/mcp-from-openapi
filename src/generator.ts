@@ -47,6 +47,7 @@ import {
   listOperations,
   ownProperty,
   parameterNameNotStringDiagnostic,
+  pathTemplateNames,
   readParameterName,
   resolveOperationLayout,
   securitySchemeProblem,
@@ -119,6 +120,7 @@ import {
 } from './ssrf';
 import {
   asUrlPath,
+  findReference,
   findRelativeReference,
   findSelfReferences,
   fragmentPointerTokens,
@@ -284,7 +286,7 @@ interface RefTarget {
 
 /** The part of `$RefParser`'s `$Refs` a resolver reads: where the entry document is. */
 interface RefParserRefs {
-  _root$Ref?: { path?: string };
+  _root$Ref?: { path?: string; value?: unknown };
 }
 
 /** Longest stretch of a reference, base or URL quoted in a dereference error. */
@@ -449,6 +451,14 @@ function parseUrl(url: string): URL | undefined {
  */
 function withoutQuery(url: string): string {
   return url.replace(/\?[^#]*/s, '?...');
+}
+
+/** The URL a document's own `$id` names, as `$RefParser` scopes it: absolute, or resolved against `base` */
+function idScopeOf(document: unknown, base: string | undefined): string | undefined {
+  const id = ownProperty(document, '$id');
+  if (typeof id !== 'string') return undefined;
+  if (URL.canParse(id)) return new URL(id).href;
+  return URL.canParse(id, base) ? new URL(id, base).href : undefined;
 }
 
 /** Escapes `$RefParser` decodes in a file path before `decodeURI`, which keeps them */
@@ -1676,11 +1686,20 @@ export class OpenAPIToolGenerator {
     };
     const fileAllowed = allowedProtocols.has('file');
     const documentHasBase = this.documentBase?.href !== undefined;
-    // Where the `$ref` is, when it is in the entry document (`$RefParser` passes its `$Refs` third)
+    // Where the `$ref` is, when it is in the entry document (`$RefParser` passes its `$Refs` third). The base
+    // names it by pointer; with `$id` scopes (3.1, a root `$id` or `$schema`) it names the scope, so it is the
+    // entry document's first `$ref` to that document (one read serves every `$ref` to it)
     const locate = (file: RefTarget, refs: RefParserRefs | undefined): string[] | undefined => {
+      const root = refs?._root$Ref;
       const hash = file.baseUrl?.indexOf('#') ?? -1;
-      if (hash === -1 || (file.baseUrl as string).slice(0, hash) !== refs?._root$Ref?.path) return undefined;
-      return fragmentPointerTokens((file.baseUrl as string).slice(hash + 1));
+      if (hash !== -1) {
+        const inRoot = (file.baseUrl as string).slice(0, hash) === root?.path;
+        return inRoot ? fragmentPointerTokens((file.baseUrl as string).slice(hash + 1)) : undefined;
+      }
+      const inRoot = file.baseUrl === root?.path || file.baseUrl === idScopeOf(root?.value, root?.path);
+      const reference = file.reference;
+      if (!inRoot || typeof reference !== 'string') return undefined;
+      return findReference(root?.value, (ref) => ref.split('#', 1)[0] === reference)?.location;
     };
     const refuse = (file: RefTarget, refs: RefParserRefs | undefined, refusal: RefRefusal): never => {
       throw new ExternalRefError(file, refusal, { documentHasBase, location: locate(file, refs) });
@@ -2564,13 +2583,31 @@ export class OpenAPIToolGenerator {
     if (analysis.querystring) {
       return { skip: this.querystringDiagnostic(pathStr, entry, analysis.querystring, pointerOf(analysis.querystring.slot)) };
     }
+    // A path parameter the path has no template expression for would never be sent: it is no input
+    const templateNames = new Set(pathTemplateNames(pathStr));
+    const unsent = new Set<string>();
     for (const slot of analysis.effective) {
       const pointer = pointerOf(slot);
       for (const problem of parameterContentDiagnostics(slot.parameter, pointer)) this.addDiagnostic(problem);
       const generationOnly = this.parameterUseDiagnostic(slot.parameter, pointer);
       if (generationOnly !== undefined) this.addDiagnostic(generationOnly);
+      const name = ownProperty(slot.parameter, 'name');
+      if (ownProperty(slot.parameter, 'in') !== 'path' || typeof name !== 'string' || templateNames.has(name)) continue;
+      unsent.add(name);
+      this.addDiagnostic({
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.PARAMETER_IGNORED,
+        message:
+          `${operationLabel(entry.method, pathStr)}: the path parameter ${describeValue(name)} is not an input of ` +
+          `the tool: the path has no template expression for it, so its value would never be sent`,
+        path: pointer,
+      });
     }
-    return { analysis, pointerOf, pathLevel, operationLevel };
+    const sent = (list: unknown[]): unknown[] =>
+      unsent.size === 0
+        ? list
+        : list.filter((parameter) => ownProperty(parameter, 'in') !== 'path' || !unsent.has(ownProperty(parameter, 'name') as string));
+    return { analysis, pointerOf, pathLevel: sent(pathLevel), operationLevel: sent(operationLevel) };
   }
 
   /**

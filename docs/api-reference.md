@@ -750,6 +750,7 @@ interface SerializationInfo {
   contentType?: string; // The media type the value is serialized in: a body's, a `content` parameter's, a whole query's
   encoding?: Record<string, EncodingObject>; // OpenAPI media-type encoding rules
   binary?: boolean; // File part / raw binary body (format: binary)
+  requiredBody?: boolean; // Flattened property of a required body with no required property: an empty body is sent when none is given
 }
 ```
 

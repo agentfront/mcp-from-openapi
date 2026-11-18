@@ -28,6 +28,11 @@ export function readParameterName(value: unknown): ParameterName {
   return { kind: 'invalid' };
 }
 
+/** The names the template expressions of a path key hold, in order: `/a/{id}/{x}` holds `id` and `x` */
+export function pathTemplateNames(path: string): string[] {
+  return (path.match(/\{([^{}]+)\}/g) ?? []).map((expression) => expression.slice(1, -1));
+}
+
 /**
  * `parameter` with a number or boolean `name` replaced by its text (see
  * `readParameterName`), so it is merged and compared as generation reads

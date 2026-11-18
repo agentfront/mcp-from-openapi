@@ -36,6 +36,7 @@ import {
   swagger2SkippedOperations,
   wireMethod,
   withTextName,
+  pathTemplateNames,
   type OperationEntry,
   type OperationLayout,
   type SpecDiagnostic,
@@ -690,8 +691,8 @@ export class Validator {
         this.validateQuerystringUse(pathLevel, pathLevelPointer, `Path ${messageText(path)}`, context);
       // Template expressions the path item does not define, by bounded key; each operation must then define them
       const templateNames = new Map(
-        (path.match(/\{([^{}]+)\}/g) ?? [])
-          .map((expression): [string, string] => [boundedKey(expression.slice(1, -1)), expression.slice(1, -1)])
+        pathTemplateNames(path)
+          .map((name): [string, string] => [boundedKey(name), name])
           .filter(([key]) => !pathLevel.pathNames.has(key)),
       );
 

@@ -550,6 +550,10 @@ export class ParameterResolver {
 
     if (flattened) {
       const requiredFields = flattened.required;
+      // A required body with no required property to send is marked, so it is sent though the input gives none
+      const requiredBody =
+        required &&
+        !Object.entries(flattened.properties).some(([name, property]) => requiredFields.has(name) && !isReadOnly(property));
 
       for (const [propName, propSchema] of Object.entries(flattened.properties)) {
         /* c8 ignore next -- prefix is only used internally and defaults to '' */
@@ -579,6 +583,7 @@ export class ParameterResolver {
               contentType,
               ...(propEncoding && { encoding: { [propName]: propEncoding } }),
               ...(isBinarySchema(propSchema as JsonSchema) && { binary: true }),
+              ...(requiredBody && { requiredBody: true }),
             },
           };
 

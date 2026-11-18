@@ -677,12 +677,13 @@ export function refParserScopesIds(document: unknown): boolean {
 }
 
 /**
- * The first `$ref` of `root`, in document order, that is a relative
- * reference to another document (not empty, not starting with `#`, without a
- * scheme), with where it is; `undefined` when there is none. Walks with its
- * own stack.
+ * The first `$ref` of `root`, in document order, whose text `matches`, with
+ * where it is; `undefined` when there is none. Walks with its own stack.
  */
-export function findRelativeReference(root: unknown): { ref: string; location: string[] } | undefined {
+export function findReference(
+  root: unknown,
+  matches: (ref: string) => boolean,
+): { ref: string; location: string[] } | undefined {
   const seen = new Set<object>();
   const stack: PathVisit[] = [{ node: root, parent: null, key: '' }];
   while (stack.length > 0) {
@@ -691,9 +692,7 @@ export function findRelativeReference(root: unknown): { ref: string; location: s
     if (node === null || typeof node !== 'object' || seen.has(node)) continue;
     seen.add(node);
     const ref = Array.isArray(node) ? undefined : ownProperty(node, '$ref');
-    if (typeof ref === 'string' && ref !== '' && !ref.startsWith('#') && !HAS_SCHEME.test(ref)) {
-      return { ref, location: locationOf(visit) };
-    }
+    if (typeof ref === 'string' && matches(ref)) return { ref, location: locationOf(visit) };
     const record = node as Record<string, unknown>;
     const keys = Object.keys(record);
     for (let index = keys.length - 1; index >= 0; index--) {
@@ -701,6 +700,15 @@ export function findRelativeReference(root: unknown): { ref: string; location: s
     }
   }
   return undefined;
+}
+
+/**
+ * The first `$ref` of `root`, in document order, that is a relative
+ * reference to another document (not empty, not starting with `#`, without a
+ * scheme), with where it is; `undefined` when there is none.
+ */
+export function findRelativeReference(root: unknown): { ref: string; location: string[] } | undefined {
+  return findReference(root, (ref) => ref !== '' && !ref.startsWith('#') && !HAS_SCHEME.test(ref));
 }
 
 /**
