@@ -398,7 +398,7 @@ function paramList(inputSchema: unknown, typeText: string): string {
   return allOptional ? `(input?: ${typeText})` : `(input: ${typeText})`;
 }
 
-/** Root output oneOf variants annotated from x-status-code / x-content-type. */
+/** Root output anyOf variants (one per response) annotated from x-status-code / x-content-type. */
 function outputVariantsDeclaration(name: string, variants: unknown[], ctx: PrintContext): string {
   const lines = variants.map((member) => {
     let comment = '';
@@ -450,8 +450,8 @@ export function emitToolTypeScript(
   blocks.push(namedRoot(inputName, inputSchema, pretty));
 
   const outputUnion =
-    isSchemaRecord(outputSchema) && Array.isArray(outputSchema['oneOf'])
-      ? (outputSchema['oneOf'] as unknown[])
+    isSchemaRecord(outputSchema) && Array.isArray(outputSchema['anyOf'])
+      ? (outputSchema['anyOf'] as unknown[])
       : undefined;
   if (outputSchema === undefined) {
     blocks.push(`type ${outputName} = unknown;`);

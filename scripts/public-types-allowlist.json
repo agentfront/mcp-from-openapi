@@ -224,6 +224,12 @@
       "differences": [
         { "kind": "property-added-required", "leaf": "ParameterResolver.resolve().ignored", "exports": ["ParameterResolver", "typeof ParameterResolver"] }
       ]
+    },
+    {
+      "reason": "`ResponseBuilder.statuses()` returns the status of each response `build()` reads, so the generator takes `metadata.responseStatusCodes` / `responseStatusRanges` from the responses instead of reading them back from the output schema, which the document can write itself. An added method: code using the class is unaffected.",
+      "differences": [
+        { "kind": "property-added-required", "leaf": "ResponseBuilder.statuses", "exports": ["ResponseBuilder", "typeof ResponseBuilder"] }
+      ]
     }
   ]
 }

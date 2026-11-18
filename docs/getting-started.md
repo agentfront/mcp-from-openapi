@@ -306,7 +306,7 @@ const tool = tools[0];
 tool.name;          // "listUsers" (from operationId)
 tool.description;   // "List all users" (from operation summary)
 tool.inputSchema;   // Combined JSON Schema for all parameters
-tool.outputSchema;  // Response schema (can be a oneOf union)
+tool.outputSchema;  // Response schema (an anyOf union for several responses)
 tool.mapper;        // Array of ParameterMapper entries
 tool.metadata;      // { path, method, servers, security, tags, ... }
 ```

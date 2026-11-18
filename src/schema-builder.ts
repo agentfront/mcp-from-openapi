@@ -118,6 +118,9 @@ function isObject(value: unknown): value is object {
   return value !== null && typeof value === 'object';
 }
 
+/** Keywords that refuse what a removed `properties` or `prefixItems` allowed, when `false` */
+const CLOSING_KEYWORDS = ['additionalProperties', 'unevaluatedProperties', 'items', 'unevaluatedItems'] as const;
+
 /**
  * Helper class for building and manipulating JSON schemas
  */
@@ -550,8 +553,9 @@ export class SchemaBuilder {
         }
       }
       if (stripped) {
-        // `required` refers to stripped properties; drop it alongside them
+        // `required` refers to stripped properties, and a closing keyword would refuse what they allowed
         delete copyRecord['required'];
+        for (const key of CLOSING_KEYWORDS) if (copyRecord[key] === false) delete copyRecord[key];
         const note = '[Truncated: nested schema exceeds maxSchemaDepth]';
         copy.description = copy.description ? `${copy.description} ${note}` : note;
       }
@@ -679,6 +683,9 @@ export class SchemaBuilder {
         }
       }
       next.description = node.description ? `${node.description} ${note}` : note;
+      // The omitted properties stay allowed
+      if (next.additionalProperties === false) delete next.additionalProperties;
+      if (next.unevaluatedProperties === false) delete next.unevaluatedProperties;
       return next;
     });
   }

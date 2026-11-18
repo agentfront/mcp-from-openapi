@@ -793,8 +793,8 @@ paths:
       const tool = await generator.generateTool('/users/{id}', 'get');
 
       expect(tool.outputSchema).toBeDefined();
-      expect(tool.outputSchema?.oneOf).toBeDefined();
-      expect(tool.outputSchema?.oneOf).toHaveLength(2);
+      expect(tool.outputSchema?.anyOf).toBeDefined();
+      expect(tool.outputSchema?.anyOf).toHaveLength(2);
     });
 
     it('should handle responses with no content', async () => {
@@ -2003,8 +2003,8 @@ describe('ResponseBuilder', () => {
       },
     });
 
-    expect(schema?.oneOf).toBeDefined();
-    expect(schema?.oneOf).toHaveLength(2);
+    expect(schema?.anyOf).toBeDefined();
+    expect(schema?.anyOf).toHaveLength(2);
   });
 });
 
@@ -9228,7 +9228,7 @@ describe('boolean schemas through generation', () => {
       name: { type: 'string', 'x-parameter-location': 'body' },
       gone: { ...NEVER, 'x-parameter-location': 'body' },
     });
-    expect((tool.outputSchema as any).oneOf[1]).toEqual({
+    expect((tool.outputSchema as any).anyOf[1]).toEqual({
       ...NEVER,
       'x-status-code': 404,
       description: 'never',
@@ -9378,7 +9378,7 @@ describe('response status ranges through generation', () => {
     const both = await generate({ 200: json('object'), '4xx': json('string'), '5XX': json('number') });
     expect(both.metadata.responseStatusCodes).toEqual([200]);
     expect(both.metadata.responseStatusRanges).toEqual(['4XX', '5XX']);
-    expect((both.outputSchema as any).oneOf.map((v: any) => v['x-status-code'])).toEqual([200, '4XX', '5XX']);
+    expect((both.outputSchema as any).anyOf.map((v: any) => v['x-status-code'])).toEqual([200, '4XX', '5XX']);
 
     const rangeOnly = await generate({ '2XX': json('object') });
     expect(rangeOnly.metadata.responseStatusCodes).toBeUndefined();

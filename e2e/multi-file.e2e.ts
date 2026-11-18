@@ -150,18 +150,18 @@ function expectTheTools(tools: McpOpenAPITool[]): void {
   expect(at(createPet.inputSchema, 'properties', 'ownerId', 'pattern')).toBe(ID_PATTERN);
 
   // responses/NotFound.yaml -> schemas/Error.yaml, reached from two path items by two spellings of one file
-  const notFound = at(getPet.outputSchema, 'oneOf', 1);
+  const notFound = at(getPet.outputSchema, 'anyOf', 1);
   expect(at(notFound, 'required')).toEqual(['code', 'message']);
-  expect(at(getOwner.outputSchema, 'oneOf', 1)).toEqual(notFound);
+  expect(at(getOwner.outputSchema, 'anyOf', 1)).toEqual(notFound);
   // responses/PetList.yaml -> schemas/Pet.yaml
   expect(at(listPets.outputSchema, 'maxItems')).toBe(100);
   expect(at(listPets.outputSchema, 'items', 'properties', 'name')).toEqual({ type: 'string' });
 
   // schemas/Pet.yaml <-> schemas/Owner.yaml: each file's contents are there once, and the loop ends there
-  expect(at(getPet.outputSchema, 'oneOf', 0, 'properties', 'owner', 'properties', 'pets', 'maxItems')).toBe(50);
-  expect(at(getPet.outputSchema, 'oneOf', 0, 'properties', 'owner', 'properties', 'pets', 'items', 'properties')).toBeUndefined();
-  expect(at(getOwner.outputSchema, 'oneOf', 0, 'properties', 'pets', 'items', 'properties', 'name')).toEqual({ type: 'string' });
-  expect(at(getOwner.outputSchema, 'oneOf', 0, 'properties', 'pets', 'items', 'properties', 'owner', 'properties')).toBeUndefined();
+  expect(at(getPet.outputSchema, 'anyOf', 0, 'properties', 'owner', 'properties', 'pets', 'maxItems')).toBe(50);
+  expect(at(getPet.outputSchema, 'anyOf', 0, 'properties', 'owner', 'properties', 'pets', 'items', 'properties')).toBeUndefined();
+  expect(at(getOwner.outputSchema, 'anyOf', 0, 'properties', 'pets', 'items', 'properties', 'name')).toEqual({ type: 'string' });
+  expect(at(getOwner.outputSchema, 'anyOf', 0, 'properties', 'pets', 'items', 'properties', 'owner', 'properties')).toBeUndefined();
   // a tool is plain JSON: nothing of the cycle is left in the object graph
   expect(() => JSON.stringify(tools)).not.toThrow();
 }

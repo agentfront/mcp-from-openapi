@@ -1,6 +1,7 @@
 import type { ParameterObject } from './types';
 import { isReferenceObject } from './types';
 import { analyzeParameters } from './parameter-resolver';
+import { readStatusKey } from './response-builder';
 import {
   MAX_CONVERSION_ENTRIES,
   detectSpecVersion,
@@ -328,7 +329,11 @@ export function lintDocument(document: object): LintResult {
 
       // success response presence + list-endpoint pagination
       const responses = (operation.responses ?? {}) as Record<string, unknown>;
-      const successCodes = Object.keys(responses).filter((code) => /^2(\d\d|XX)$/i.test(code));
+      // Read as generation reads them: `2XX`, or a code from 200 to 299
+      const successCodes = Object.keys(responses).filter((key) => {
+        const status = readStatusKey(key);
+        return status === '2XX' || (typeof status === 'number' && status >= 200 && status < 300);
+      });
       if (successCodes.length === 0 && !responses['default']) {
         findings.push({
           severity: 'warning',

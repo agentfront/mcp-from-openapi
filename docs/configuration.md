@@ -243,7 +243,7 @@ When set to a **string array**, only the named schemes appear in the `inputSchem
 
 ### includeAllResponses
 
-When `true` (default), the output schema is a `oneOf` union of all response status codes. Each variant includes an `x-status-code` annotation.
+When `true` (default), the output schema is an `anyOf` union of all response status codes (`anyOf`, as a result can match more than one response). Each variant includes an `x-status-code` annotation.
 
 When `false`, only the single preferred response is used. It is the first of these that finds a response with a schema:
 

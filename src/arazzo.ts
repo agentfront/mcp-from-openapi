@@ -1016,10 +1016,10 @@ function walkPointer(schema: unknown, pointer: string | undefined): unknown {
   return node;
 }
 
-/** Prefer the first status variant of a ResponseBuilder `oneOf` union. */
+/** Prefer the first status variant of a ResponseBuilder `anyOf` union. */
 function primaryResponseSchema(outputSchema: unknown): unknown {
-  if (isRecord(outputSchema) && Array.isArray(outputSchema['oneOf'])) {
-    const variants = outputSchema['oneOf'] as unknown[];
+  if (isRecord(outputSchema) && Array.isArray(outputSchema['anyOf'])) {
+    const variants = outputSchema['anyOf'] as unknown[];
     if (variants.length > 0 && variants.every((v) => isRecord(v) && v['x-status-code'] !== undefined)) {
       return variants[0];
     }

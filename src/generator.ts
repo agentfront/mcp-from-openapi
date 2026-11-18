@@ -75,7 +75,7 @@ import {
   type ParameterSlot,
   type QuerystringProblem,
 } from './parameter-resolver';
-import { ResponseBuilder } from './response-builder';
+import { ResponseBuilder, readStatusKey, type ResponseStatus } from './response-builder';
 import {
   SchemaBuilder,
   fitSchemaDepth,
@@ -900,7 +900,8 @@ function propertyNames(schema: Record<string, unknown>, cap = 8): string {
 function summarizeOutputSchema(schema: JsonSchema): string | undefined {
   const record = schema as Record<string, unknown>;
 
-  const variants = record['oneOf'];
+  // The union ResponseBuilder makes of several responses
+  const variants = record['anyOf'];
   if (Array.isArray(variants) && variants.length > 0) {
     const first = variants[0];
     /* c8 ignore next 2 -- ResponseBuilder variants are always objects; guard for hand-built schemas */
@@ -2861,6 +2862,17 @@ export class OpenAPIToolGenerator {
 
     // Build response schema, and the streamed response's item schema (OpenAPI
     // 3.2 `itemSchema`), which is reported in metadata, never as outputSchema
+    for (const key of Object.keys(isSpecObject(operation.responses) ? operation.responses : {})) {
+      if (key === 'default' || key.startsWith('x-') || readStatusKey(key) !== undefined) continue;
+      this.addDiagnostic({
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.INVALID_RESPONSE_KEY,
+        message:
+          `${operationLabel(entry.method, pathStr)}: the response key ${describeValue(key)} is no status code (three ` +
+          `digits from 100 to 599), range (2XX) or default; the response is ignored`,
+        path: appendPointer(operationPointer(pathStr, entry), 'responses', key),
+      });
+    }
     const output = fit(
       'output schema',
       (depth) => new ResponseBuilder(options, schemaConversion(depth)).build(operation.responses),
@@ -2905,7 +2917,14 @@ export class OpenAPIToolGenerator {
       inferred || overrides.annotations ? { ...inferred, ...overrides.annotations } : undefined;
 
     // Extract metadata
-    const metadata = this.extractMetadata(pathStr, method, operation, document, outputSchema, securityRequirements);
+    const metadata = this.extractMetadata(
+      pathStr,
+      method,
+      operation,
+      document,
+      new ResponseBuilder(options).statuses(operation.responses),
+      securityRequirements,
+    );
     if (securityAlternatives) metadata.securityAlternatives = securityAlternatives;
 
     // The schemas with formats resolved and depth bounded (see `finishSchema`);
@@ -3219,7 +3238,7 @@ export class OpenAPIToolGenerator {
     method: HTTPMethod,
     operation: OperationObject,
     document: OpenAPIDocument,
-    outputSchema: unknown,
+    responseStatuses: ResponseStatus[],
     securityRequirements: SecurityRequirement[] | undefined,
   ): ToolMetadata {
     const metadata: ToolMetadata = {
@@ -3255,18 +3274,12 @@ export class OpenAPIToolGenerator {
       metadata.servers = [{ url: this.options.baseUrl }];
     }
 
-    // Extract response status codes (preserve 0 for default responses); a
-    // range (`'2XX'`) is a string, listed apart
-    const schemaObj = outputSchema as Record<string, unknown> | undefined;
-    const statuses: unknown[] =
-      schemaObj && Array.isArray(schemaObj['oneOf'])
-        ? (schemaObj['oneOf'] as Record<string, unknown>[]).map((schema) => schema['x-status-code'])
-        : [schemaObj?.['x-status-code']];
-    const codes = statuses.filter((code): code is number => typeof code === 'number');
+    // Response status codes (0 for `default`); a range (`'2XX'`) is a string, listed apart
+    const codes = responseStatuses.filter((code): code is number => typeof code === 'number');
     if (codes.length > 0) {
       metadata.responseStatusCodes = codes;
     }
-    const ranges = statuses.filter((code): code is ResponseStatusRange => typeof code === 'string');
+    const ranges = responseStatuses.filter((code): code is ResponseStatusRange => typeof code === 'string');
     if (ranges.length > 0) {
       metadata.responseStatusRanges = ranges;
     }

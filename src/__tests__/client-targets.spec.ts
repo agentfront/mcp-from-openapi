@@ -382,7 +382,7 @@ describe('target option in the generator', () => {
       format: 'date',
       'x-parameter-location': 'query',
     });
-    expect((tool.outputSchema as any).oneOf).toHaveLength(2);
+    expect((tool.outputSchema as any).anyOf).toHaveLength(2);
   });
 });
 

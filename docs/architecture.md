@@ -109,7 +109,7 @@ Which operations a document has follows its declared version (`resolveOperationL
 
 - Selects content type by preference (JSON > HAL+JSON > problem+JSON > XML > text)
 - Handles no-content responses (204) as `type: 'null'`
-- Builds `oneOf` unions for multiple responses or selects preferred
+- Builds `anyOf` unions for multiple responses or selects preferred
 - Annotates schemas with `x-status-code` and `x-content-type`
 - Falls back through an explicit 2xx, the range keys (`2XX`, kept as `'2XX'` in `x-status-code`), 3xx, then first available when preferred codes aren't found (see [Response Schemas](./response-schemas.md#selection-priority))
 - Reports a streamed response (OpenAPI 3.2 `itemSchema`) apart from the output schema (`buildStream`), which the generator stores in `metadata.responseStream`

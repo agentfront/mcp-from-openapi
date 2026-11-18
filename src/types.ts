@@ -606,7 +606,7 @@ function findCyclicNodes(root: object, maxDepth: number, maxNodes: number): Set<
  * Applied whatever version the document declares, like `nullable` itself:
  *
  * - `x-nullable: <boolean>` stands for `nullable` when the schema has no
- *   `nullable` (the extension is then dropped, as `nullable` is);
+ *   `nullable`, and is dropped either way, as `nullable` is;
  * - `type: file` (or `file` in a `type` list) is a binary string: `type:
  *   string, format: binary`;
  * - a string `discriminator` (the 2.0 form, a property name) becomes the
@@ -616,9 +616,10 @@ function findCyclicNodes(root: object, maxDepth: number, maxNodes: number): Set<
  */
 function normalizeSwaggerKeywords(result: Record<string, unknown>, nullable: unknown): boolean {
   let effective = nullable;
+  // Dropped whenever it is a boolean, also next to `nullable`, so a converted schema converts to itself
   const xNullable = result['x-nullable'];
-  if (nullable === undefined && typeof xNullable === 'boolean') {
-    effective = xNullable;
+  if (typeof xNullable === 'boolean') {
+    if (nullable === undefined) effective = xNullable;
     delete result['x-nullable'];
   }
 
@@ -2059,6 +2060,8 @@ export const DIAGNOSTIC_CODES = Object.freeze({
   TOOL_GENERATION_FAILED: 'TOOL_GENERATION_FAILED',
   /** A parameter, request body or response generation needs is a reference that was not resolved. */
   UNRESOLVED_REFERENCE: 'UNRESOLVED_REFERENCE',
+  /** A response key that is no status code (three digits from 100 to 599), range (`2XX`) or `default`: ignored. */
+  INVALID_RESPONSE_KEY: 'INVALID_RESPONSE_KEY',
   /**
    * A security scheme the library cannot send (an unknown `type`, an `apiKey` without a usable `in` or `name`): the
    * requirements naming it are dropped. As an `info`, a `mutualTLS` scheme, which the HTTP client applies.

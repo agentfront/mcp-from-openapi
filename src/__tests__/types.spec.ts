@@ -1133,14 +1133,12 @@ describe('toJsonSchema on Swagger 2.0 constructs', () => {
     ).toEqual({ type: 'object', properties: { a: { type: ['integer', 'null'] } } });
   });
 
-  it('lets nullable win over x-nullable, which is then kept as written', () => {
+  it('lets nullable win over x-nullable, which is dropped either way', () => {
     expect(toJsonSchema({ type: 'string', nullable: false, 'x-nullable': true } as any)).toEqual({
       type: 'string',
-      'x-nullable': true,
     });
     expect(toJsonSchema({ type: 'string', nullable: true, 'x-nullable': false } as any)).toEqual({
       type: ['string', 'null'],
-      'x-nullable': false,
     });
     // A value that is not a boolean is not read
     expect(toJsonSchema({ type: 'string', 'x-nullable': 'yes' } as any)).toEqual({ type: 'string', 'x-nullable': 'yes' });
