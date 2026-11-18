@@ -126,10 +126,32 @@ export function normalizeHostname(hostname: string): string {
   return h.slice(0, end);
 }
 
-/** Does `list` contain `hostname`? Both sides are compared in {@link normalizeHostname} form. */
-export function hostListIncludes(list: readonly string[], hostname: string): boolean {
+/**
+ * One spelling per host: an IPv6 address that embeds an IPv4 one (mapped, NAT64, 6to4, ...) is that dotted quad,
+ * another IPv6 address its eight groups, a name or IPv4 address what a URL makes of it (`bücher.example` is
+ * `xn--bcher-kva.example`, `2130706433` is `127.0.0.1`), each in {@link normalizeHostname} form.
+ */
+function canonicalHost(hostname: string): string {
   const host = normalizeHostname(hostname);
-  return list.some((entry) => normalizeHostname(entry) === host);
+  const groups = host.includes(':') ? parseIpv6(host) : null;
+  if (groups) return embeddedIpv4(groups)?.join('.') ?? groups.map((group) => group.toString(16)).join(':');
+  try {
+    return normalizeHostname(new URL(`http://${host}`).hostname);
+  } catch {
+    return host;
+  }
+}
+
+/** Does `list` contain `hostname`, a name or an address? Both sides are compared in one spelling per host. */
+export function hostListIncludes(list: readonly string[], hostname: string): boolean {
+  const host = canonicalHost(hostname);
+  return list.some((entry) => canonicalHost(entry) === host);
+}
+
+/** Whether a host list entry is an IP address, which a name can resolve to. */
+function isAddressEntry(entry: string): boolean {
+  const host = canonicalHost(entry);
+  return host.includes(':') || parseIpv4(host) !== null;
 }
 
 /**
@@ -320,14 +342,14 @@ export const defaultLookup: SsrfHostLookup = async (hostname) => {
 /**
  * Validate that `url` is safe to fetch (spec URL or `$ref` target), throwing
  * {@link SsrfError} if not. Enforces http/https, the `allowedHosts` allow-list,
- * the internal-address denylist, and — for DNS names — resolves and rejects if
- * any resolved address is internal.
+ * `blockedHosts`, the internal-address denylist, and — for DNS names — resolves
+ * and rejects if any resolved address is internal or in `blockedHosts`.
  *
  * Returns the validated resolved addresses so the caller can **pin** the
  * connection to them ({@link safeFetch}), guaranteeing the socket connects to
  * the exact IP that was validated rather than re-resolving the hostname. An
- * empty array means "no pinning needed" (a literal IP, `allowInternalIPs`, or a
- * runtime without a resolver).
+ * empty array means "no pinning needed" (a literal IP, `allowInternalIPs` with
+ * no address in `blockedHosts`, or a runtime without a resolver).
  *
  * Fails closed: a genuine resolver error (or a name that resolves to no
  * address) rejects the URL. Only {@link SsrfResolverUnavailableError} — no
@@ -358,20 +380,16 @@ export async function assertUrlSafe(
     throw new SsrfError(`Host "${hostname}" is not in the allowed-hosts list`, { url, reason: 'host-not-allowed' });
   }
 
-  if (ssrf.allowInternalIPs) {
-    if (hostListIncludes(ssrf.blockedHosts, hostname)) {
-      throw new SsrfError(`Host "${hostname}" is blocked`, { url, reason: 'host-blocked' });
-    }
-    return [];
+  if (hostListIncludes(ssrf.blockedHosts, hostname)) {
+    throw new SsrfError(`Host "${hostname}" is blocked`, { url, reason: 'host-blocked' });
   }
-
-  if (isBlockedHostname(hostname, ssrf)) {
+  if (!ssrf.allowInternalIPs && isBlockedHostname(hostname, ssrf)) {
     throw new SsrfError(`Host "${hostname}" maps to a blocked internal address`, { url, reason: 'internal-address' });
   }
 
-  // Literal IPs are already fully decided by isBlockedHostname above, and the
-  // socket connects to them directly (no DNS), so there is nothing to pin.
-  if (isIpLiteral(hostname)) {
+  // Literal IPs are already fully decided above, and the socket connects to them directly (no DNS), so there is
+  // nothing to pin. With internal addresses allowed, a name is resolved only to check it against blocked addresses.
+  if (isIpLiteral(hostname) || (ssrf.allowInternalIPs && !ssrf.blockedHosts.some(isAddressEntry))) {
     return [];
   }
 
@@ -397,8 +415,11 @@ export async function assertUrlSafe(
   }
 
   for (const { address } of addresses) {
-    if (isBlockedAddress(address)) {
-      throw new SsrfError(`Host "${hostname}" resolves to blocked address ${address}`, {
+    if (hostListIncludes(ssrf.blockedHosts, address)) {
+      throw new SsrfError(`Host "${hostname}" resolves to a blocked address`, { url, reason: 'host-blocked' });
+    }
+    if (!ssrf.allowInternalIPs && isBlockedAddress(address)) {
+      throw new SsrfError(`Host "${hostname}" resolves to a blocked internal address`, {
         url,
         reason: 'resolved-address',
       });

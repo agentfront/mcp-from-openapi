@@ -111,6 +111,7 @@ import {
   safeFetchWithFinalUrl,
 } from './ssrf';
 import {
+  asUrlPath,
   findRelativeReference,
   findSelfReferences,
   fragmentPointerTokens,
@@ -431,6 +432,15 @@ function withoutQuery(url: string): string {
   return url.replace(/\?[^#]*/s, '?...');
 }
 
+/** What a reference error shows for the working directory, which tells a document's author where the host runs */
+const WORKING_DIRECTORY = '<working directory>/';
+
+/** The working directory as a reference resolved against it holds it, written out and as a URL path writes it */
+function workingDirectoryForms(): string[] {
+  const directory = `${process.cwd().replace(/\\/g, '/').replace(/\/$/, '')}/`;
+  return directory === '/' ? [] : [...new Set([directory, asUrlPath(directory)])];
+}
+
 /**
  * An external reference that cannot be read, thrown from a `$RefParser`
  * resolver (and carried out as the `cause` of its error) or before it runs:
@@ -458,14 +468,22 @@ class ExternalRefError extends Error {
         : hash === -1
           ? ''
           : (target.baseUrl as string).slice(hash);
-    const base = (hash === -1 ? target.baseUrl : target.baseUrl?.slice(0, hash))?.replace(/\?.*$/s, '?...');
-    // A reference can carry user information, which may be a real credential: never quoted, also where
-    // resolving moved it into a path (`https:u:p@h/x` read as the local file `<cwd>/u:p@h/x`)
+    // User information may be a real credential: never quoted, also where resolving moved it into a path
+    // (`https:u:p@h/x` read as the local file `<cwd>/u:p@h/x`); nor are queries or the working directory
     const secrets = target.reference === undefined ? [] : userInfoOf(target.reference);
+    const hidden = [
+      ...secrets.map((secret): [string, string] => [secret, '***']),
+      ...workingDirectoryForms().map((form): [string, string] => [form, WORKING_DIRECTORY]),
+    ];
     const scrub = (text: string): string =>
-      secrets.reduce((scrubbed, secret) => scrubbed.split(secret).join('***'), redactUserInfo(text));
-    const resolved = scrub(withoutQuery(target.url));
-    const reference = target.reference === undefined ? undefined : redactUserInfo(target.reference);
+      hidden.reduce(
+        (scrubbed, [secret, label]) => scrubbed.split(secret).join(label),
+        redactUserInfo(withoutQuery(text)),
+      );
+    const base =
+      target.baseUrl === undefined ? undefined : scrub(hash === -1 ? target.baseUrl : target.baseUrl.slice(0, hash));
+    const resolved = scrub(target.url);
+    const reference = target.reference === undefined ? undefined : scrub(target.reference);
     const quote = (text: string): string => describeValue(text, REF_TEXT_MAX_LENGTH);
     const what =
       reference === undefined
@@ -475,7 +493,7 @@ class ExternalRefError extends Error {
     // A relative reference of a document that has no base URI resolves against the working directory
     const relative = reference !== undefined && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(reference);
     const hint =
-      !options.documentHasBase && relative
+      !options.documentHasBase && relative && (base?.startsWith(WORKING_DIRECTORY) ?? true)
         ? ' (the document has no base URI, so its relative references resolve against the working directory: ' +
           'load it with fromFile or fromURL, or pass LoadOptions.documentUri)'
         : '';
@@ -847,33 +865,34 @@ function summarizeOutputSchema(schema: JsonSchema): string | undefined {
 }
 
 /**
- * Convert a path glob to a RegExp: `*` matches within one path segment,
- * `**` across segments, `?` a single non-slash character.
+ * Whether `path` matches `glob`: `*` matches within one path segment, `**` across segments, `?` one character
+ * other than `/`. Every glob position is followed at once, so the time is at most glob x path (no backtracking).
  */
-function globToRegExp(glob: string): RegExp {
-  let pattern = '^';
-  for (let i = 0; i < glob.length; i++) {
-    const char = glob[i];
-    if (char === '*') {
-      if (glob[i + 1] === '*') {
-        pattern += '.*';
-        i++;
-      } else {
-        pattern += '[^/]*';
-      }
-    } else if (char === '?') {
-      pattern += '[^/]';
-    } else {
-      pattern += char.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+function matchesGlob(glob: string, path: string): boolean {
+  const tokens = Array.from(glob.matchAll(/\*\*|[\s\S]/g), ([token]) => token);
+  // A star also matches nothing; a Set visits what is added while it is iterated
+  const withEmptyStars = (positions: Set<number>): Set<number> => {
+    for (const position of positions) if (tokens[position]?.startsWith('*')) positions.add(position + 1);
+    return positions;
+  };
+  let positions = withEmptyStars(new Set([0]));
+  for (let index = 0; index < path.length && positions.size > 0; index++) {
+    const character = path[index];
+    const next = new Set<number>();
+    for (const position of positions) {
+      const token = tokens[position];
+      if (token === '**' || (token === '*' && character !== '/')) next.add(position);
+      else if (token === character || (token === '?' && character !== '/')) next.add(position + 1);
     }
+    positions = withEmptyStars(next);
   }
-  return new RegExp(`${pattern}$`);
+  return positions.has(tokens.length);
 }
 
 /** A path key is matched as a client sends it: `%61` is `a`, and an escape of another character upper-cased */
 function matchesAnyGlob(path: string, globs: string[]): boolean {
   const canonicalPath = normalizeEscapes(path);
-  return globs.some((glob) => globToRegExp(glob).test(canonicalPath));
+  return globs.some((glob) => matchesGlob(glob, canonicalPath));
 }
 
 /**

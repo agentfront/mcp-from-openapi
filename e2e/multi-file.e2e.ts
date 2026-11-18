@@ -413,11 +413,11 @@ describe('story: an API described over several files', () => {
         const error = await failureOf(() => generator.generateTools());
         expect(error).toBeInstanceOf(ParseError);
         const { message, context } = error as ParseError;
-        // the first reference in document order, looked for under the working directory
+        // the first reference in document order, looked for under the working directory, which is not named
         expect(context).toMatchObject({
           rule: 'file-error',
           reference: './paths/pets.yaml',
-          resolved: join(process.cwd(), 'paths', 'pets.yaml'),
+          resolved: '<working directory>/paths/pets.yaml',
           path: '/paths/~1pets',
         });
         expect(message).toContain('the file cannot be read (ENOENT)');

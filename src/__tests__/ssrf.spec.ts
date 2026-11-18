@@ -348,7 +348,9 @@ describe('ssrf: assertUrlSafe', () => {
 
   it('rejects DNS names that resolve to a NAT64 address embedding an internal IPv4', async () => {
     const lookup = lookupTo('64:ff9b::a00:5');
-    await expect(assertUrlSafe('https://nat64.attacker.example/x', OPEN, lookup)).rejects.toThrow(/64:ff9b::a00:5/);
+    await expect(assertUrlSafe('https://nat64.attacker.example/x', OPEN, lookup)).rejects.toThrow(
+      'Host "nat64.attacker.example" resolves to a blocked internal address',
+    );
   });
 
   it('fails CLOSED when the resolver errors (no silent fail-open)', async () => {

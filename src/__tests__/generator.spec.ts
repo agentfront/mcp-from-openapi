@@ -7873,19 +7873,24 @@ describe('Base URI, $self and references to other documents', () => {
     it('keeps resolving against the working directory without a base URI, and says so', async () => {
       await withFiles(files, async (dir) => {
         const document = JSON.parse(fs.readFileSync(path.join(dir, 'api/openapi.yaml'), 'utf8'));
-        const cwdBase = `${process.cwd()}${path.sep}`;
-        // Refused: the message says why relative references land in the working directory
+        // Refused: the message says why relative references land in the working directory, without naming it
         const refused = await rejection((await OpenAPIToolGenerator.fromJSON(document)).generateTools());
-        expect(refused.message).toContain(`resolved against ${JSON.stringify(cwdBase)}`);
+        expect(refused.message).toContain('resolved against "<working directory>/"');
+        expect(refused.message).not.toContain(process.cwd());
         expect(refused.message).toContain(
           '(the document has no base URI, so its relative references resolve against the working directory: ' +
             'load it with fromFile or fromURL, or pass LoadOptions.documentUri)',
         );
-        expect(refused.context).toMatchObject({ reference: 'schemas/pet.yaml', base: cwdBase, rule: 'protocol' });
+        expect(refused.context).toMatchObject({
+          reference: 'schemas/pet.yaml',
+          base: '<working directory>/',
+          resolved: '<working directory>/schemas/pet.yaml',
+          rule: 'protocol',
+        });
         // Allowed: read from the working directory, as in earlier releases
         const missing = await rejection((await OpenAPIToolGenerator.fromJSON(document, allowFile)).generateTools());
         expect(missing.message).toContain(
-          `resolved against ${JSON.stringify(cwdBase)} to ${JSON.stringify(path.join(process.cwd(), 'schemas/pet.yaml'))}: ` +
+          'resolved against "<working directory>/" to "<working directory>/schemas/pet.yaml": ' +
             'the file cannot be read (ENOENT)',
         );
         expect(missing.context).toMatchObject({ rule: 'file-error' });
@@ -8589,7 +8594,7 @@ describe('Base URI, $self and references to other documents', () => {
       jest.spyOn(dns.promises, 'lookup').mockResolvedValue([{ address: '10.0.0.5', family: 4 }] as never);
       const error = await refusedFor('http://schemas.internal.example/pet.json');
       expect(error.message).toContain(
-        'to "http://schemas.internal.example/pet.json": Host "schemas.internal.example" resolves to blocked address 10.0.0.5',
+        'to "http://schemas.internal.example/pet.json": Host "schemas.internal.example" resolves to a blocked internal address',
       );
       expect(error.context).toMatchObject({ rule: 'resolved-address' });
     });
@@ -9107,10 +9112,10 @@ describe('Base URI, $self and references to other documents', () => {
       const withQuery = await rejection(
         (await failing({ A: `${origin}/pet.json?token=REF-SECRET` })).generateTools(),
       );
-      // The reference is quoted as the document wrote it; the URL it resolved to is shown without its query
+      // A query may hold a credential: neither the reference nor the URL it resolved to shows it
       expect(withQuery.context).toMatchObject({
         rule: 'response',
-        reference: `${origin}/pet.json?token=REF-SECRET`,
+        reference: `${origin}/pet.json?...`,
         resolved: `${origin}/pet.json?...`,
       });
       expect(withQuery.message).toContain(`to "${origin}/pet.json?..."`);

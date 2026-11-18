@@ -44,7 +44,7 @@ Controls how external `$ref` pointers are resolved during dereferencing. See [SS
 | ------------------ | ---------- | ------------------- | ----------------------------------- |
 | `allowedProtocols` | `string[]` | `['http', 'https']` | Protocols allowed for external refs. A relative `$ref` is checked as the absolute URL it resolves to, and a local path counts as `file`: a multi-file spec on disk needs `file`, which lets the document read any file the process can read (see [Trust Model](./ssrf-prevention.md#trust-model)) |
 | `allowedHosts`     | `string[]` | `[]` (all allowed)  | Whitelist specific hostnames        |
-| `blockedHosts`     | `string[]` | `[]`                | Additional hostnames to block       |
+| `blockedHosts`     | `string[]` | `[]`                | Additional hosts to block: names, or addresses (which also block the names resolving to them) |
 | `allowInternalIPs` | `boolean`  | `false`             | Disable built-in SSRF protection    |
 | `maxDocuments`     | `number`   | `10000`             | Most referenced documents one load reads (rule `too-many-documents`) |
 | `maxTotalBytes`    | `number`   | `104857600`         | Most bytes all referenced documents may hold together (rule `too-large`) |

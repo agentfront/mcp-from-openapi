@@ -66,6 +66,10 @@ IPv6 addresses that embed an IPv4 address are checked against the IPv4 ranges ab
 
 Hostnames are compared in a normalized form: lowercase, with trailing root dots and IPv6 brackets removed. This applies to the built-in names above and to every `allowedHosts` / `blockedHosts` entry, on both sides of the comparison. `localhost.`, `LOCALHOST`, and `localhost` are the same host, so a `blockedHosts: ['internal.corp']` entry also blocks `http://internal.corp./`.
 
+`allowedHosts` and `blockedHosts` entries are also compared as hosts, not spellings. An IPv6 address that embeds an IPv4 address (mapped, NAT64, 6to4, ...) is that IPv4 address, so `blockedHosts: ['169.254.169.254']` also blocks `http://[::ffff:a9fe:a9fe]/`. A Unicode name is its ASCII form (`bücher.example` is `xn--bcher-kva.example`).
+
+`blockedHosts` also applies to the addresses a name resolves to: an address entry blocks every name that resolves to it. With `allowInternalIPs: true`, a name is resolved, and the connection pinned to what was checked, only when `blockedHosts` holds an address; a name that cannot be resolved is then refused (`dns-failed`).
+
 ---
 
 ## Configuration
@@ -124,7 +128,7 @@ const generator = await OpenAPIToolGenerator.fromJSON(spec, {
 
 ### Allow Internal IPs (Not Recommended)
 
-Disables the built-in IP block list. Only user-provided `blockedHosts` are checked:
+Disables the built-in IP block list. Only user-provided `blockedHosts` are checked (an address in it also blocks the names that resolve to it):
 
 ```typescript
 const generator = await OpenAPIToolGenerator.fromJSON(spec, {
@@ -225,7 +229,7 @@ User information is never echoed: it is shown as `***@` in the message and in `e
 A document that has no base at all (`fromJSON` and `fromYAML` without `documentUri`, and no absolute `$self`) behaves as in earlier releases: a relative reference resolves against the process working directory, and the error says so:
 
 ```
-... Cannot read $ref "./schemas/pet.json" resolved against "<cwd>/" to "<cwd>/schemas/pet.json": it is read as a local file,
+... Cannot read $ref "./schemas/pet.json" resolved against "<working directory>/" to "<working directory>/schemas/pet.json": it is read as a local file,
 and refResolution.allowedProtocols ("http", "https") does not include "file"; add "file" to refResolution.allowedProtocols to read it
 (the document has no base URI, so its relative references resolve against the working directory:
 load it with fromFile or fromURL, or pass LoadOptions.documentUri)
@@ -313,7 +317,11 @@ A reference that the allow-list, the host gate or the network guard refuses, or 
 Failed to dereference OpenAPI document: Cannot read $ref "<reference>" [at "<pointer>"] resolved against "<base>" to "<resolved>": <reason>[; <what would allow it>][ (<hint>)]
 ```
 
-- `<reference>` is the `$ref` as written (a query in it stays), `<base>` what it was resolved against and `<resolved>` the URL or path it became. For a file base, `<base>` and `<resolved>` are local paths. The query of `<base>` and of `<resolved>` is shown as `?...`, because a spec URL can carry a token there. `at "<pointer>"` is added when the reference resolver says where in the document the reference is (it does not for a document declaring 3.1, or one with no base).
+- `<reference>` is the `$ref` as written, `<base>` what it was resolved against and `<resolved>` the URL or path it became. For a file base, `<base>` and `<resolved>` are local paths. The document's author may read the message, so none of the three shows:
+  - a query, shown as `?...`, because a URL can carry a token there;
+  - user information, shown as `***`, also where resolving moved it into a path (percent-encoded or not);
+  - the process working directory, shown as `<working directory>/`.
+  A name that resolves to an internal address is refused without naming the address. `at "<pointer>"` is added when the reference resolver says where in the document the reference is (it does not for a document declaring 3.1, or one with no base).
 - Each quoted part is cut at 256 characters and written with control and bidirectional characters escaped, because the document controls all of them, in the message and in `error.context` alike.
 - The `<hint>` appears only when the document has no base URI and the reference is relative.
 - When several references cannot be read, the one named is the first in document order (the entry document depth first, then each referenced document as it is read), whatever order the network or the disk answers in.
@@ -341,10 +349,10 @@ try {
 |--------|-----------------------------------------|-------------|
 | `protocol` | Its protocol is not in `refResolution.allowedProtocols` (a path or relative reference counts as `file`), or it is allowed but not one the network fetcher reads (only `http` and `https` are fetched) | Add the protocol, `file` for a local path (see below) |
 | `host-not-allowed` | `allowedHosts` is set and does not list its host | Add the host to `allowedHosts` |
-| `host-blocked` | Its host is in `blockedHosts` | Remove it from `blockedHosts` |
+| `host-blocked` | Its host, or an address its name resolves to, is in `blockedHosts` | Remove it from `blockedHosts` |
 | `too-many-documents` | The document needs more than `refResolution.maxDocuments` referenced documents (default 10,000) | Raise `maxDocuments` |
 | `internal-address` | Its host is a loopback, private, link-local or cloud-metadata name or address | `allowInternalIPs: true` (unsafe for documents you do not trust) |
-| `resolved-address` | Its name resolves to an internal address (`Host "..." resolves to blocked address 255.255.255.255`) | `allowInternalIPs: true` (unsafe) |
+| `resolved-address` | Its name resolves to an internal address (`Host "..." resolves to a blocked internal address`) | `allowInternalIPs: true` (unsafe) |
 | `dns-failed` | Its name could not be resolved | Fix the name |
 | `too-large` | The response exceeds 10 MiB (`Response body exceeds 10485760 bytes`), or the referenced documents read hold more than `refResolution.maxTotalBytes` together (default 100 MiB) | Raise `maxTotalBytes` for the second |
 | `timeout` | No answer within `LoadOptions.timeout` (`no answer within 300 ms (LoadOptions.timeout)`), or reading every referenced document takes longer than ten times it | Raise `timeout` |

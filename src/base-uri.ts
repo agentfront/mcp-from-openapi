@@ -179,7 +179,8 @@ const SEGMENT_WITH_USER_INFO = /(^|[\\/])((?:https?|wss?|ftp|file):[\\/]*)[^\\/?
  *   `https://u:p@h`);
  * - the authority starts after a special scheme (`http`, `https`, `ws`,
  *   `wss`, `ftp`, `file`, any case) and any slashes or backslashes, after
- *   another scheme followed by `//`, or after a leading `//`; everything in
+ *   another scheme followed by `//`, or after two leading slashes or
+ *   backslashes in any mix (`//`, `\\`, `/\`); everything in
  *   it up to its last `@` goes;
  * - anywhere in the text, a path segment starting with a special scheme and
  *   holding an `@` before the next `/`, `\`, `?` or `#` is redacted the same
@@ -197,13 +198,20 @@ export function redactUserInfo(text: string): string {
 
 /**
  * The user information `redactUserInfo` removes from `text`, each stretch as
- * it appears once tabs and line breaks are removed. A reference resolved
- * into a path no longer has it where `redactUserInfo` looks
- * (`https:u:p@h/x` read as a local file becomes `/srv/u:p@h/x`), so a
- * message about the resolved path removes these stretches from it too.
+ * it appears once tabs and line breaks are removed, and as a URL path writes
+ * it (`a b` is `a%20b`). A reference resolved into a path no longer has it
+ * where `redactUserInfo` looks (`https:u:p@h/x` read as a local file becomes
+ * `/srv/u:p@h/x`), so a message about the resolved path removes these
+ * stretches from it too.
  */
 export function userInfoOf(text: string): string[] {
-  return scanUserInfo(text).parts;
+  const parts = scanUserInfo(text).parts;
+  return [...new Set([...parts, ...parts.map(asUrlPath)])].filter((part) => part !== '');
+}
+
+/** `text` as a URL path writes it: `a b` is `a%20b`, `/a b/` is `/a%20b/`. */
+export function asUrlPath(text: string): string {
+  return new URL(`http://h/${text}`).pathname.slice(1);
 }
 
 /** `text` without tabs and line breaks, the same with its user information redacted, and what was removed. */
@@ -213,7 +221,8 @@ function scanUserInfo(text: string): { flat: string; redacted: string; parts: st
   const [start, , scheme, slashes] = URI_START.exec(flat) as RegExpExecArray;
   let redacted = flat;
   const special = scheme !== undefined && SPECIAL_SCHEMES.has(scheme.toLowerCase());
-  if (special || slashes.startsWith('//')) {
+  // Without a scheme, any two slashes or backslashes start an authority, as against a special base
+  if (special || (scheme === undefined ? slashes.length >= 2 : slashes.startsWith('//'))) {
     const rest = flat.slice(start.length);
     // A special URL's authority also ends at a backslash; another's does not
     const end = rest.search(special ? /[/\\?#]/ : /[/?#]/);
