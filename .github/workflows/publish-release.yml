@@ -136,6 +136,8 @@ jobs:
     env:
       VERSION: ${{ needs.detect.outputs.version }}
       NPM_TAG: ${{ needs.detect.outputs.npm_tag }}
+    outputs:
+      npm_tag: ${{ steps.publish.outputs.npm_tag }}
 
     steps:
       - name: Get the package
@@ -155,6 +157,7 @@ jobs:
         run: npm install -g npm@12.2.3
 
       - name: Publish
+        id: publish
         env:
           # Exits 0 when the first version is not older than the second, by semver precedence
           NOT_OLDER: |
@@ -203,6 +206,7 @@ jobs:
             echo "::notice::$TAG names $CURRENT, newer than $VERSION"
           done
           npm publish "$RUNNER_TEMP"/package/*.tgz --access public --tag "$TAG" --provenance --ignore-scripts
+          echo "npm_tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Published mcp-from-openapi@$VERSION with tag $TAG"
 
   release:
@@ -242,7 +246,8 @@ jobs:
 
       - name: Summary
         env:
-          NPM_TAG: ${{ needs.detect.outputs.npm_tag }}
+          # The tag the publish used; none when the version was on npm before this run
+          NPM_TAG: ${{ needs.publish.outputs.npm_tag || 'none (published before this run)' }}
         run: |
           {
             echo "## Released v$VERSION"
