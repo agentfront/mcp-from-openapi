@@ -1,5 +1,21 @@
 ## [2.10.0] - 2026-11-18
 
+### Added
+- Support for full OpenAPI 3.2 functionality and enhancements.
+- Inclusion of Swagger 2.0 in the processing pipeline.
+- Version-aware validation for dynamic OpenAPI version management.
+
+### Changed
+- Default maxSchemaNodes set to 25,000 for schema complexity management.
+- Retained original $refs inside schema extensions.
+
+### Fixed
+- Processing and validation improvements for complex $ref scenarios.
+- Various bug fixes in handling query credentials and schema node resolution.
+
+### Security
+- Mitigated potential YAML alias and shared object expansion vulnerabilities.
+
 ## [2.5.0] - 2026-06-21
 
 ### Security (SSRF hardening — GHSA-65h7-9wrw-629c)
