@@ -188,13 +188,13 @@ jobs:
             echo "::notice::mcp-from-openapi@$VERSION is on npm already"
             exit 0
           fi
-          # The tag never moves back: an older release line, or a run approved after a later one, gets its line's tag
-          TAG="$NPM_TAG"
-          CURRENT=$(npm view mcp-from-openapi "dist-tags.$NPM_TAG" 2>/dev/null || true)
-          if [ -n "$CURRENT" ] && ! node -e "$NOT_OLDER" "$VERSION" "$CURRENT"; then
-            TAG="$NPM_TAG-$(echo "$VERSION" | cut -d. -f1,2)"
-            echo "::notice::$NPM_TAG names $CURRENT, newer than $VERSION: published with the tag $TAG"
-          fi
+          # A tag never moves back: the first of the type's, the line's and the version's own tag that names
+          # nothing newer (an older release line, or a run approved after a later one, takes a later one)
+          for TAG in "$NPM_TAG" "$NPM_TAG-$(echo "$VERSION" | cut -d. -f1,2)" "$NPM_TAG-$VERSION"; do
+            CURRENT=$(npm view mcp-from-openapi "dist-tags.$TAG" 2>/dev/null || true)
+            if [ -z "$CURRENT" ] || node -e "$NOT_OLDER" "$VERSION" "$CURRENT"; then break; fi
+            echo "::notice::$TAG names $CURRENT, newer than $VERSION"
+          done
           npm publish "$RUNNER_TEMP"/package/*.tgz --access public --tag "$TAG" --provenance --ignore-scripts
           echo "Published mcp-from-openapi@$VERSION with tag $TAG"
 

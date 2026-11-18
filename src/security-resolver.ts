@@ -366,6 +366,24 @@ export class SecurityResolver {
   }
 
   /**
+   * The credential entries `signRequest` signs (the signature ones among them): every one without a choice of
+   * Security Requirements; with one, those of the alternative `resolve` applied, as `resolved` names them, else
+   * found again from the context's credentials.
+   */
+  private async entriesToSign(
+    mappers: ParameterMapper[],
+    context: SecurityContext,
+    resolved: ResolvedSecurity | undefined,
+  ): Promise<ParameterMapper[]> {
+    const schemes = resolved?.signatureInfo?.schemes;
+    if (schemes) return mappers.filter((mapper) => mapper.security && schemes.includes(mapper.security.scheme));
+    if (!mappers.some((mapper) => mapper.security?.alternatives !== undefined)) {
+      return mappers.filter((mapper) => mapper.security !== undefined);
+    }
+    return (await this.credentials(mappers, context)).applied ?? [];
+  }
+
+  /**
    * Whether an HTTP authentication scheme requires request signing, by the
    * names of schemes that do (`aws4`, `hmac`, `signature`, `hawk`). Only an
    * `http` scheme: an API key named `TomahawkKey` is an API key.
@@ -588,12 +606,7 @@ export class SecurityResolver {
       throw new Error('Signature-based auth required but no signatureGenerator provided');
     }
 
-    // The signature entries of the alternative `resolve` applied: as `resolved` names them, else found again
-    const schemes = resolved?.signatureInfo?.schemes;
-    const selected = schemes
-      ? mappers.filter((mapper) => mapper.security !== undefined && schemes.includes(mapper.security.scheme))
-      : ((await this.credentials(mappers, context)).applied ?? []);
-    for (const mapper of selected) {
+    for (const mapper of await this.entriesToSign(mappers, context, resolved)) {
       if (!this.isSignatureBasedAuth(mapper.security!)) {
         continue;
       }

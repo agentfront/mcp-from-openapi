@@ -603,9 +603,9 @@ describe('SchemaBuilder', () => {
 
       expect(result.anyOf[0].properties).toBeUndefined();
       expect(result.allOf[0].properties).toBeUndefined();
-      // A cut member matches more: the oneOf is read as anyOf (beside the anyOf, under allOf), the not left out
+      // A cut member matches more: the oneOf, beside an anyOf, and the not are left out
       expect(result.oneOf).toBeUndefined();
-      expect(result.allOf[1].anyOf[0].properties).toBeUndefined();
+      expect(result.allOf).toHaveLength(1);
       expect(result.not).toBeUndefined();
     });
 

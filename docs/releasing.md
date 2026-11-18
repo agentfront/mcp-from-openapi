@@ -27,7 +27,7 @@ release/X.Y.x ──(1) Prepare Release──▶ pull request release-pr/vX.Y.Z 
    - `publish` waits for an approval of the `release` environment, then publishes that tarball with `npm publish --provenance`, authenticated by GitHub's OIDC token. It has no checkout, no install and no build, and it runs no repository code.
    - `release` tags the merge commit `vX.Y.Z` and creates the GitHub release from the merged pull request: its title is the release name, its description the notes (a pre-release is marked so).
 
-The npm dist-tag follows the version: `latest` for `X.Y.Z`, `rc` for `X.Y.Z-rc.N`, `beta` for `X.Y.Z-beta.N`. A tag never moves back to an older version: when it already names a newer one (a patch of an older release line, or a run approved after a later one), the version is published with its line's tag instead, such as `latest-2.8`.
+The npm dist-tag follows the version: `latest` for `X.Y.Z`, `rc` for `X.Y.Z-rc.N`, `beta` for `X.Y.Z-beta.N`. A tag never moves back to an older version: when it already names a newer one (a patch of an older release line, or a run approved after a later one), the version is published with its line's tag instead, such as `latest-2.8`, and when that one does too, with its own, such as `latest-2.8.3`.
 
 A new release line starts with **Create release branch** (`create-release-branch.yml`), which makes `release/X.Y.x` from `main` at version `X.Y.0`. The first Prepare Release on it releases `X.Y.0`.
 

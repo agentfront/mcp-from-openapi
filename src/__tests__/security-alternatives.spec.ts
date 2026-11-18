@@ -201,8 +201,24 @@ describe('each alternative asks for what it needs', () => {
   it('never drops a credential for an alternative that also needs a client certificate', async () => {
     const tool = await toolFor([{ certificate: [], partnerKey: [] }, { userToken: [] }], { includeSecurityInInput: true });
     const both = buildHttpRequest(tool, { partnerKey: 'SYNTH-PARTNER', userToken: 'SYNTH-USER' });
-    expect(both.headers).toEqual({ Authorization: 'Bearer SYNTH-USER' });
+    // Whether there is a certificate is not known here, so neither alternative can be ruled out
+    expect(both.headers).toEqual({ 'X-Partner-Key': 'SYNTH-PARTNER', Authorization: 'Bearer SYNTH-USER' });
     expect(buildHttpRequest(tool, { partnerKey: 'SYNTH-PARTNER' }).headers).toEqual({ 'X-Partner-Key': 'SYNTH-PARTNER' });
+    const certificateOnly = await toolFor([{ certificate: [] }, { userToken: [] }], { includeSecurityInInput: true });
+    expect(buildHttpRequest(certificateOnly, { userToken: 'SYNTH-USER' }).headers).toEqual({
+      Authorization: 'Bearer SYNTH-USER',
+    });
+  });
+
+  it('signs without asking for credentials when the requirements are no choice', async () => {
+    const tool = await toolFor([{ hmacPrimary: [], partnerKey: [] }]);
+    const customResolver = jest.fn(() => 'SYNTH-PARTNER');
+    const signatureGenerator = async () => 'SYNTH-SIG';
+    const data = { method: 'GET', url: 'https://api.example.test/p', headers: {} };
+    expect(await resolver.signRequest(tool.mapper, data, { customResolver, signatureGenerator })).toEqual({
+      Authorization: 'SYNTH-SIG',
+    });
+    expect(customResolver).not.toHaveBeenCalled();
   });
 
   it('signs the alternative resolve applied, without asking for credentials again', async () => {

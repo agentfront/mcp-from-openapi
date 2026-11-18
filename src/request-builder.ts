@@ -300,8 +300,8 @@ export function clientCertificatesOf(entries: readonly ParameterMapper[]): Array
 
 /**
  * The credential entries the input gives that are not needed by the first alternative it gives completely: one
- * alternative of a choice is sent. None when the input gives no alternative completely. An alternative that also
- * needs a client certificate is never the one: whether there is a certificate is not known here.
+ * alternative of a choice is sent. None when the input gives no alternative completely. Whether there is a client
+ * certificate is not known here, so an alternative that needs one is never chosen nor ruled out: its entries stay.
  */
 function unchosenCredentials(mapper: readonly ParameterMapper[], input: object | undefined): Set<ParameterMapper> {
   const given = (entry: ParameterMapper): boolean => {
@@ -316,7 +316,12 @@ function unchosenCredentials(mapper: readonly ParameterMapper[], input: object |
     .map((index) => alternatives.get(index)!)
     .find((entries) => entries.every(given));
   if (chosen === undefined) return new Set();
-  return new Set(mapper.filter((entry) => entry.security?.alternatives !== undefined && !chosen.includes(entry)));
+  const certificateMembers = new Set([...needCertificate].flatMap((index) => alternatives.get(index) ?? []));
+  return new Set(
+    mapper.filter(
+      (entry) => entry.security?.alternatives !== undefined && !chosen.includes(entry) && !certificateMembers.has(entry),
+    ),
+  );
 }
 
 /**

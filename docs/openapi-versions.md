@@ -1474,7 +1474,7 @@ A schema cut at `maxSchemaDepth`, and a cycle the conversion cuts with `{}`, acc
 | --- | --- |
 | `not` | Left out (it would refuse more) |
 | `if` | Left out with its `then` and `else` (it would select more) |
-| `oneOf` | Read as `anyOf`: a value can now match two members (beside an `anyOf`, as `allOf: [{ anyOf: [...] }]`) |
+| `oneOf` | Read as `anyOf`: a value can now match two members (beside an `anyOf`, it is left out) |
 | `contains` | Its `maxContains` is left out |
 | `allOf`, `anyOf`, `oneOf`, `if`, `then`, `else`, `dependentSchemas` | `unevaluatedProperties` and `unevaluatedItems` beside them are left out |
 

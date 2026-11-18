@@ -177,13 +177,10 @@ describe('schema trimming never refuses what the document accepts', () => {
     expect(properties['plain']).toEqual({ not: { type: 'string' } });
   });
 
-  it('keeps a oneOf that holds an anyOf by moving the loosened members under allOf', () => {
+  it('leaves out a loosened oneOf beside an anyOf, adding no node', () => {
     const node: Record<string, any> = { oneOf: [{ type: 'string' }, null], anyOf: [{ minLength: 1 }] };
     node.oneOf[1] = node;
-    expect(toJsonSchema(node as never)).toEqual({
-      anyOf: [{ minLength: 1 }],
-      allOf: [{ anyOf: [{ type: 'string' }, {}] }],
-    });
+    expect(toJsonSchema(node as never)).toEqual({ anyOf: [{ minLength: 1 }] });
   });
 
   it.each([

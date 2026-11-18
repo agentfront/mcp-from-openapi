@@ -156,8 +156,9 @@ const ANNOTATING_APPLICATORS = ['allOf', 'anyOf', 'oneOf', 'if', 'then', 'else',
  * (`isLoosened`: cut at a depth, or a cycle cut with `{}`), and returns whether one does, which makes
  * `schema` accept more too. Over such a subschema a `not` would refuse more and an `if` select more, so
  * they are left out (with the `then`/`else` an `if` selects), as is a `contains`'s `maxContains`; a
- * `oneOf` becomes `anyOf`, as a value can now match two members; and `unevaluated*` goes when an
- * annotating applicator holds one, as it may no longer count what that one did. Internal.
+ * `oneOf` becomes `anyOf`, as a value can now match two members (beside an `anyOf`, it is left out); and
+ * `unevaluated*` goes when an annotating applicator holds one, as it may no longer count what that one
+ * did. Nothing is added, so no node or level. Internal.
  */
 export function keepAccepting(schema: Record<string, unknown>, isLoosened: (value: unknown) => boolean): boolean {
   const loosenedUnder = (keyword: string): boolean => {
@@ -181,8 +182,8 @@ export function keepAccepting(schema: Record<string, unknown>, isLoosened: (valu
   if (loosenedUnder('oneOf')) {
     const members = schema['oneOf'];
     delete schema['oneOf'];
+    // Beside an `anyOf` it is left out: joining the two would add nodes past the budget and a level past the depth
     if (schema['anyOf'] === undefined) schema['anyOf'] = members;
-    else schema['allOf'] = [...(Array.isArray(schema['allOf']) ? schema['allOf'] : []), { anyOf: members }];
   }
   return true;
 }
