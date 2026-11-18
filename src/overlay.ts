@@ -326,8 +326,12 @@ export function applyOverlay<T extends object>(document: T, overlay: OverlayDocu
   let result: T;
   try {
     result = JSON.parse(JSON.stringify(document)) as T;
-  } catch (error: unknown) {
-    throw new OverlayError(`The document cannot be copied to apply the overlay (${String(error)})`, {});
+  } catch {
+    throw new OverlayError(
+      'The document cannot be copied to apply the overlay: it holds a cycle, a value JSON cannot hold, ' +
+        'or nesting too deep',
+      {},
+    );
   }
 
   for (const [index, action] of overlay.actions.entries()) {
