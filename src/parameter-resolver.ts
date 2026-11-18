@@ -117,9 +117,9 @@ export interface ParameterAnalysis {
  * The identity of a parameter (`name` and `in`), bounded in length;
  * `undefined` when it has none. A header name is compared without regard to
  * case, as HTTP header names are case-insensitive (RFC 9110 section 5.1):
- * `X-Id` and `x-id` are one header.
+ * `X-Id` and `x-id` are one header. Internal.
  */
-function parameterIdentity(parameter: unknown): string | undefined {
+export function parameterIdentity(parameter: unknown): string | undefined {
   if (!isSpecObject(parameter) || isReferenceObject(parameter)) return undefined;
   const name = parameter['name'];
   const location = parameter['in'];

@@ -187,6 +187,9 @@ function typeExpr(schema: unknown, ctx: PrintContext, depth: number, indent: str
   }
 }
 
+/** The type names `typeExprInner` renders by name; any other renders as an object */
+const RENDERED_TYPE_NAMES: ReadonlySet<string> = new Set(['string', 'number', 'integer', 'boolean', 'null', 'array']);
+
 function typeExprInner(r: SchemaRecord, ctx: PrintContext, depth: number, indent: string): string {
   // Literals win over structural typing
   if ('const' in r) {
@@ -233,8 +236,12 @@ function typeExprInner(r: SchemaRecord, ctx: PrintContext, depth: number, indent
   const type = r['type'];
   if (Array.isArray(type)) {
     // String members only — the spread creates a fresh object per member, so a
-    // crafted self-referential array element would bypass the identity guard
-    const parts = type.filter((t): t is string => typeof t === 'string').map((t) => typeExpr({ ...r, type: t }, ctx, depth, indent));
+    // crafted self-referential array element would bypass the identity guard.
+    // Each case below renders once: a name it does not list renders as an object
+    const kinds = new Set(
+      type.filter((t): t is string => typeof t === 'string').map((t) => (RENDERED_TYPE_NAMES.has(t) ? t : 'object')),
+    );
+    const parts = [...kinds].map((t) => typeExpr({ ...r, type: t }, ctx, depth, indent));
     return parts.length === 0 ? 'unknown' : dedupe(parts).join(' | ');
   }
   switch (type) {

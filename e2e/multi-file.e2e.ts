@@ -193,23 +193,28 @@ async function inEmptyDirectory<T>(run: (directory: string) => Promise<T>): Prom
 
 /**
  * The files of the tree that were opened (relative, with `/`), recorded by
- * wrapping `fs.promises.readFile`, which the library and its reference parser
- * read files with. Anything outside the tree is not recorded.
+ * wrapping `fs.promises.readFile`, which `fromFile` reads the document with,
+ * and `fs.promises.open`, which each referenced file is read through.
+ * Anything outside the tree is not recorded.
  */
 const treeReads: string[] = [];
-const realReadFile = fsPromises.readFile;
+const realFileFunctions = { readFile: fsPromises.readFile, open: fsPromises.open };
 const recordReads = (): void => {
-  Object.defineProperty(fsPromises, 'readFile', {
-    configurable: true,
-    writable: true,
-    value: function recordedReadFile(path: unknown, ...rest: unknown[]) {
-      if (typeof path === 'string' && path.startsWith(TREE + sep)) treeReads.push(relative(TREE, path).split(sep).join('/'));
-      return Reflect.apply(realReadFile, fsPromises, [path, ...rest]);
-    },
-  });
+  for (const [name, real] of Object.entries(realFileFunctions)) {
+    Object.defineProperty(fsPromises, name, {
+      configurable: true,
+      writable: true,
+      value: function recordedRead(path: unknown, ...rest: unknown[]) {
+        if (typeof path === 'string' && path.startsWith(TREE + sep)) treeReads.push(relative(TREE, path).split(sep).join('/'));
+        return Reflect.apply(real, fsPromises, [path, ...rest]);
+      },
+    });
+  }
 };
 const stopRecordingReads = (): void => {
-  Object.defineProperty(fsPromises, 'readFile', { configurable: true, writable: true, value: realReadFile });
+  for (const [name, real] of Object.entries(realFileFunctions)) {
+    Object.defineProperty(fsPromises, name, { configurable: true, writable: true, value: real });
+  }
 };
 
 // ---------------------------------------------------------------------------

@@ -354,11 +354,11 @@ try {
 | `internal-address` | Its host is a loopback, private, link-local or cloud-metadata name or address | `allowInternalIPs: true` (unsafe for documents you do not trust) |
 | `resolved-address` | Its name resolves to an internal address (`Host "..." resolves to a blocked internal address`) | `allowInternalIPs: true` (unsafe) |
 | `dns-failed` | Its name could not be resolved | Fix the name |
-| `too-large` | The response exceeds 10 MiB (`Response body exceeds 10485760 bytes`), or the referenced documents read hold more than `refResolution.maxTotalBytes` together (default 100 MiB) | Raise `maxTotalBytes` for the second |
+| `too-large` | The response or local file exceeds 10 MiB (`Response body exceeds 10485760 bytes`), or the referenced documents read hold more than `refResolution.maxTotalBytes` together (default 100 MiB) | Raise `maxTotalBytes` for the second |
 | `timeout` | No answer within `LoadOptions.timeout` (`no answer within 300 ms (LoadOptions.timeout)`), or reading every referenced document takes longer than ten times it | Raise `timeout` |
 | `response` | The server answered with a failure status (`the server answered 404 "Not Found"`). A redirect is not followed for a `$ref`, so a `302` is this too | Fix the reference or the server |
 | `fetch-failed` | The fetch failed for another reason (`connect ECONNREFUSED 127.0.0.1:8080`) | |
-| `file-error` | A local file cannot be read (`the file cannot be read (ENOENT)`) | |
+| `file-error` | A local file cannot be read (`the file cannot be read (ENOENT)`), is not a regular file, or is named by a `file:` URL with a host | |
 | `missing-target` | A pointer leads nowhere: in the document itself (a reference by its own URI, see [above](#references-to-the-document-itself)), in a referenced document (`Missing $ref pointer "#/nothing". Token "nothing" does not exist.`), or a plain-name fragment | Fix the pointer |
 | `invalid-document` | A referenced document is not JSON or YAML | |
 | `base-too-long` | A relative reference of a document whose retrieval URI is longer than 2,048 characters | See [Length limits](#length-limits) |
@@ -377,6 +377,8 @@ const generator = await OpenAPIToolGenerator.fromFile("/tmp/petstore/openapi.jso
 ```
 
 `file` lets the document read any local file the process can read, by relative path, absolute path or `file:` URL, with no confinement to the document's directory: read [Trust Model](#trust-model) before you set it for a document you did not write.
+
+Only a regular file of at most 10 MiB is read. A device (`/dev/zero`), a named pipe, a directory or a socket is refused (`file-error`, `it is not a regular file`) without waiting on it. A larger file is refused before it is read (`too-large`). A `file:` URL that names a host (`file://server/share/a.json`, a network share) is refused (`file-error`).
 
 ---
 

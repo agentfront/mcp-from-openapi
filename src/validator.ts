@@ -3,6 +3,7 @@ import { DIAGNOSTIC_CODES, LEGACY_PATH_KEY_MAX_LENGTH, MAX_DIAGNOSTICS, isPresen
 import {
   analyzeParameters,
   describeContentWithoutSchema,
+  parameterIdentity,
   readParameterContent,
   type ParameterSlot,
 } from './parameter-resolver';
@@ -120,7 +121,12 @@ export function operationLabel(method: string, path: string): string {
  * the key as written, unescaped, cut past `LEGACY_PATH_KEY_MAX_LENGTH`.
  */
 function legacyPathBase(path: string): string {
-  return `/paths/${path.length > LEGACY_PATH_KEY_MAX_LENGTH ? `${path.slice(0, LEGACY_PATH_KEY_MAX_LENGTH)}...` : path}`;
+  return `/paths/${legacyKey(path)}`;
+}
+
+/** A document key in a historical path: as written, unescaped, cut past `LEGACY_PATH_KEY_MAX_LENGTH`. */
+function legacyKey(key: string): string {
+  return key.length > LEGACY_PATH_KEY_MAX_LENGTH ? `${key.slice(0, LEGACY_PATH_KEY_MAX_LENGTH)}...` : key;
 }
 
 /** A key of bounded length for a set of document strings (see `diagnosticKey`). */
@@ -609,19 +615,21 @@ export class Validator {
         this.validateParameters(pathLevelParameters, `${legacyBase}/parameters`, pathLevelPointer, context);
       }
       const resolvedPathLevel = pathLevelParameters.map((p: unknown) => withTextName(this.resolveParameterRef(p, context)));
+      const pathLevel = parameterFacts(resolvedPathLevel);
       // A path-level violation is reported once, here, not again for each operation. Swagger 2.0
       // has no `in: querystring` (its body rules are checked per operation instead)
       const pathLevelQuerystringValid =
         context.swagger ||
-        this.validateQuerystringUse(
-          effectiveParameters(resolvedPathLevel, []),
-          pathLevelPointer,
-          `Path ${messageText(path)}`,
-          context,
-        );
+        this.validateQuerystringUse(pathLevel, pathLevelPointer, `Path ${messageText(path)}`, context);
+      // Template expressions the path item does not define, by bounded key; each operation must then define them
+      const templateNames = new Map(
+        (path.match(/\{([^{}]+)\}/g) ?? [])
+          .map((expression): [string, string] => [boundedKey(expression.slice(1, -1)), expression.slice(1, -1)])
+          .filter(([key]) => !pathLevel.pathNames.has(key)),
+      );
 
       for (const entry of listed.operations) {
-        this.validateOperation(entry, path, pathLevelParameters, resolvedPathLevel, pathLevelQuerystringValid, context);
+        this.validateOperation(entry, path, resolvedPathLevel, pathLevel, templateNames, pathLevelQuerystringValid, context);
       }
 
       if (listed.operations.length === 0 && !pathItem['$ref']) {
@@ -640,8 +648,9 @@ export class Validator {
   private validateOperation(
     entry: OperationEntry,
     path: string,
-    pathLevelParameters: unknown[],
     resolvedPathLevel: unknown[],
+    pathLevel: ParameterFacts,
+    templateNames: ReadonlyMap<string, string>,
     pathLevelQuerystringValid: boolean,
     context: ValidationContext,
   ): void {
@@ -649,7 +658,7 @@ export class Validator {
     const { method, operation } = entry;
     const legacyBase = legacyPathBase(path);
     const basePath =
-      entry.source === 'fixed' ? `${legacyBase}/${method}` : `${legacyBase}/additionalOperations/${method}`;
+      entry.source === 'fixed' ? `${legacyBase}/${method}` : `${legacyBase}/additionalOperations/${legacyKey(method)}`;
     const pointer = operationPointer(path, entry);
     const label = operationLabel(method, path);
 
@@ -702,9 +711,15 @@ export class Validator {
         `Operation ${label}`,
         context,
       );
-    } else if (pathLevelQuerystringValid) {
+    }
+    // Merged with the path item's by counting: the path item's are never listed again for each operation
+    const operationLevel = parameterFacts(resolvedOperationLevel, pathLevel.identities);
+    if (!context.swagger && pathLevelQuerystringValid) {
       this.validateQuerystringUse(
-        effectiveParameters(resolvedPathLevel, resolvedOperationLevel),
+        {
+          querystrings: pathLevel.querystrings + operationLevel.querystrings,
+          queries: pathLevel.queries + operationLevel.queries,
+        },
         appendPointer(pointer, 'parameters'),
         `Operation ${label}`,
         context,
@@ -717,20 +732,11 @@ export class Validator {
     // ref cannot mask a missing path variable; only refs that CANNOT be
     // resolved here (external or dangling) defer the check to the
     // dereferenced validation pass in initialize().
-    const allParameters = [...resolvedPathLevel, ...resolvedOperationLevel];
-    const hasUnresolvableRefs = allParameters.some((p: any) => p === undefined);
-    const pathParams = path.match(/\{([^{}]+)\}/g)?.map((p) => p.slice(1, -1)) ?? [];
-    // Bounded keys: a set of long strings of one length hashes into one bucket
-    const definedPathParams = new Set(
-      allParameters
-        .filter((p: any) => p && p.in === 'path' && typeof p.name === 'string')
-        .map((p: any) => boundedKey(p.name)),
-    );
-
-    for (const param of pathParams) {
-      if (!hasUnresolvableRefs && !definedPathParams.has(boundedKey(param))) {
+    if (pathLevel.unresolvable || operationLevel.unresolvable) return;
+    for (const [key, name] of templateNames) {
+      if (!operationLevel.pathNames.has(key)) {
         errors.push({
-          message: `Path parameter '${messageText(param)}' not defined in parameters: ${label}`,
+          message: `Path parameter '${messageText(name)}' not defined in parameters: ${label}`,
           path: `${basePath}/parameters`,
           code: 'MISSING_PATH_PARAMETER',
         });
@@ -746,13 +752,11 @@ export class Validator {
    * location anyway. Returns whether the list follows them.
    */
   private validateQuerystringUse(
-    parameters: unknown[],
+    { querystrings, queries }: Pick<ParameterFacts, 'querystrings' | 'queries'>,
     pointer: string,
     where: string,
     context: ValidationContext,
   ): boolean {
-    const objects = parameters.filter(isSpecObject);
-    const querystrings = objects.filter((p) => p['in'] === 'querystring').length;
     if (querystrings === 0) return true;
     let valid = true;
     if (querystrings > 1) {
@@ -763,7 +767,7 @@ export class Validator {
       });
       valid = false;
     }
-    if (objects.some((p) => p['in'] === 'query')) {
+    if (queries > 0) {
       context.errors.push({
         message: `${where}: a parameter in: querystring is combined with parameters in: query, but a querystring parameter holds the whole query string`,
         path: pointer,
@@ -991,4 +995,43 @@ function pathTemplateProblem(path: string): string | undefined {
  */
 function effectiveParameters(pathLevel: unknown[], operationLevel: unknown[]): unknown[] {
   return analyzeParameters(pathLevel, operationLevel).effective.map((slot) => slot.parameter);
+}
+
+/**
+ * What the querystring and path template rules read from one parameter list, merged within itself. An
+ * operation's list is merged with its path item's by counting (`replaced`), never by listing both again.
+ */
+interface ParameterFacts {
+  /** The identity (`name` and `in`) of each parameter that has one */
+  identities: Set<string>;
+  /** How many are `in: querystring`, not counting one that replaces a parameter of `replaced` */
+  querystrings: number;
+  /** How many are `in: query`, counted the same way */
+  queries: number;
+  /** The bounded keys of the names of the `in: path` parameters */
+  pathNames: Set<string>;
+  /** Whether one is a reference the validator cannot resolve */
+  unresolvable: boolean;
+}
+
+function parameterFacts(parameters: unknown[], replaced: ReadonlySet<string> = new Set()): ParameterFacts {
+  const facts: ParameterFacts = {
+    identities: new Set(),
+    querystrings: 0,
+    queries: 0,
+    pathNames: new Set(),
+    unresolvable: false,
+  };
+  for (const parameter of effectiveParameters(parameters, [])) {
+    if (parameter === undefined) facts.unresolvable = true;
+    if (!isSpecObject(parameter)) continue;
+    const identity = parameterIdentity(parameter);
+    if (identity === undefined) continue;
+    facts.identities.add(identity);
+    if (replaced.has(identity)) continue;
+    if (parameter['in'] === 'querystring') facts.querystrings++;
+    if (parameter['in'] === 'query') facts.queries++;
+    if (parameter['in'] === 'path') facts.pathNames.add(boundedKey(parameter['name']));
+  }
+  return facts;
 }

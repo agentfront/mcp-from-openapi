@@ -1,5 +1,5 @@
-// NOTE: `node:path` / `node:fs` are imported LAZILY inside `fromFile` (the only
-// consumer) so this module stays importable on V8-isolate runtimes (Cloudflare
+// NOTE: `node:path` / `node:fs` are imported LAZILY inside `fromFile` and the
+// file `$ref` reader (the only consumers) so this module stays importable on V8-isolate runtimes (Cloudflare
 // Workers / Deno), where those builtins (and the `node:process` they pull) are
 // unavailable. `fromJSON` / `fromYAML` / generation / `SecurityResolver` never
 // touch the filesystem and therefore never load them.
@@ -109,6 +109,7 @@ import {
   normalizeSsrfOptions,
   safeFetch,
   safeFetchWithFinalUrl,
+  DEFAULT_MAX_RESPONSE_BYTES,
 } from './ssrf';
 import {
   asUrlPath,
@@ -430,6 +431,50 @@ function parseUrl(url: string): URL | undefined {
  */
 function withoutQuery(url: string): string {
   return url.replace(/\?[^#]*/s, '?...');
+}
+
+/** Escapes `$RefParser` decodes in a file path before `decodeURI`, which keeps them */
+const RESERVED_PATH_ESCAPES = /%(?:23|24|26|2C|3F|40)/gi;
+
+/**
+ * The local file a reference names, found as `$RefParser`'s file resolver finds it, read only when it is a
+ * regular file of at most `DEFAULT_MAX_RESPONSE_BYTES`: a device never ends, and opening a pipe waits for a writer
+ * (it is opened without waiting). A `file:` URL naming a host (a network share) is refused.
+ */
+async function readLocalFile(reference: string): Promise<Buffer | RefRefusal> {
+  const [{ promises, constants }, { fileURLToPath }] = await Promise.all([import('node:fs'), import('node:url')]);
+  try {
+    let path: string;
+    if (/^file:/i.test(reference)) {
+      const url = new URL(reference);
+      if (url.host !== '') return { rule: 'file-error', reason: 'it names a host (a network share)' };
+      path = fileURLToPath(url);
+    } else {
+      const escaped = reference.replace(/%(?![0-9A-Fa-f]{2})/g, '%25');
+      path = decodeURI(escaped.replace(RESERVED_PATH_ESCAPES, (escape) => String.fromCharCode(parseInt(escape.slice(1), 16))));
+    }
+    // `O_NONBLOCK` is undefined on Windows, which `|` reads as 0
+    const handle = await promises.open(path.replace(/[\\/]$/, ''), constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      const stats = await handle.stat();
+      if (!stats.isFile()) return { rule: 'file-error', reason: 'it is not a regular file' };
+      if (stats.size > DEFAULT_MAX_RESPONSE_BYTES) {
+        return { rule: 'too-large', reason: `the file exceeds ${DEFAULT_MAX_RESPONSE_BYTES} bytes` };
+      }
+      return await handle.readFile();
+    } finally {
+      await handle.close();
+    }
+  } catch (error: unknown) {
+    const { code, message } = Object(error) as { code?: unknown; message?: unknown };
+    return {
+      rule: 'file-error',
+      reason:
+        typeof code === 'string'
+          ? `the file cannot be read (${messageText(code, 32)})`
+          : messageText(String(message), REF_TEXT_MAX_LENGTH),
+    };
+  }
 }
 
 /** What a reference error shows for the working directory, which tells a document's author where the host runs */
@@ -1509,10 +1554,10 @@ export class OpenAPIToolGenerator {
    * read goes through `orderedReads`, so the failure reported is the first in
    * document order whatever order the reads finish in.
    *
-   * `fileResolver` is `$RefParser`'s own file resolver, whose `read` is
-   * wrapped (its `canRead` is kept); `ordered` is the dereference's read queue.
+   * A local file is read by `readLocalFile` (`$RefParser`'s file resolver
+   * keeps its `canRead`); `reads` is the dereference's read queue.
    */
-  private buildRefParserOptions(fileResolver: { read(file: RefTarget): unknown }, reads: OrderedReads): ParserOptions {
+  private buildRefParserOptions(reads: OrderedReads): ParserOptions {
     const ordered = reads.read;
     const raw = this.options.refResolution;
     const refOpts: Omit<Required<RefResolutionOptions>, 'maxDocuments' | 'maxTotalBytes'> = {
@@ -1591,20 +1636,8 @@ export class OpenAPIToolGenerator {
             read: (file: RefTarget, _callback: unknown, refs?: RefParserRefs): Promise<unknown> =>
               ordered(() =>
                 withinLimits(file, refs, async () => {
-                  try {
-                    return await fileResolver.read(file);
-                  } catch (error: unknown) {
-                    // `$RefParser`'s file resolver gives the I/O error's code (ENOENT, EISDIR, ...)
-                    const { ioErrorCode, message } = Object(error) as { ioErrorCode?: unknown; message?: unknown };
-                    return refuse(file, refs, {
-                      rule: 'file-error',
-                      /* c8 ignore next 4 -- defensive: an error without a code is described by its message */
-                      reason:
-                        typeof ioErrorCode === 'string'
-                          ? `the file cannot be read (${messageText(ioErrorCode, 32)})`
-                          : messageText(String(message), REF_TEXT_MAX_LENGTH),
-                    });
-                  }
+                  const content = await readLocalFile(file.url);
+                  return Buffer.isBuffer(content) ? content : refuse(file, refs, content);
                 }),
               ),
           }
@@ -1946,10 +1979,8 @@ export class OpenAPIToolGenerator {
     });
     try {
       refParser = await import('@apidevtools/json-schema-ref-parser');
-      // Its `read` is a function; the type also allows the static forms a plugin may take
-      const fileResolver = refParser.FileResolver as unknown as { read(file: RefTarget): unknown };
       const refParserOptions: ParserOptions = {
-        ...this.buildRefParserOptions(fileResolver, reads),
+        ...this.buildRefParserOptions(reads),
         dereference: {
           // Where each `$ref` is replaced, for a value that must be given back as written (see
           // src/reference-sites.ts). Called for every replacement, a circular one included

@@ -461,8 +461,8 @@ export interface NodeHttpModules {
   https: typeof import('node:https');
 }
 
-/** Default cap on response body size for the Node transport (10 MiB). */
-const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+/** Default cap on response body size for the Node transport (10 MiB), also the cap of a referenced local file. */
+export const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 
 /** A transport that issues one GET and returns the raw (unfollowed) response. */
 type SsrfTransport = (

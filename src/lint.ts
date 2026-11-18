@@ -165,6 +165,25 @@ function hasAnyExample(content: Record<string, unknown> | undefined): boolean {
   });
 }
 
+/** What lint reads from the parameters that apply to an operation, for the path item list it was merged with */
+interface ParameterSummary {
+  /** The path item's `parameters` value */
+  pathLevel: unknown;
+  /** The names of the parameters without a description */
+  undescribed: string[];
+  /** Whether a query parameter names pagination */
+  paginated: boolean;
+}
+
+/** At most this many names are listed in a message */
+const LISTED_NAMES = 10;
+
+/** `names` for a message, at most `LISTED_NAMES` of them: `a, b, c and 7 more` */
+function listNames(names: string[]): string {
+  const listed = names.slice(0, LISTED_NAMES).join(', ');
+  return names.length > LISTED_NAMES ? `${listed} and ${names.length - LISTED_NAMES} more` : listed;
+}
+
 /**
  * The Parameter Objects of a `parameters` value. A document being linted may
  * be imperfect, so anything that is not an array of objects is skipped, as is
@@ -207,6 +226,33 @@ export function lintDocument(document: object): LintResult {
   }
   const findings: LintFinding[] = [];
   const operationIds = new Map<string, string[]>();
+  // What paths sharing a path item (a `$ref`) share is measured once: its operations' parameters, and schemas
+  const shapes = new WeakMap<object, SchemaShape>();
+  const measure = (schema: unknown): SchemaShape => {
+    if (schema === null || typeof schema !== 'object') return measureSchema(schema);
+    const shape = shapes.get(schema) ?? measureSchema(schema);
+    shapes.set(schema, shape);
+    return shape;
+  };
+  const parameterSummaries = new WeakMap<object, ParameterSummary>();
+  const summarizeParameters = (operation: object, pathLevel: unknown): ParameterSummary => {
+    const known = parameterSummaries.get(operation);
+    if (known !== undefined && known.pathLevel === pathLevel) return known;
+    // The parameters that apply, merged exactly as generation merges them (an operation parameter
+    // overrides the path-level one with the same name and location)
+    const parameters = readParameters(
+      analyzeParameters(readParameters(pathLevel), readParameters(ownProperty(operation, 'parameters'))).effective.map(
+        (slot) => slot.parameter,
+      ),
+    );
+    const summary: ParameterSummary = {
+      pathLevel,
+      undescribed: parameters.filter((param) => !param.description).map((param) => param.name),
+      paginated: parameters.some((param) => param.in === 'query' && PAGINATION_PARAM.test(param.name)),
+    };
+    parameterSummaries.set(operation, summary);
+    return summary;
+  };
 
   const layout = resolveOperationLayout(detectSpecVersion(document));
   const paths = ownProperty(document, 'paths');
@@ -217,7 +263,7 @@ export function lintDocument(document: object): LintResult {
 
     // Path-item-level parameters apply to every operation (the generator
     // merges them the same way) — lint must see them too.
-    const pathLevelParameters = readParameters(ownProperty(pathItem, 'parameters'));
+    const pathLevelParameters = ownProperty(pathItem, 'parameters');
 
     for (const { method, operation } of listOperations(pathItem, { layout }).operations) {
       const wire = wireMethod(method);
@@ -268,20 +314,13 @@ export function lintDocument(document: object): LintResult {
         });
       }
 
-      // parameter descriptions: the parameters that apply, merged exactly as
-      // generation merges them (an operation parameter overrides the
-      // path-level one with the same name and location)
-      const parameters = readParameters(
-        analyzeParameters(pathLevelParameters, readParameters(ownProperty(operation, 'parameters'))).effective.map(
-          (slot) => slot.parameter,
-        ),
-      );
-      const undescribed = parameters.filter((param) => !param.description).map((param) => param.name);
-      if (undescribed.length > 0) {
+      // parameter descriptions
+      const parameters = summarizeParameters(operation, pathLevelParameters);
+      if (parameters.undescribed.length > 0) {
         findings.push({
           severity: 'info',
           code: 'missing-parameter-description',
-          message: `Parameter(s) without description: ${undescribed.join(', ')}.`,
+          message: `Parameter(s) without description: ${listNames(parameters.undescribed)}.`,
           path: label,
           hint: 'Describe each parameter — models mis-fill undocumented arguments.',
         });
@@ -308,7 +347,7 @@ export function lintDocument(document: object): LintResult {
         if (!content) continue;
         for (const media of Object.values(content)) {
           const schema = media && typeof media === 'object' ? (media as Record<string, unknown>)['schema'] : undefined;
-          const shape = measureSchema(schema);
+          const shape = measure(schema);
           responseShape = {
             depth: Math.max(responseShape.depth, shape.depth),
             widestObject: Math.max(responseShape.widestObject, shape.widestObject),
@@ -319,8 +358,7 @@ export function lintDocument(document: object): LintResult {
 
       // GET and QUERY are the safe reads
       if ((method === 'get' || method === 'query') && responseShape.hasArray) {
-        const hasPagination = parameters.some((param) => param.in === 'query' && PAGINATION_PARAM.test(param.name));
-        if (!hasPagination) {
+        if (!parameters.paginated) {
           findings.push({
             severity: 'warning',
             code: 'unpaginated-list',
@@ -338,7 +376,7 @@ export function lintDocument(document: object): LintResult {
       let requestShape: SchemaShape = { depth: 0, widestObject: 0, hasArray: false };
       for (const media of Object.values(bodyContent ?? {})) {
         const schema = media && typeof media === 'object' ? (media as Record<string, unknown>)['schema'] : undefined;
-        const shape = measureSchema(schema);
+        const shape = measure(schema);
         requestShape = {
           depth: Math.max(requestShape.depth, shape.depth),
           widestObject: Math.max(requestShape.widestObject, shape.widestObject),
@@ -385,7 +423,7 @@ export function lintDocument(document: object): LintResult {
       findings.push({
         severity: 'error',
         code: 'duplicate-operation-id',
-        message: `operationId '${operationId}' is used by ${labels.length} operations: ${labels.join(', ')}.`,
+        message: `operationId '${operationId}' is used by ${labels.length} operations: ${listNames(labels)}.`,
         path: labels[0],
         hint: 'Make operationIds unique — duplicates force hash-suffixed tool names.',
       });
