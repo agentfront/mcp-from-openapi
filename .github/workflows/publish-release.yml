@@ -181,6 +181,11 @@ jobs:
             };
             const [candidate, current] = process.argv.slice(1).map(parse);
             process.exit(compare(candidate, current) >= 0 ? 0 : 1);
+          # The version a dist-tag names, read by its exact name (`npm view dist-tags.latest-2.8` splits at the dots)
+          TAG_OF: |
+            const tags = JSON.parse(process.argv[1]);
+            const name = process.argv[2];
+            process.stdout.write(Object.hasOwn(tags, name) ? String(tags[name]) : '');
         run: |
           set -euo pipefail
           # A rerun after a later job failed finds the version published already
@@ -190,8 +195,10 @@ jobs:
           fi
           # A tag never moves back: the first of the type's, the line's and the version's own tag that names
           # nothing newer (an older release line, or a run approved after a later one, takes a later one)
+          # Read once; a failed request stops the step rather than reading as a tag that is not there
+          TAGS=$(npm view mcp-from-openapi dist-tags --json)
           for TAG in "$NPM_TAG" "$NPM_TAG-$(echo "$VERSION" | cut -d. -f1,2)" "$NPM_TAG-$VERSION"; do
-            CURRENT=$(npm view mcp-from-openapi "dist-tags.$TAG" 2>/dev/null || true)
+            CURRENT=$(node -e "$TAG_OF" "$TAGS" "$TAG")
             if [ -z "$CURRENT" ] || node -e "$NOT_OLDER" "$VERSION" "$CURRENT"; then break; fi
             echo "::notice::$TAG names $CURRENT, newer than $VERSION"
           done
