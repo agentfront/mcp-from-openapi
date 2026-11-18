@@ -286,6 +286,12 @@ export interface SpecProfile extends OperationLayout {
   readonly componentsMediaTypes: boolean;
   /** Whether the root object has `$self`. */
   readonly self: boolean;
+  /** The Security Scheme Object `type` values (Swagger 2.0: of a security definition). */
+  readonly securitySchemeTypes: readonly string[];
+  /** The `in` values of an `apiKey` security scheme, which also requires a `name`. */
+  readonly apiKeyLocations: readonly string[];
+  /** Whether a Schema Object's `$ref` applies together with its other keywords, rather than replacing them. */
+  readonly schemaReferenceSiblings: boolean;
 }
 
 const PROFILE_2_0: SpecProfile = Object.freeze({
@@ -317,6 +323,13 @@ const PROFILE_2_0: SpecProfile = Object.freeze({
   componentsMediaTypes: false,
   // 2.0 schema #/properties: no $self
   self: false,
+  // 2.0 schema #/definitions/securityDefinitions: basicAuthenticationSecurity, apiKeySecurity and the
+  // oauth2 definitions, each fixing properties/type/enum to one value
+  securitySchemeTypes: Object.freeze(['basic', 'apiKey', 'oauth2']),
+  // 2.0 schema #/definitions/apiKeySecurity/properties/in/enum (required: type, name, in)
+  apiKeyLocations: Object.freeze(['header', 'query']),
+  // 2.0 spec text, Reference Object: a JSON Reference, whose other members are ignored
+  schemaReferenceSiblings: false,
 });
 
 const PROFILE_3_0: SpecProfile = Object.freeze({
@@ -346,6 +359,13 @@ const PROFILE_3_0: SpecProfile = Object.freeze({
   componentsMediaTypes: false,
   // 3.0 schema #/properties: no $self
   self: false,
+  // 3.0 schema #/definitions/SecurityScheme/oneOf: APIKey, HTTP, OAuth2 and OpenIdConnect security schemes,
+  // each fixing properties/type/enum to one value
+  securitySchemeTypes: Object.freeze(['apiKey', 'http', 'oauth2', 'openIdConnect']),
+  // 3.0 schema #/definitions/APIKeySecurityScheme/properties/in/enum (required: type, name, in)
+  apiKeyLocations: Object.freeze(['header', 'query', 'cookie']),
+  // 3.0 spec text, Reference Object: "any properties added SHALL be ignored"
+  schemaReferenceSiblings: false,
 });
 
 const PROFILE_3_1: SpecProfile = Object.freeze({
@@ -374,6 +394,12 @@ const PROFILE_3_1: SpecProfile = Object.freeze({
   componentsMediaTypes: false,
   // 3.1 schema #/properties: no $self
   self: false,
+  // 3.1 schema #/$defs/security-scheme/properties/type/enum
+  securitySchemeTypes: Object.freeze(['apiKey', 'http', 'mutualTLS', 'oauth2', 'openIdConnect']),
+  // 3.1 schema #/$defs/security-scheme/$defs/type-apikey: properties/in/enum (required: name, in)
+  apiKeyLocations: Object.freeze(['query', 'header', 'cookie']),
+  // 3.1 spec text, Schema Object: JSON Schema 2020-12, where `$ref` is an applicator beside other keywords
+  schemaReferenceSiblings: true,
 });
 
 const PROFILE_3_2: SpecProfile = Object.freeze({
@@ -406,7 +432,40 @@ const PROFILE_3_2: SpecProfile = Object.freeze({
   componentsMediaTypes: true,
   // 3.2 schema #/properties/$self
   self: true,
+  // 3.2 schema #/$defs/security-scheme/properties/type/enum
+  securitySchemeTypes: Object.freeze(['apiKey', 'http', 'mutualTLS', 'oauth2', 'openIdConnect']),
+  // 3.2 schema #/$defs/security-scheme/$defs/type-apikey: properties/in/enum (required: name, in)
+  apiKeyLocations: Object.freeze(['query', 'header', 'cookie']),
+  // 3.2 spec text, Schema Object: JSON Schema 2020-12, as in 3.1
+  schemaReferenceSiblings: true,
 });
+
+/**
+ * The first field of a Security Scheme Object that `profile` does not define, and why (a fragment that follows the
+ * scheme's name), or `undefined`: a `type` outside `securitySchemeTypes`, or for `apiKey` an `in` outside
+ * `apiKeyLocations` or no `name`. Values compare exactly. Shared by the validator (the declared version's
+ * profile) and generation (the latest one: generation reads a feature whatever version the document declares).
+ */
+export function securitySchemeProblem(
+  scheme: Record<string, unknown>,
+  profile: SpecProfile,
+): { field: 'type' | 'in' | 'name'; problem: string } | undefined {
+  const { type, in: location, name } = scheme;
+  if (typeof type !== 'string' || !profile.securitySchemeTypes.includes(type)) {
+    return {
+      field: 'type',
+      problem: `has the type ${describeValue(type)}, which is none of ${profile.securitySchemeTypes.join(', ')}`,
+    };
+  }
+  if (type !== 'apiKey') return undefined;
+  if (typeof location !== 'string' || !profile.apiKeyLocations.includes(location)) {
+    return {
+      field: 'in',
+      problem: `is an apiKey scheme sent in ${describeValue(location)}, which is none of ${profile.apiKeyLocations.join(', ')}`,
+    };
+  }
+  return typeof name === 'string' && name !== '' ? undefined : { field: 'name', problem: 'is an apiKey scheme without a name' };
+}
 
 /** The profile of each known family. */
 export const SPEC_PROFILES: Readonly<Record<SpecFamily, SpecProfile>> = Object.freeze({

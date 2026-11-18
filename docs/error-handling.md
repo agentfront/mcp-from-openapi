@@ -34,7 +34,7 @@ try {
   const generator = await OpenAPIToolGenerator.fromURL('https://example.com/bad-url');
 } catch (error) {
   if (error instanceof LoadError) {
-    console.error(error.message);     // "Failed to load OpenAPI spec from URL: ..."
+    console.error(error.message);     // "Failed to load OpenAPI spec from URL: ..." (the parser's text, escaped)
     console.error(error.context?.url); // "https://example.com/bad-url"
     console.error(error.context?.status); // 404
   }
@@ -77,6 +77,8 @@ try {
 
 `fromJSON(json)` copies the object as JSON, and input that cannot be copied (it contains itself, holds a `BigInt`, or is nested too deeply for `JSON.stringify`) is a `ParseError` too: `Failed to read the JSON document: <why>`, with the original error in `context.originalError`.
 
+Two limits protect every loader from documents that are small as text but enormous once copied. A YAML document may use at most 2,000 aliases (`*name`): resolving each one scans the document, so many of them cost quadratic time. And a document whose shared values (YAML aliases, or objects reused in what you pass to `fromJSON`) would make its copy repeat more than 500,000 values is refused: `The document repeats shared values (YAML aliases or shared objects) that expand to more than 500000 values when copied`. From `fromYAML` and `fromJSON` this is a `ParseError`, from `fromURL` and `fromFile` a `LoadError`, from `fromArazzo` an `ArazzoError`. A document that reuses a few objects many times stays well below the limit. A refused one repeats too much data: reduce the repetition, or have its parts reference one definition with `$ref`, which is resolved without copying. (Cloning it does not help: a clone keeps the sharing.) The holes of a sparse array count too, as a copy writes each as `null`.
+
 Also thrown when an OpenAPI document fails validation (when `validate: true`). Validation runs at the first `generateTools()` or `generateTool()`, not in the factories. The message is `Invalid OpenAPI document: <first error>`, followed by `(and N more; see the error's context.errors)` when there is more than one. The first error can quote the document, so the message cuts it at 512 characters and writes control and bidirectional characters as `\uXXXX`; `context.errors` holds every `ValidationErrorDetail` as the validator produced it (at most 1,000 of each kind, then one `DIAGNOSTICS_TRUNCATED` entry):
 
 ```typescript
@@ -118,7 +120,7 @@ try {
 }
 ```
 
-`rule` is one of `protocol`, `host-not-allowed`, `host-blocked`, `internal-address`, `resolved-address`, `dns-failed`, `too-large`, `timeout`, `response`, `fetch-failed`, `file-error`, `missing-target`, `invalid-document`, `base-too-long` and `unreadable`; each is described in [SSRF Prevention](./ssrf-prevention.md#when-a-reference-cannot-be-read). The message and every string of `context` are cut and escaped (a document controls them), the query of `base` and `resolved` is shown as `?...`, and the raw error is not kept. When several references cannot be read, the one reported is the first in document order, whatever order the network answers in. The exception is a document that cannot be copied at all (a YAML alias that makes it contain itself): that `ParseError` has only `originalError`.
+`rule` is one of `protocol`, `host-not-allowed`, `host-blocked`, `internal-address`, `resolved-address`, `dns-failed`, `too-large`, `timeout`, `response`, `fetch-failed`, `file-error`, `missing-target`, `invalid-document`, `base-too-long` and `unreadable`; each is described in [SSRF Prevention](./ssrf-prevention.md#when-a-reference-cannot-be-read). The message and every string of `context` are cut and escaped (a document controls them). In `reference`, `base` and `resolved`, a query is shown as `?...`, user information as `***` and the working directory as `<working directory>/`, so the message tells a document's author nothing about the host. The raw error is not kept. When several references cannot be read, the one reported is the first in document order, whatever order the network answers in. The exception is a document that cannot be copied at all (a YAML alias that makes it contain itself): that `ParseError` has only `originalError`.
 
 `generator.validate()` reads references like generation but does not throw for one that cannot be read. It returns `{ valid: false, errors: [{ code: 'UNREADABLE_REFERENCE', message, path }] }`, with `message` the text above without the `Failed to dereference OpenAPI document:` prefix and `path` the JSON Pointer of the `$ref` when it is in the document itself.
 

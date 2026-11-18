@@ -126,10 +126,47 @@ export function normalizeHostname(hostname: string): string {
   return h.slice(0, end);
 }
 
-/** Does `list` contain `hostname`? Both sides are compared in {@link normalizeHostname} form. */
-export function hostListIncludes(list: readonly string[], hostname: string): boolean {
+/**
+ * One spelling per host: an IPv6 address its eight groups, or with `embeddedAsIpv4` the dotted quad it embeds
+ * (mapped, NAT64, 6to4, ...); a name or IPv4 address what a URL makes of it (`bücher.example` is
+ * `xn--bcher-kva.example`, `2130706433` is `127.0.0.1`), each in {@link normalizeHostname} form.
+ */
+function canonicalHost(hostname: string, embeddedAsIpv4: boolean): string {
   const host = normalizeHostname(hostname);
-  return list.some((entry) => normalizeHostname(entry) === host);
+  const groups = host.includes(':') ? parseIpv6(host) : null;
+  if (groups) {
+    const embedded = embeddedAsIpv4 ? embeddedIpv4(groups) : null;
+    return embedded?.join('.') ?? groups.map((group) => group.toString(16)).join(':');
+  }
+  try {
+    return normalizeHostname(new URL(`http://${host}`).hostname);
+  } catch {
+    return host;
+  }
+}
+
+/**
+ * Does the block list `list` contain `hostname`, in any spelling? An IPv6 address embedding an IPv4 one is that
+ * IPv4 address, so `127.0.0.1` also blocks `::ffff:127.0.0.1` and `2002:7f00:1::1`.
+ */
+export function blockListIncludes(list: readonly string[], hostname: string): boolean {
+  const host = canonicalHost(hostname, true);
+  return list.some((entry) => canonicalHost(entry, true) === host);
+}
+
+/**
+ * Does the allow list `list` contain `hostname`, in any spelling? Only that host: an IPv6 address is never read
+ * as the IPv4 address it embeds, which many addresses (every 6to4 one of a network) share.
+ */
+export function allowListIncludes(list: readonly string[], hostname: string): boolean {
+  const host = canonicalHost(hostname, false);
+  return list.some((entry) => canonicalHost(entry, false) === host);
+}
+
+/** Whether a host list entry is an IP address, which a name can resolve to. */
+function isAddressEntry(entry: string): boolean {
+  const host = canonicalHost(entry, false);
+  return host.includes(':') || parseIpv4(host) !== null;
 }
 
 /**
@@ -287,7 +324,7 @@ function isIpLiteral(hostname: string): boolean {
  * internal addresses are caught later, asynchronously, in {@link safeFetch}.
  */
 export function isBlockedHostname(hostname: string, ssrf: ResolvedSsrfOptions): boolean {
-  if (hostListIncludes(ssrf.blockedHosts, hostname)) return true;
+  if (blockListIncludes(ssrf.blockedHosts, hostname)) return true;
   if (ssrf.allowInternalIPs) return false;
 
   const host = normalizeHostname(hostname);
@@ -320,14 +357,14 @@ export const defaultLookup: SsrfHostLookup = async (hostname) => {
 /**
  * Validate that `url` is safe to fetch (spec URL or `$ref` target), throwing
  * {@link SsrfError} if not. Enforces http/https, the `allowedHosts` allow-list,
- * the internal-address denylist, and — for DNS names — resolves and rejects if
- * any resolved address is internal.
+ * `blockedHosts`, the internal-address denylist, and — for DNS names — resolves
+ * and rejects if any resolved address is internal or in `blockedHosts`.
  *
  * Returns the validated resolved addresses so the caller can **pin** the
  * connection to them ({@link safeFetch}), guaranteeing the socket connects to
  * the exact IP that was validated rather than re-resolving the hostname. An
- * empty array means "no pinning needed" (a literal IP, `allowInternalIPs`, or a
- * runtime without a resolver).
+ * empty array means "no pinning needed" (a literal IP, `allowInternalIPs` with
+ * no address in `blockedHosts`, or a runtime without a resolver).
  *
  * Fails closed: a genuine resolver error (or a name that resolves to no
  * address) rejects the URL. Only {@link SsrfResolverUnavailableError} — no
@@ -354,24 +391,20 @@ export async function assertUrlSafe(
   }
 
   const hostname = parsed.hostname;
-  if (ssrf.allowedHosts.length > 0 && !hostListIncludes(ssrf.allowedHosts, hostname)) {
+  if (ssrf.allowedHosts.length > 0 && !allowListIncludes(ssrf.allowedHosts, hostname)) {
     throw new SsrfError(`Host "${hostname}" is not in the allowed-hosts list`, { url, reason: 'host-not-allowed' });
   }
 
-  if (ssrf.allowInternalIPs) {
-    if (hostListIncludes(ssrf.blockedHosts, hostname)) {
-      throw new SsrfError(`Host "${hostname}" is blocked`, { url, reason: 'host-blocked' });
-    }
-    return [];
+  if (blockListIncludes(ssrf.blockedHosts, hostname)) {
+    throw new SsrfError(`Host "${hostname}" is blocked`, { url, reason: 'host-blocked' });
   }
-
-  if (isBlockedHostname(hostname, ssrf)) {
+  if (!ssrf.allowInternalIPs && isBlockedHostname(hostname, ssrf)) {
     throw new SsrfError(`Host "${hostname}" maps to a blocked internal address`, { url, reason: 'internal-address' });
   }
 
-  // Literal IPs are already fully decided by isBlockedHostname above, and the
-  // socket connects to them directly (no DNS), so there is nothing to pin.
-  if (isIpLiteral(hostname)) {
+  // Literal IPs are already fully decided above, and the socket connects to them directly (no DNS), so there is
+  // nothing to pin. With internal addresses allowed, a name is resolved only to check it against blocked addresses.
+  if (isIpLiteral(hostname) || (ssrf.allowInternalIPs && !ssrf.blockedHosts.some(isAddressEntry))) {
     return [];
   }
 
@@ -397,8 +430,11 @@ export async function assertUrlSafe(
   }
 
   for (const { address } of addresses) {
-    if (isBlockedAddress(address)) {
-      throw new SsrfError(`Host "${hostname}" resolves to blocked address ${address}`, {
+    if (blockListIncludes(ssrf.blockedHosts, address)) {
+      throw new SsrfError(`Host "${hostname}" resolves to a blocked address`, { url, reason: 'host-blocked' });
+    }
+    if (!ssrf.allowInternalIPs && isBlockedAddress(address)) {
+      throw new SsrfError(`Host "${hostname}" resolves to a blocked internal address`, {
         url,
         reason: 'resolved-address',
       });
@@ -440,8 +476,8 @@ export interface NodeHttpModules {
   https: typeof import('node:https');
 }
 
-/** Default cap on response body size for the Node transport (10 MiB). */
-const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+/** Default cap on response body size for the Node transport (10 MiB), also the cap of a referenced local file. */
+export const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 
 /** A transport that issues one GET and returns the raw (unfollowed) response. */
 type SsrfTransport = (
@@ -497,6 +533,25 @@ export function makePinnedLookup(pinned: ResolvedAddress[]) {
 /** HTTP statuses that must not carry a response body (Fetch spec). */
 const NULL_BODY_STATUS: ReadonlySet<number> = new Set([101, 103, 204, 205, 304]);
 
+/** A reason phrase the Fetch API accepts: tab, space and visible characters */
+const SENDABLE_REASON_PHRASE = /^[\t\x20-\x7e\x80-\xff]*$/;
+
+/** A fetch `Response` for a Node response; a final status outside 200-599 is an error, an unusable reason phrase is dropped */
+function toFetchResponse(response: import('node:http').IncomingMessage, chunks: Buffer[]): Response {
+  const status = response.statusCode as number;
+  if (status < 200 || status > 599) {
+    throw new Error(`The server answered with status ${status}, which is not an HTTP response status`);
+  }
+  const reasonPhrase = response.statusMessage as string;
+  const statusText = SENDABLE_REASON_PHRASE.test(reasonPhrase) ? reasonPhrase : '';
+  const responseHeaders = new Headers();
+  for (const [name, value] of Object.entries(response.headers)) {
+    for (const item of Array.isArray(value) ? value : [value as string]) responseHeaders.append(name, item);
+  }
+  const body = NULL_BODY_STATUS.has(status) ? null : Buffer.concat(chunks);
+  return new Response(body, { status, statusText, headers: responseHeaders });
+}
+
 /**
  * Node transport that pins the connection to the validated address(es) via a
  * custom `lookup`, preserving the original hostname for the `Host` header and
@@ -532,22 +587,20 @@ export function nodePinnedTransport(modules: NodeHttpModules): SsrfTransport {
           chunks.push(chunk);
         });
         response.on('end', () => {
-          const status = response.statusCode as number;
-          const responseHeaders = new Headers();
-          const entries = Object.entries(response.headers) as [string, string | string[]][];
-          for (const [key, value] of entries) {
-            if (Array.isArray(value)) {
-              for (const item of value) responseHeaders.append(key, item);
-            } else {
-              responseHeaders.append(key, value);
-            }
+          try {
+            resolve(toFetchResponse(response, chunks));
+          } catch (error) {
+            reject(error);
           }
-          const body = NULL_BODY_STATUS.has(status) ? null : Buffer.concat(chunks);
-          resolve(new Response(body, { status, statusText: response.statusMessage, headers: responseHeaders }));
         });
         /* c8 ignore next -- defensive: a mid-stream socket error surfaces as a rejection */
         response.on('error', reject);
       });
+      request.on('upgrade', (_response, socket) => {
+        socket.destroy();
+        reject(new Error(`The server at ${url} switched protocols instead of answering the request`));
+      });
+      request.on('close', () => reject(new Error(`The connection to ${url} closed before a response`)));
       request.on('error', reject);
       request.end();
     });

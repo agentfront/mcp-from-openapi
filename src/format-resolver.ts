@@ -1,4 +1,5 @@
 import type { JsonSchema, FormatResolver } from './types';
+import { ownProperty, setOwnProperty } from './spec';
 
 /**
  * Built-in format resolvers that enrich JSON Schema with concrete constraints.
@@ -116,7 +117,7 @@ export function resolveSchemaFormats(
     const child = slots.pop() as JsonSchema;
     const key = slots.pop() as string;
     const container = slots.pop() as Record<string, unknown>;
-    container[key] = enterNode(child, resolvers, resolved, slots);
+    setOwnProperty(container, key, enterNode(child, resolvers, resolved, slots));
   }
   return root;
 }
@@ -138,10 +139,10 @@ function enterNode(
 
   let result: Record<string, unknown> = { ...schema };
 
-  // Apply resolver to current node if it has a matching format
-  const format = result['format'] as string | undefined;
-  if (format && resolvers[format]) {
-    result = { ...resolvers[format](result as JsonSchema) };
+  // Apply the resolver of its format: an own one, never a member of Object.prototype (`toString`)
+  const resolver = typeof result['format'] === 'string' ? ownProperty(resolvers, result['format']) : undefined;
+  if (typeof resolver === 'function') {
+    result = { ...(resolver as FormatResolver)(result as JsonSchema) };
   }
   // Registered before descending, so a cycle back to this node resolves to it
   resolved.set(schema, result as JsonSchema);

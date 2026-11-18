@@ -729,7 +729,7 @@ describe('ParameterResolver: boolean schemas', () => {
     expect(body(false).inputSchema.required).toBeUndefined();
   });
 
-  it('reads a false form body as a whole body, and false allOf members as adding no property', () => {
+  it('reads a false form body, and a body with a false allOf member, as a whole body that accepts nothing', () => {
     const form = resolve({ requestBody: { content: { 'application/x-www-form-urlencoded': { schema: false } } } });
     expect(form.inputSchema.properties).toEqual({ body: { not: {}, 'x-parameter-location': 'body' } });
     expect(form.mapper[0].serialization).toEqual({ contentType: 'application/x-www-form-urlencoded' });
@@ -739,7 +739,9 @@ describe('ParameterResolver: boolean schemas', () => {
         content: { 'application/json': { schema: { allOf: [false, { type: 'object', properties: { a: false } }] } } },
       },
     });
-    expect(allOf.inputSchema.properties).toEqual({ a: { not: {}, 'x-parameter-location': 'body' } });
+    // A false member accepts no value, which named properties cannot say
+    expect(allOf.mapper).toEqual([expect.objectContaining({ key: 'body', wholeBody: true })]);
+    expect(allOf.inputSchema.properties?.['body']).toMatchObject({ allOf: [{ not: {} }, expect.anything()] });
   });
 
   it('still takes no body input for a media type without a schema, or one that is not a schema', () => {

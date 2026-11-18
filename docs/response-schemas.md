@@ -42,9 +42,9 @@ tool.outputSchema;
 
 ---
 
-## Multiple Responses (oneOf Union)
+## Multiple Responses (anyOf Union)
 
-When `includeAllResponses: true` (the default), multiple status codes produce a `oneOf` union:
+When `includeAllResponses: true` (the default), multiple status codes produce an `anyOf` union. It is `anyOf`, not `oneOf`, because a result can match more than one response: two responses without content both accept `null`, and two open object schemas both accept most objects. Under `oneOf` such a correct result would fail validation. Releases before this one emitted `oneOf`.
 
 ```yaml
 responses:
@@ -71,7 +71,7 @@ responses:
 ```typescript
 tool.outputSchema;
 // {
-//   oneOf: [
+//   anyOf: [
 //     { type: "object", properties: { data: ... }, "x-status-code": 200 },
 //     { type: "object", properties: { error: ... }, "x-status-code": 404 }
 //   ],
@@ -208,7 +208,7 @@ responses:
 ```
 
 ```typescript
-tool.outputSchema.oneOf.map((variant) => [variant["x-status-code"], variant.description]);
+tool.outputSchema.anyOf.map((variant) => [variant["x-status-code"], variant.description]);
 // [[200, "The widget"], [204, "Nothing to return"], [404, "Own description"]]
 ```
 
@@ -292,13 +292,15 @@ How the stream is found:
 
 ## Status Code Metadata
 
-Response status codes from the output schema are available in metadata:
+The status codes of the responses the output schema is made of are in metadata:
 
 ```typescript
 tool.metadata.responseStatusCodes;
-// [200, 404] (from oneOf variants)
+// [200, 404] (one per anyOf variant)
 // [200]      (single response)
 ```
+
+They are read from the response keys (`ResponseBuilder.statuses()`), never from the schema, so a document cannot change them by writing `x-status-code` into a schema. A response key is a status code written as three digits from `100` to `599`, a range (below) or `default`. Any other key (`200 `, `0200`, `+200`, `20`, `600`) is ignored with an `INVALID_RESPONSE_KEY` diagnostic, and `lint()` reads keys the same way.
 
 `responseStatusCodes` holds numbers: each explicit code, and `0` for the `default` response. A range key is a response range (OpenAPI `1XX` to `5XX`, in any case), not a number, so it is kept as a string, upper-cased, in `x-status-code` and listed in `metadata.responseStatusRanges`:
 
@@ -317,7 +319,7 @@ responses:
 ```
 
 ```typescript
-tool.outputSchema.oneOf.map((variant) => variant["x-status-code"]); // [200, "4XX"]
+tool.outputSchema.anyOf.map((variant) => variant["x-status-code"]); // [200, "4XX"]
 tool.metadata.responseStatusCodes; // [200]
 tool.metadata.responseStatusRanges; // ["4XX"]
 ```

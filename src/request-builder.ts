@@ -1,6 +1,6 @@
 import type { McpOpenAPITool, ParameterLocation, ParameterMapper } from './types';
 import { RequestBuildError } from './errors';
-import { describeValue, isHttpToken, isRefusedMethod, wireMethod } from './spec';
+import { describeValue, isDotSegment, isHttpToken, isRefusedMethod, setOwnProperty, wireMethod } from './spec';
 import {
   FORM_URLENCODED,
   JSON_MEDIA_TYPE,
@@ -267,7 +267,7 @@ function createRecord<T>(): Record<string, T> {
 function toPlainRecord<T>(source: Record<string, T>): Record<string, T> {
   const plain: Record<string, T> = {};
   for (const key of Object.keys(source)) {
-    Object.defineProperty(plain, key, { value: source[key], writable: true, enumerable: true, configurable: true });
+    setOwnProperty(plain, key, source[key]);
   }
   return plain;
 }
@@ -278,6 +278,50 @@ function toPlainRecord<T>(source: Record<string, T>): Record<string, T> {
  */
 function readInput(input: object | undefined, key: string): unknown {
   return input !== undefined && Object.hasOwn(input, key) ? (input as Record<string, unknown>)[key] : undefined;
+}
+
+/** The credential entries of each alternative of a choice of Security Requirements (`security.alternatives`). Internal. */
+export function entriesByAlternative(entries: readonly ParameterMapper[]): Map<number, ParameterMapper[]> {
+  const alternatives = new Map<number, ParameterMapper[]>();
+  for (const entry of entries) {
+    for (const index of entry.security?.alternatives ?? []) {
+      const members = alternatives.get(index);
+      if (members) members.push(entry);
+      else alternatives.set(index, [entry]);
+    }
+  }
+  return alternatives;
+}
+
+/** The `mutualTLS` schemes of a choice (`security.clientCertificates`), with the alternatives that need each. Internal. */
+export function clientCertificatesOf(entries: readonly ParameterMapper[]): Array<{ scheme: string; alternatives: number[] }> {
+  return entries.flatMap((entry) => entry.security?.clientCertificates ?? []);
+}
+
+/**
+ * The credential entries the input gives that are not needed by the first alternative it gives completely: one
+ * alternative of a choice is sent. None when the input gives no alternative completely. Whether there is a client
+ * certificate is not known here, so an alternative that needs one is never chosen nor ruled out: its entries stay.
+ */
+function unchosenCredentials(mapper: readonly ParameterMapper[], input: object | undefined): Set<ParameterMapper> {
+  const given = (entry: ParameterMapper): boolean => {
+    const value = readInput(input, entry.inputKey);
+    return value !== undefined && value !== null;
+  };
+  const alternatives = entriesByAlternative(mapper);
+  const needCertificate = new Set(clientCertificatesOf(mapper).flatMap((certificate) => certificate.alternatives));
+  const chosen = [...alternatives.keys()]
+    .filter((index) => !needCertificate.has(index))
+    .sort((a, b) => a - b)
+    .map((index) => alternatives.get(index)!)
+    .find((entries) => entries.every(given));
+  if (chosen === undefined) return new Set();
+  const certificateMembers = new Set([...needCertificate].flatMap((index) => alternatives.get(index) ?? []));
+  return new Set(
+    mapper.filter(
+      (entry) => entry.security?.alternatives !== undefined && !chosen.includes(entry) && !certificateMembers.has(entry),
+    ),
+  );
 }
 
 /**
@@ -499,7 +543,7 @@ function serializeCookieStyle(
   return groups;
 }
 
-function assertHeaderSafe(name: string, value: string, context: Record<string, unknown> = {}): void {
+export function assertHeaderSafe(name: string, value: string, context: Record<string, unknown> = {}): void {
   // Header NAMES come from the spec (mapper.key) — untrusted under
   // secureDefaults, so they get the RFC 7230 token check too.
   if (!/^[\w!#$%&'*+\-.^`|~]+$/.test(name)) {
@@ -527,7 +571,7 @@ function assertHeaderSafe(name: string, value: string, context: Record<string, u
   }
 }
 
-function assertCookieName(name: string): void {
+export function assertCookieName(name: string): void {
   if (!/^[\w!#$%&'*+\-.^`|~]+$/.test(name)) {
     throw new RequestBuildError(`Invalid cookie name '${name}' (RFC 6265 token required)`, { cookie: name });
   }
@@ -545,7 +589,7 @@ function assertCookieName(name: string): void {
  *   character above U+00FF, which no header can carry. Comma and the bytes
  *   0x80-0xFF are tolerated, because arrays have always been comma-joined.
  */
-function assertCookieValue(name: string, value: string, strict = false): void {
+export function assertCookieValue(name: string, value: string, strict = false): void {
   if (
     strict
       ? !/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*$/.test(value)
@@ -1326,9 +1370,12 @@ function checkMapper(mapper: unknown): { wholeQuery: ParameterMapper | undefined
  * body field), whether or not it has a value — so the input can neither
  * stand in for a credential nor override a sibling parameter.
  *
- * Names compare exactly and case-sensitively, as query and cookie names do on
- * the wire. They are compared unencoded; percent-encoding and form-encoding
- * are both one-to-one, so names that differ here differ on the wire too.
+ * Names are compared unencoded; percent-encoding and form-encoding are both
+ * one-to-one, so names that differ here differ on the wire too. They are
+ * compared as common servers read them: a name whose part before its first
+ * `[` is reserved is refused (`api_key[]` and `api_key[x]` are read as
+ * `api_key`), and so is a credential's name in another case (`API_KEY`; some
+ * servers read names in any case, and a credential is the one to protect).
  *
  * Cookies also hold one value per name, so with `claimed` (shared by the
  * whole request) two inputs naming the same cookie are refused too, instead
@@ -1341,8 +1388,20 @@ function nameClaimer(
 ): (name: string) => void {
   const kind = owner.type === 'cookie' ? 'cookie' : owner.type === 'body' ? 'form field' : 'query parameter';
   const source = `The input of ${owner.type} parameter '${owner.key}' (input key '${owner.inputKey}')`;
+  const credentialsInAnyCase = new Map<string, ParameterMapper>();
+  for (const holders of reserved.values()) {
+    for (const holder of holders) if (holder.security && holder !== owner) credentialsInAnyCase.set(holder.key.toLowerCase(), holder);
+  }
+  const holderOf = (name: string): ParameterMapper | undefined => {
+    const bracket = name.indexOf('[');
+    for (const reservedName of bracket > 0 ? [name, name.slice(0, bracket)] : [name]) {
+      const holder = reserved.get(reservedName)?.find((other) => other !== owner);
+      if (holder !== undefined) return holder;
+    }
+    return credentialsInAnyCase.get(name.toLowerCase());
+  };
   return (name) => {
-    const holder = reserved.get(name)?.find((other) => other !== owner);
+    const holder = holderOf(name);
     if (holder !== undefined) {
       throw new RequestBuildError(
         `${source} names the ${kind} '${name}', which this tool reserves for ${
@@ -1363,6 +1422,45 @@ function nameClaimer(
     }
     claimed.set(name, owner);
   };
+}
+
+/** A body entry's media type, `application/json` when it names none; one that is not text is refused */
+function bodyMediaType(mapper: ParameterMapper): string {
+  const declared: unknown = mapper.serialization?.contentType;
+  if (declared !== undefined && declared !== null && typeof declared !== 'string') {
+    throw new RequestBuildError(
+      `body parameter '${mapper.key}' (input key '${mapper.inputKey}') has an invalid media type ${describeValue(declared)} in serialization.contentType`,
+      { param: mapper.key, inputKey: mapper.inputKey, location: 'body' },
+    );
+  }
+  return (declared as string | null | undefined) ?? 'application/json';
+}
+
+/** Refuse a resolved path that leaves the origin, holds a dot segment, or loses a segment its template has */
+function assertPathNamesTemplateResource(template: string, path: string): void {
+  if (!/^\/(?![/\\])/.test(path)) {
+    throw new RequestBuildError(`The request path must start with a single '/': ${describeValue(path)}`, {
+      path: describeValue(path),
+    });
+  }
+  // A URL parser reads a backslash in an http(s) path as `/`; only a template can hold one raw (values are encoded)
+  if (path.includes('\\')) {
+    throw new RequestBuildError(`The request path ${describeValue(path)} holds a backslash, which a URL reads as '/'`, {
+      path: describeValue(path),
+    });
+  }
+  const templateSegments = template.split('/');
+  const pathSegments = path.split('/');
+  pathSegments.forEach((segment, index) => {
+    const lastIndex = pathSegments.length - 1;
+    const emptyAllowed = index === lastIndex && templateSegments[index] === '';
+    if (isDotSegment(segment) || (segment === '' && index > 0 && !emptyAllowed)) {
+      throw new RequestBuildError(
+        `The request path ${describeValue(path)} has an empty or dot segment where its template ${describeValue(template)} names a resource`,
+        { path: describeValue(path), template: describeValue(template) },
+      );
+    }
+  });
 }
 
 /**
@@ -1418,6 +1516,7 @@ export function buildHttpRequest(
     throw new RequestBuildError(`Tool input must be an object; received ${describeValue(input)}`, {});
   }
   const values: object | undefined = input ?? undefined;
+  const unchosen = unchosenCredentials(tool.mapper, values);
 
   let path = tool.metadata.path;
   const queryPairs: Array<[key: string, value: string, allowReserved?: boolean]> = [];
@@ -1459,10 +1558,10 @@ export function buildHttpRequest(
     const value = readInput(values, mapper.inputKey);
 
     if (mapper.security) {
-      // Security entries apply only when a value was provided; they are never
+      // Security entries apply only when a value was provided, of the alternative chosen; they are never
       // treated as required here (frameworks resolve credentials separately).
-      if (value === undefined || value === null) continue;
-      const formatted = formatSecurityValue(mapper, String(value));
+      if (value === undefined || value === null || unchosen.has(mapper)) continue;
+      const formatted = formatSecurityValue(mapper, primitiveString(value, mapper.key, mapper.type));
       if (mapper.type === 'header') {
         assertHeaderSafe(mapper.key, formatted);
         headers[mapper.key] = formatted;
@@ -1576,15 +1675,9 @@ export function buildHttpRequest(
       }
 
       case 'body': {
-        const declared: unknown = mapper.serialization?.contentType;
-        if (declared !== undefined && declared !== null && typeof declared !== 'string') {
-          throw new RequestBuildError(
-            `body parameter '${mapper.key}' (input key '${mapper.inputKey}') has an invalid media type ${describeValue(declared)} in serialization.contentType`,
-            { param: mapper.key, inputKey: mapper.inputKey, location: 'body' },
-          );
-        }
+        const declared = bodyMediaType(mapper);
         hasBody = true;
-        contentType = contentType ?? (declared as string | null | undefined) ?? 'application/json';
+        contentType = contentType ?? declared;
         // `binary` on a flattened param marks a FILE PART inside a multipart
         // form; only a whole-body binary mapper makes the entire payload raw
         if (mapper.serialization?.binary && mapper.wholeBody) binaryBody = true;
@@ -1594,17 +1687,27 @@ export function buildHttpRequest(
         } else {
           bodyFields.set(mapper.key, mapper);
           if (bodyObject === undefined) bodyObject = {};
-          // defined, not assigned: a property named `__proto__` is a key
-          Object.defineProperty(bodyObject, mapper.key, { value, writable: true, enumerable: true, configurable: true });
+          setOwnProperty(bodyObject, mapper.key, value);
         }
         break;
       }
     }
   }
 
+  // A required body is sent though the input gave none of its properties: empty
+  const requiredBody = hasBody
+    ? undefined
+    : tool.mapper.find((mapper) => mapper.type === 'body' && mapper.serialization?.requiredBody === true);
+  if (requiredBody) {
+    hasBody = true;
+    contentType = bodyMediaType(requiredBody);
+    bodyObject = {};
+  }
+
   if (path.includes('{')) {
     throw new RequestBuildError(`Unresolved path parameters remain in '${path}'`, { path });
   }
+  assertPathNamesTemplateResource(tool.metadata.path, path);
 
   if (bodyObject !== undefined) rawBody = bodyObject;
   // A form body's fields: each one's mapper entry (a flattened body) or the
@@ -1676,6 +1779,8 @@ export function buildHttpRequest(
   let body: unknown;
   if (hasBody && rawBody !== undefined) {
     const ct = contentType!;
+    // A key of the document's `content` map: it is sent as a header value
+    assertHeaderSafe(contentTypeKey, ct);
     if (binaryBody) {
       // Raw binary: pass through untouched (string, Uint8Array, Blob, ...)
       body = rawBody;
@@ -1719,11 +1824,11 @@ export function buildHttpRequest(
       // (unlike a `content` parameter's media type, which is classified by
       // its essence): `application/json; charset=utf-8` falls to the branch
       // below, which also writes an object as JSON text
-      body = JSON.stringify(rawBody);
+      body = jsonText(rawBody, 'body', 'body');
       headers[contentTypeKey] = ct;
     } else {
       // text/plain, application/xml, ... : caller-provided string content
-      body = isPlainObject(rawBody) || Array.isArray(rawBody) ? JSON.stringify(rawBody) : String(rawBody);
+      body = typeof rawBody === 'object' && rawBody !== null ? jsonText(rawBody, 'body', 'body') : String(rawBody);
       headers[contentTypeKey] = ct;
     }
   }

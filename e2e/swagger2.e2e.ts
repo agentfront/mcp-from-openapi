@@ -1471,7 +1471,7 @@ describe('story: type: file', () => {
     expect(responses['404']).toEqual({ description: 'There is no such report' });
     // the tool: the file (a binary string) for 200, and nothing for the 404 that has no body
     const output = tools.find(({ name }) => name === 'downloadReport')!.outputSchema as Doc;
-    expect(output['oneOf']).toEqual([
+    expect(output['anyOf']).toEqual([
       expect.objectContaining({ type: 'string', format: 'binary', 'x-status-code': 200 }),
       expect.objectContaining({ type: 'null', 'x-status-code': 404 }),
     ]);

@@ -594,9 +594,10 @@ export type MapperShape = [
  */
 export type SerializationShape = [
   Expect<Equal<RequiredKeys<SerializationInfo>, never>>,
-  Expect<Equal<OptionalKeys<SerializationInfo>, 'contentType' | 'encoding' | 'binary'>>,
+  Expect<Equal<OptionalKeys<SerializationInfo>, 'contentType' | 'encoding' | 'binary' | 'requiredBody'>>,
   Expect<Equal<SerializationInfo['contentType'], string | undefined>>,
   Expect<Equal<SerializationInfo['binary'], boolean | undefined>>,
+  Expect<Equal<SerializationInfo['requiredBody'], boolean | undefined>>,
 ];
 
 /** A streamed response (OpenAPI 3.2 `itemSchema`): the status code, the media type and the schema of each item. */

@@ -15,6 +15,7 @@ export {
   DIAGNOSTIC_KEY_MAX_LENGTH,
   MAX_POINTER_SEGMENT_LENGTH,
   POINTER_TRUNCATION_MARKER,
+  UNSAFE_CHARACTER_CLASS,
   appendPointer,
   describeValue,
   diagnosticKey,
@@ -35,6 +36,7 @@ export {
   isStandardMethod,
   listOperations,
   ownProperty,
+  setOwnProperty,
   toStandardMethod,
   wireMethod,
 } from './operations';
@@ -63,6 +65,7 @@ export {
   isSwagger2,
   listSkippedNewerOperations,
   resolveOperationLayout,
+  securitySchemeProblem,
 } from './versions';
 export type {
   ListSkippedNewerOperationsOptions,
@@ -81,11 +84,13 @@ export {
   MAX_CONVERSION_ENTRIES,
   MAX_MEDIA_TYPES_PER_LIST,
   UPGRADED_OPENAPI_VERSION,
+  isDotSegment,
   readSwagger2BasePath,
   swagger2SkippedOperations,
   upgradeSwagger2,
 } from './upgrade-v2';
 export type { Swagger2BasePath, UpgradeSwagger2Options, UpgradeSwagger2Result } from './upgrade-v2';
 
-export { parameterNameNotStringDiagnostic, readParameterName } from './parameters';
+export { parameterNameNotStringDiagnostic, pathTemplateNames, readParameterName, withTextName } from './parameters';
+export { wrapReferenceSiblings } from './schema-references';
 export type { ParameterName } from './parameters';

@@ -78,7 +78,7 @@ import { SecurityResolver } from "mcp-from-openapi";
 ```typescript
 async resolve(mappers: ParameterMapper[], context: SecurityContext): Promise<ResolvedSecurity>
 async checkMissingSecurity(mappers: ParameterMapper[], context: SecurityContext): Promise<string[]>
-async signRequest(mappers: ParameterMapper[], signatureData: SignatureData, context: SecurityContext): Promise<Record<string, string>>
+async signRequest(mappers: ParameterMapper[], signatureData: SignatureData, context: SecurityContext, resolved?: ResolvedSecurity): Promise<Record<string, string>>
 ```
 
 See [Security](./security.md) for detailed usage.
@@ -117,13 +117,17 @@ resolve(
   operation: OperationObject,
   pathParameters?: ParameterObject[],
   securityRequirements?: SecurityRequirement[],
-  includeSecurityInInput?: boolean | string[]
-): { inputSchema: JsonSchema; mapper: ParameterMapper[] }
+  includeSecurityInInput?: boolean | string[],
+  securityAlternatives?: SecurityRequirement[][] // the requirement objects; more than one is a choice
+): { inputSchema: JsonSchema; mapper: ParameterMapper[]; ignored: IgnoredParameter[] }
 ```
 
 - `pathParameters` are the path item's parameters. An operation-level parameter with the same `name` and `in` overrides a path-level one (a header name in any case; the operation's spelling is used), and of several with the same `name` and `in` in one list the last is used. The same name in different locations is a conflict, renamed by the naming strategy. See [Parameter Conflicts](./parameter-conflicts.md#same-name-and-location-the-operation-wins).
 - A parameter defined with `content` takes its input schema from the media type's `schema` (a media type with none gives `{}` for a JSON media type (`application/json`, `application/*+json`), `{ type: 'object' }` for `application/x-www-form-urlencoded` and `{ type: 'string' }` otherwise); its mapper entry has `serialization.contentType` (and `encoding`) and no `style`, `explode` or `allowReserved`. A parameter with both `schema` and `content` is read as `schema`.
 - An OpenAPI 3.2 `in: querystring` parameter becomes a `type: 'query'` mapper entry with `wholeQuery: true`.
+- An `in: path` parameter is always required, whatever its `required` says. A field of another type than the specification gives it is read as absent: `required` counts only when `true`, a `description` only when a string, a `schema` only when an object or a boolean (else `{ type: 'string' }`). A `request body` whose `content` holds no media type is no body.
+- Every input key is unique: a conflict rename never takes a key another input uses, and a security input whose scheme name is taken gets a number (`api_key2`). A scheme named in several requirements is one entry.
+- `ignored` lists the parameters left out (`{ name, in, reason }`): a header parameter the HTTP client, a credential or a proxy sets (`Accept`, `Content-Type`, `Authorization`, `Host`, `Content-Length`, `Cookie`, `X-Forwarded-*`, ...), and a parameter in the same location and with the same name as a credential of `securityRequirements`. The generator reports each as `PARAMETER_IGNORED`.
 - It throws a `GenerationError` (context `code`) when the parameters break a querystring rule: more than one `in: querystring`, one next to `in: query` parameters, or one without `content` holding a media type. `OpenAPIToolGenerator` checks the rules first and skips the operation with a diagnostic.
 
 #### Input schema annotations
@@ -158,9 +162,10 @@ new ResponseBuilder(options?: GenerateOptions, schemaConversion?: SchemaConversi
 ```typescript
 build(responses?: ResponsesObject): JsonSchema | undefined
 buildStream(responses?: ResponsesObject): ResponseStreamInfo | undefined
+statuses(responses?: ResponsesObject): Array<number | ResponseStatusRange>
 ```
 
-`build` returns the output schema. A media type with only `itemSchema` contributes nothing to it. With `includeAllResponses: false` the response is chosen by `preferredStatusCodes` (see [Response Schemas](./response-schemas.md#selection-priority)); a response key `2XX` (any case) is a range, kept as `'2XX'` in `x-status-code`. `buildStream` returns the streamed response (OpenAPI 3.2 `itemSchema`): of the responses with a media type that declares `itemSchema`, the one `preferredStatusCodes` prefers (same order as for the output schema, ranges included); within it, the first such media type in document order, chosen apart from the one `build` reads (a response offering `application/json` and `text/event-stream` gives both). The item schema is converted with the same limits. `generateTool()` calls both and stores the second in `metadata.responseStream`. A response with no `description` uses its `summary` as the description. See [Response Schemas](./response-schemas.md).
+`build` returns the output schema: one response's schema, or an `anyOf` of several. A media type with only `itemSchema` contributes nothing to it. `statuses` returns the status of each response `build` reads, in its order (a code, a range, `0` for `default`); the generator takes `metadata.responseStatusCodes` and `responseStatusRanges` from it. Only a three-digit code from `100` to `599`, a range or `default` is a response key; any other key is skipped. With `includeAllResponses: false` the response is chosen by `preferredStatusCodes` (see [Response Schemas](./response-schemas.md#selection-priority)); a response key `2XX` (any case) is a range, kept as `'2XX'` in `x-status-code`. `buildStream` returns the streamed response (OpenAPI 3.2 `itemSchema`): of the responses with a media type that declares `itemSchema`, the one `preferredStatusCodes` prefers (same order as for the output schema, ranges included); within it, the first such media type in document order, chosen apart from the one `build` reads (a response offering `application/json` and `text/event-stream` gives both). The item schema is converted with the same limits. `generateTool()` calls both and stores the second in `metadata.responseStream`. A response with no `description` uses its `summary` as the description. See [Response Schemas](./response-schemas.md).
 
 #### SchemaConversionOptions
 
@@ -212,9 +217,9 @@ Errors (`valid: false`):
 | `INVALID_PATH_FORMAT` | A path does not start with `/` |
 | `NO_RESPONSES` | An operation has no `responses` (required in Swagger 2.0 and 3.0 only) or has an empty `responses` (any version) |
 | `MISSING_PATH_PARAMETER` | A path template variable has no matching `in: path` parameter |
-| `INVALID_PARAMETER` | An entry of a `parameters` list is not an object |
+| `INVALID_PARAMETER` | An entry of a `parameters` list is not an object, or has a `$ref` that is not a string (only a string `$ref` makes a Reference Object) |
 | `MISSING_PARAMETER_NAME`, `MISSING_PARAMETER_IN` | A parameter has no `name` or no `in` |
-| `INVALID_PARAMETER_NAME` | A parameter's `name` is an array or an object (a number or a boolean is read as its text, with a `PARAMETER_NAME_NOT_STRING` warning). Its `path` is a JSON Pointer |
+| `INVALID_PARAMETER_NAME` | A `header` or `cookie` parameter's `name` is not an HTTP token (it is sent as written), or a parameter's `name` is an array or an object (a number or a boolean is read as its text, with a `PARAMETER_NAME_NOT_STRING` warning). Its `path` is a JSON Pointer |
 | `INVALID_BASE_PATH` | Swagger 2.0: `basePath` does not start with `/`, or cannot be used in a URL (not a string, or holds `{`, `}`, whitespace, `?`, `#`, a backslash or a `.` or `..` segment). Its `path` is `/basePath` |
 | `INVALID_PARAMETER_IN` | `in` is not a location of the declared version (Swagger 2.0: `path`, `query`, `header`, `formData`, `body`; 3.0 and 3.1: `path`, `query`, `header`, `cookie`; 3.2 adds `querystring`) |
 | `PATH_PARAMETER_NOT_REQUIRED` | An `in: path` parameter is not `required: true` (also in Swagger 2.0, where the conversion would otherwise read it as required) |
@@ -231,6 +236,8 @@ Errors (`valid: false`):
 | `DEREFERENCE_REQUIRED` | Returned by `generator.validate()`, never by `Validator.validate()`: a Swagger 2.0 document loaded with `dereference: false` (see above) |
 | `INVALID_METHOD_TOKEN` | An `additionalOperations` key is not an HTTP method token (RFC 9110) |
 | `DUPLICATE_FIXED_METHOD` | An `additionalOperations` key is the upper-case name of a method that has its own field (`GET`, `QUERY`) |
+| `INVALID_SECURITY_SCHEME` | The scheme map (`components.securitySchemes`, Swagger 2.0: `securityDefinitions`) is present but not a map, or a security scheme (Swagger 2.0: definition) has a `type` the declared version does not define, or an `apiKey` scheme has an `in` it does not define or no `name`; values compare exactly (Swagger 2.0: `basic`, `apiKey`, `oauth2`, in `header`/`query`; 3.0: `apiKey`, `http`, `oauth2`, `openIdConnect`, in `header`/`query`/`cookie`; 3.1 and 3.2 add `mutualTLS`) |
+| `INVALID_FIELD_TYPE` | A field generation reads has another type than the official schema gives it: `parameters`, `servers` and `security` must be arrays, `responses` an object, `operationId`, `info.title`, `info.version`, a server `url` and a parameter `description` strings, `deprecated` and a parameter `required` booleans, a parameter `schema` a Schema Object or a boolean; each server, Security Requirement and response must be an object (a response map's `x-` extensions hold any value). A falsy value reads as absent, as generation reads it |
 
 Warnings:
 
@@ -555,7 +562,7 @@ isStandardMethod("LINK"); // false
 
 ### DIAGNOSTIC_CODES / MAX_DIAGNOSTICS
 
-`DIAGNOSTIC_CODES` is the one frozen registry of every code a diagnostic from `generator.getDiagnostics()` can carry (its keys equal its values); `DiagnosticCode` is the union of those strings. It holds the codes of the version and operation-walk logic (`NEWER_OPENAPI_VERSION`, `FEATURE_NEWER_THAN_DECLARED_VERSION`, `CONFLICTING_VERSION_FIELDS`, `PATH_ITEM_NOT_OBJECT`, `OPERATION_NOT_OBJECT`, `ADDITIONAL_OPERATIONS_NOT_OBJECT`, `INVALID_METHOD_TOKEN`, `DUPLICATE_FIXED_METHOD`, `METHOD_CASE_VARIANT`, `REFUSED_METHOD`), the Swagger 2.0 conversion's (`SWAGGER_VERSION_NOT_2_0`, `SWAGGER_INVALID_VALUE`, `SWAGGER_UNKNOWN_FIELD`, `SWAGGER_NOT_CONVERTED`, `SWAGGER_UNRESOLVED_REFERENCE`, `SWAGGER_RELATIVE_SERVER_URL`, `SWAGGER_ASSUMED_SCHEME`, `SWAGGER_ASSUMED_MEDIA_TYPE`, `SWAGGER_FORM_MEDIA_TYPE_ADDED`, `SWAGGER_MULTIPLE_BODY_PARAMETERS`, `SWAGGER_BODY_AND_FORM_DATA`, `SWAGGER_DUPLICATE_FORM_DATA_PARAMETER`, `SWAGGER_UNSUPPORTED_COLLECTION_FORMAT`, `SWAGGER_FILE_OUTSIDE_FORM_DATA`, `SWAGGER_UNSUPPORTED_SECURITY_SCHEME`, `SWAGGER_MEDIA_TYPE_LIMIT`, `SWAGGER_CONVERSION_TOO_LARGE`), the version errors (`INVALID_OPENAPI_VERSION`, `MISSING_OPENAPI_VERSION`), the validator warnings (`NO_PATHS`, `NO_OPERATIONS`, `NO_OPERATION_ID`, `NO_SERVERS`, `NO_SECURITY_SCHEMES`), the document URIs' (`INVALID_SELF`, `REFUSED_SELF`, `UNRESOLVABLE_SELF`: why `$self` is ignored; `BASE_URI_TOO_LONG`: a retrieval URI that is not used), the generator's (`UNRESOLVED_SECURITY_SCHEME`, `INVALID_SECURITY_REQUIREMENT`, `UNSATISFIABLE_SECURITY`, `UNSUPPORTED_PARAMETER_LOCATION`, `UNSUPPORTED_STREAMING_REQUEST_BODY`), the parameter rules (`MULTIPLE_QUERYSTRING_PARAMETERS`, `QUERYSTRING_WITH_QUERY_PARAMETERS`, `QUERYSTRING_PARAMETER_WITHOUT_CONTENT`, `INVALID_PARAMETER_CONTENT`, `DUPLICATE_PARAMETER`, `PARAMETER_NAME_NOT_STRING`, `INVALID_PARAMETER_NAME`), the generator's warnings about a tool that is made but cannot take some inputs (`COOKIE_CONTENT_NOT_SENDABLE`, `QUERYSTRING_WITH_QUERY_CREDENTIAL`, `REQUIRED_INPUT_ACCEPTS_NOTHING`), the warning about a schema cut shallower than `maxSchemaDepth` to fit `maxSchemaNodes` (`SCHEMA_DEPTH_REDUCED`) and `DIAGNOSTICS_TRUNCATED`. Each is described in [OpenAPI Versions](./openapi-versions.md#diagnostics).
+`DIAGNOSTIC_CODES` is the one frozen registry of every code a diagnostic from `generator.getDiagnostics()` can carry (its keys equal its values); `DiagnosticCode` is the union of those strings. It holds the codes of the version and operation-walk logic (`NEWER_OPENAPI_VERSION`, `FEATURE_NEWER_THAN_DECLARED_VERSION`, `CONFLICTING_VERSION_FIELDS`, `PATH_ITEM_NOT_OBJECT`, `OPERATION_NOT_OBJECT`, `ADDITIONAL_OPERATIONS_NOT_OBJECT`, `INVALID_METHOD_TOKEN`, `DUPLICATE_FIXED_METHOD`, `METHOD_CASE_VARIANT`, `REFUSED_METHOD`), the Swagger 2.0 conversion's (`SWAGGER_VERSION_NOT_2_0`, `SWAGGER_INVALID_VALUE`, `SWAGGER_UNKNOWN_FIELD`, `SWAGGER_NOT_CONVERTED`, `SWAGGER_UNRESOLVED_REFERENCE`, `SWAGGER_RELATIVE_SERVER_URL`, `SWAGGER_ASSUMED_SCHEME`, `SWAGGER_ASSUMED_MEDIA_TYPE`, `SWAGGER_FORM_MEDIA_TYPE_ADDED`, `SWAGGER_MULTIPLE_BODY_PARAMETERS`, `SWAGGER_BODY_AND_FORM_DATA`, `SWAGGER_DUPLICATE_FORM_DATA_PARAMETER`, `SWAGGER_UNSUPPORTED_COLLECTION_FORMAT`, `SWAGGER_FILE_OUTSIDE_FORM_DATA`, `SWAGGER_UNSUPPORTED_SECURITY_SCHEME`, `SWAGGER_MEDIA_TYPE_LIMIT`, `SWAGGER_CONVERSION_TOO_LARGE`), the version errors (`INVALID_OPENAPI_VERSION`, `MISSING_OPENAPI_VERSION`), the validator warnings (`NO_PATHS`, `NO_OPERATIONS`, `NO_OPERATION_ID`, `DUPLICATE_OPERATION_ID`, `NO_SERVERS`, `NO_SECURITY_SCHEMES`), the document URIs' (`INVALID_SELF`, `REFUSED_SELF`, `UNRESOLVABLE_SELF`: why `$self` is ignored; `BASE_URI_TOO_LONG`: a retrieval URI that is not used), the generator's (`UNRESOLVED_SECURITY_SCHEME`, `INVALID_SECURITY_REQUIREMENT`, `UNSATISFIABLE_SECURITY`, `UNSUPPORTED_PARAMETER_LOCATION`, `UNSUPPORTED_STREAMING_REQUEST_BODY`, `REQUEST_BODY_WITHOUT_MEDIA_TYPE`, `TOOL_GENERATION_FAILED`, `UNRESOLVED_REFERENCE`, `PARAMETER_IGNORED`, `UNSUPPORTED_SECURITY_SCHEME`, `INVALID_RESPONSE_KEY`), the parameter rules (`MULTIPLE_QUERYSTRING_PARAMETERS`, `QUERYSTRING_WITH_QUERY_PARAMETERS`, `QUERYSTRING_PARAMETER_WITHOUT_CONTENT`, `INVALID_PARAMETER_CONTENT`, `DUPLICATE_PARAMETER`, `PARAMETER_NAME_NOT_STRING`, `INVALID_PARAMETER_NAME`), the generator's warnings about a tool that is made but cannot take some inputs (`COOKIE_CONTENT_NOT_SENDABLE`, `QUERYSTRING_WITH_QUERY_CREDENTIAL`, `REQUIRED_INPUT_ACCEPTS_NOTHING`), the warning about a schema cut shallower than `maxSchemaDepth` to fit `maxSchemaNodes` (`SCHEMA_DEPTH_REDUCED`) and `DIAGNOSTICS_TRUNCATED`. Each is described in [OpenAPI Versions](./openapi-versions.md#diagnostics).
 
 `UNREADABLE_REFERENCE` and `DEREFERENCE_REQUIRED` are in the registry too but are never `getDiagnostics()` entries: they are the validation errors `generator.validate()` returns for a reference it cannot read and for a Swagger 2.0 document loaded with `dereference: false`. `MAX_DIAGNOSTICS` (`1000`) is the most findings one list keeps: `getDiagnostics()`, and each of a `ValidationResult`'s `errors` and `warnings`. `INVALID_BASE_PATH` and the other validation errors that are not in the registry (see [OpenAPI Versions](./openapi-versions.md#diagnostics)) only appear in a `ValidationResult` or in the `context.errors` of a `ParseError`. `LEGACY_PATH_KEY_MAX_LENGTH` (`1024`) is the longest path key the historical validation paths and messages quote.
 
@@ -586,7 +593,7 @@ interface McpOpenAPITool<TMeta extends ToolMetadata = ToolMetadata> {
   description: string; // From operation summary/description (or extension override)
   annotations?: ToolAnnotations; // MCP behavior hints (inferred + extension overrides)
   inputSchema: JsonSchema; // Combined input schema (all params)
-  outputSchema?: JsonSchema; // Response schema (can be oneOf union)
+  outputSchema?: JsonSchema; // Response schema (an anyOf union for several responses)
   mapper: ParameterMapper[]; // Input -> request mapping
   metadata: TMeta; // Auth, servers, tags, etc. — extendable by frameworks
 }
@@ -632,7 +639,7 @@ interface ParameterMapper {
 }
 ```
 
-`wholeBody` is set for non-object bodies (arrays, primitives, binary) and root `oneOf`/`anyOf` union bodies: send `input[inputKey]` directly as the request body instead of wrapping it in `{ [key]: value }`. See [SerializationInfo](#serializationinfo) for the content-type, encoding, and binary markers.
+`wholeBody` is set for a body that cannot be flattened into named properties (a non-object body, a union, a constraint properties cannot say, an open object: see [Whole-body parameters](./parameter-conflicts.md#whole-body-parameters)): send `input[inputKey]` directly as the request body instead of wrapping it in `{ [key]: value }`. See [SerializationInfo](#serializationinfo) for the content-type, encoding, and binary markers.
 
 `wholeQuery` is set only on a `type: 'query'` entry, for an OpenAPI 3.2 parameter `in: querystring`: the input value is the entire query string, serialized in `serialization.contentType`, and `key` (the parameter's name) is never sent. An operation has at most one such entry and no other non-security `query` entry. See [Request Builder](./request-builder.md#whole-query-parameters).
 
@@ -654,6 +661,7 @@ interface ToolMetadata {
   tags?: string[];
   deprecated?: boolean;
   security?: SecurityRequirement[];
+  securityAlternatives?: SecurityRequirement[][]; // With several requirement objects: each ([] for {}); any one authenticates
   servers?: ServerInfo[];
   responseStatusCodes?: number[]; // From output schema: each explicit code, and 0 for `default` (not a streamed response's)
   responseStatusRanges?: ResponseStatusRange[]; // From output schema: its range keys (`2XX`), upper-cased; absent when it has none
@@ -705,6 +713,10 @@ interface SecurityParameterInfo {
   apiKeyName?: string; // API key parameter name
   apiKeyIn?: "query" | "header" | "cookie";
   description?: string;
+  alternatives?: number[]; // With a choice: the indexes of metadata.securityAlternatives that need this scheme
+  alternativeScopes?: string[][]; // The scopes each of `alternatives` asks, when they differ
+  clientCertificates?: Array<{ scheme: string; alternatives: number[] }>; // Each mutualTLS scheme of a choice, with the alternatives that need it
+  optional?: boolean; // With a choice: one alternative is empty, so a call needs no credential
 }
 ```
 
@@ -738,6 +750,7 @@ interface SerializationInfo {
   contentType?: string; // The media type the value is serialized in: a body's, a `content` parameter's, a whole query's
   encoding?: Record<string, EncodingObject>; // OpenAPI media-type encoding rules
   binary?: boolean; // File part / raw binary body (format: binary)
+  requiredBody?: boolean; // Flattened property of a required body with no required property: an empty body is sent when none is given
 }
 ```
 
@@ -836,7 +849,8 @@ interface ResolvedSecurity {
   clientCertificate?: ClientCertificate;
   requiresSignature?: boolean;
   signatureInfo?: {
-    scheme: string;
+    scheme: string; // The last signature scheme applied
+    schemes?: string[]; // Every signature scheme applied: what signRequest signs when given this result
     algorithm?: string;
   };
 }

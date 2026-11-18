@@ -52,7 +52,20 @@ security:
 
 If every requirement of an operation is dropped, no way to authenticate is known, so the operation makes **no tool**: `generateTools()` leaves it out and records `UNSATISFIABLE_SECURITY`, and `generateTool()` throws a `GenerationError` (context `path`, `method`, `pointer`). A document-level `security` that cannot be satisfied therefore drops every operation that inherits it. The exception is a document that has `security` requirements but defines no schemes at all (no `components.securitySchemes`; for Swagger 2.0, no `securityDefinitions`): its tools are still generated, with empty security, and the validator's `NO_SECURITY_SCHEMES` warning applies. A defined map counts as schemes even when it is empty, or when none of its entries could be converted: a Swagger 2.0 document with `securityDefinitions` always converts to a `components.securitySchemes` (`{}` when nothing converted), so an operation that requires a scheme the conversion could not make (an unknown `type`, or an `oauth2` with an unknown `flow`: `SWAGGER_UNSUPPORTED_SECURITY_SCHEME`) is skipped with `UNSATISFIABLE_SECURITY`, whether or not other schemes exist. An operation that lists another requirement naming a scheme that did convert (`security: [{ weird: [] }, { key: [] }]`) is still generated, with that requirement alone.
 
-Requirements listed as alternatives (`security: [{ a: [] }, { b: [] }]`) are not kept as a choice: every scheme of every requirement object that can be satisfied becomes a requirement of the tool. See [OpenAPI Versions](./openapi-versions.md#diagnostics).
+A scheme the library cannot send drops the requirements that name it the same way, with an `UNSUPPORTED_SECURITY_SCHEME` diagnostic: a `type` that is none of `apiKey`, `http`, `oauth2`, `openIdConnect`, `mutualTLS` (compared exactly: `HTTP` is not `http`), or an `apiKey` scheme whose `in` is none of `query`, `header`, `cookie` or that has no `name`. Its key is never sent in a place the scheme does not name. `validate()` reports such a scheme as an `INVALID_SECURITY_SCHEME` error, with the values of the declared version (Swagger 2.0: `basic`, `apiKey`, `oauth2`, an `apiKey` in `header` or `query`; `mutualTLS` from OpenAPI 3.1). A `mutualTLS` scheme keeps its tool: the HTTP client presents the certificate (`clientCertificate`), so the tool has no input for it, and an `info` diagnostic says so.
+
+A scheme map that is present but not a map (`securitySchemes: null`, an array; Swagger 2.0: `securityDefinitions`) defines no scheme: `validate()` reports it (`INVALID_SECURITY_SCHEME`) and every requirement naming a scheme is unsatisfiable, in every version. Only a document with no scheme map at all keeps generating with empty security.
+
+### Alternatives
+
+Requirements listed as alternatives (`security: [{ a: [] }, { b: [] }]`) mean `a` OR `b`, and the tool keeps the choice:
+
+- `metadata.securityAlternatives` lists each requirement object that can be satisfied, in document order (`[]` for `{}`, no authentication); `metadata.security` still lists all their schemes. It is absent for a single requirement object (schemes required together).
+- Each credential mapper entry has `required: false`, `security.alternatives` (the indexes of the alternatives that need it) and `security.optional: true` when one alternative is empty. With `includeSecurityInInput`, the inputs of a choice are not required.
+- A scheme stays one entry when several alternatives name it. When they ask it for different scopes (`[{ oauth: ['admin'] }, { oauth: ['read'] }]`), `security.alternativeScopes` lists the scopes of each alternative in `security.alternatives`, in the same order; `security.scopes` holds those of the first.
+- `security.clientCertificates` names each `mutualTLS` scheme of the choice, which has no mapper entry, with the alternatives that need it.
+- `SecurityResolver.resolve` applies only the first alternative whose credentials the context holds, and none when it holds none completely, so a host that holds both `a` and `b` sends one. It asks `customResolver` for each alternative's own scopes, and takes an alternative that needs a client certificate only when the context has a `clientCertificate`. `signRequest` signs only the signature entries of that alternative: pass it what `resolve` returned (`signatureInfo.schemes`) and it signs those without asking the context again. `checkMissingSecurity` reports nothing while one alternative can be applied or one is empty, and otherwise the schemes it could not fill, a `mutualTLS` one included when the context has no `clientCertificate`.
+- `buildHttpRequest` sends the credentials of one alternative when the input gives several (`includeSecurityInInput`): the first it gives completely that needs no client certificate. It cannot know whether there is a certificate, so it keeps the credentials of an alternative that needs one. When the input gives no alternative completely, it sends what it gives.
 
 ### Schemes named by URI (OpenAPI 3.2)
 
@@ -125,6 +138,8 @@ const context = createSecurityContext({
 ```
 
 ### API Key (Single)
+
+The single `apiKey` is used only for a tool with one `apiKey` scheme. With several, each needs its own entry in `apiKeys` (below): one key is never sent in another scheme's place, such as a header key in a URL.
 
 ```typescript
 const context = createSecurityContext({
@@ -236,12 +251,15 @@ if (resolved.requiresSignature) {
       headers: resolved.headers,
     },
     context,
+    resolved,
   );
   // Use signedHeaders in your request
 }
 ```
 
-Schemes with names containing `aws4`, `hmac`, `signature`, `hawk`, or `custom-signature` are automatically detected as signature-based.
+An `http` scheme whose name contains `aws4`, `hmac`, `signature`, `hawk`, or `custom-signature` is detected as signature-based. Another type is not, whatever its name: an `apiKey` scheme named `TomahawkKey` is filled like any API key. `checkMissingSecurity` reports a signature-based scheme as missing when the context has no `signatureGenerator`.
+
+`apiKeys` and `customHeaders` are read by own keys only (a scheme named `constructor` finds nothing), and `resolve()` throws a `RequestBuildError` for a header or cookie value that cannot be sent, as `buildHttpRequest` does (a token holding a line break). Spread `resolved.headers` after your other headers, so none of them replaces a credential.
 
 ---
 

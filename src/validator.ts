@@ -3,6 +3,7 @@ import { DIAGNOSTIC_CODES, LEGACY_PATH_KEY_MAX_LENGTH, MAX_DIAGNOSTICS, isPresen
 import {
   analyzeParameters,
   describeContentWithoutSchema,
+  parameterIdentity,
   readParameterContent,
   type ParameterSlot,
 } from './parameter-resolver';
@@ -19,6 +20,7 @@ import {
   diagnosticKey,
   featureNewerThanDeclared,
   getSpecProfile,
+  isDotSegment,
   isSpecObject,
   jsonPointer,
   listOperations,
@@ -27,9 +29,14 @@ import {
   parameterNameNotStringDiagnostic,
   readParameterName,
   readSwagger2BasePath,
+  isHttpToken,
   resolveOperationLayout,
+  securitySchemeProblem,
+  UNSAFE_CHARACTER_CLASS,
   swagger2SkippedOperations,
   wireMethod,
+  withTextName,
+  pathTemplateNames,
   type OperationEntry,
   type OperationLayout,
   type SpecDiagnostic,
@@ -76,16 +83,9 @@ const LOCATION_FEATURES: Readonly<Record<string, SpecFeatureId>> = Object.freeze
 /** Longest method text a message quotes. */
 const METHOD_TEXT_MAX_LENGTH = 64;
 
-/**
- * Characters never put raw into a message (the spec layer's set): C0 and C1
- * controls, DEL, the line and paragraph separators, bidirectional formatting
- * characters, and lone surrogates (a cut can split a pair).
- */
-// Built from a string: a compiler may turn the escape of U+2028 in a regex
-// literal into a raw line separator, which ends the literal
+/** Characters never put raw into a message: the spec layer's set, and lone surrogates (a cut can split a pair). */
 const UNSAFE_MESSAGE_CHARACTERS = new RegExp(
-  '[\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069]' +
-    '|[\\ud800-\\udbff](?![\\udc00-\\udfff])|(?<![\\ud800-\\udbff])[\\udc00-\\udfff]',
+  `[${UNSAFE_CHARACTER_CLASS}]|[\\ud800-\\udbff](?![\\udc00-\\udfff])|(?<![\\ud800-\\udbff])[\\udc00-\\udfff]`,
   'g',
 );
 
@@ -119,7 +119,12 @@ export function operationLabel(method: string, path: string): string {
  * the key as written, unescaped, cut past `LEGACY_PATH_KEY_MAX_LENGTH`.
  */
 function legacyPathBase(path: string): string {
-  return `/paths/${path.length > LEGACY_PATH_KEY_MAX_LENGTH ? `${path.slice(0, LEGACY_PATH_KEY_MAX_LENGTH)}...` : path}`;
+  return `/paths/${legacyKey(path)}`;
+}
+
+/** A document key in a historical path: as written, unescaped, cut past `LEGACY_PATH_KEY_MAX_LENGTH`. */
+function legacyKey(key: string): string {
+  return key.length > LEGACY_PATH_KEY_MAX_LENGTH ? `${key.slice(0, LEGACY_PATH_KEY_MAX_LENGTH)}...` : key;
 }
 
 /** A key of bounded length for a set of document strings (see `diagnosticKey`). */
@@ -155,6 +160,7 @@ class FindingList {
 
 /** What one `validate` call reads and fills. */
 interface ValidationContext {
+  /** The version the document declares. */
   version: SpecVersionInfo;
   /** The declared version's profile; the latest one when the version is not usable. */
   profile: SpecProfile;
@@ -166,8 +172,12 @@ interface ValidationContext {
   componentParameters: unknown;
   /** A local reference to one of them: `#/components/parameters/<name>` (2.0: `#/parameters/<name>`). */
   parameterRef: RegExp;
+  /** The errors found, capped. */
   errors: FindingList;
+  /** The warnings found, capped. */
   warnings: FindingList;
+  /** Each `operationId` seen so far, by its bounded key. */
+  operationIds: Set<string>;
 }
 
 /** `Swagger 2.0`, `OpenAPI 3.1`: the name of a family, for a message. */
@@ -238,17 +248,6 @@ export function skippedOperationDiagnostics(
     });
   }
   return found;
-}
-
-/**
- * `parameter` with a number or boolean `name` replaced by its text (see
- * `readParameterName`), so it is merged and compared as generation reads
- * it; any other value is returned as it is.
- */
-export function withTextName(parameter: unknown): unknown {
-  if (!isSpecObject(parameter)) return parameter;
-  const name = readParameterName(parameter['name']);
-  return name.kind === 'coerced' ? { ...parameter, name: name.name } : parameter;
 }
 
 /** `"limit" (in: "query")`: a parameter in a message, its name and location bounded and escaped. */
@@ -425,6 +424,7 @@ export class Validator {
       parameterRef: swagger ? /^#\/parameters\/(.+)$/ : /^#\/components\/parameters\/(.+)$/,
       errors: new FindingList('errors'),
       warnings: new FindingList('warnings'),
+      operationIds: new Set(),
     };
     const { errors, warnings } = context;
 
@@ -462,6 +462,11 @@ export class Validator {
         });
       }
     }
+
+    this.validateFieldTypes(doc, ROOT_FIELD_TYPES, '', context);
+    this.validateFieldTypes(doc.info, INFO_FIELD_TYPES, '/info', context);
+    this.validateEntries(ownProperty(doc, 'servers'), '/servers', context, SERVER_FIELD_TYPES);
+    this.validateEntries(ownProperty(doc, 'security'), '/security', context);
 
     // Check paths
     if (!doc.paths || Object.keys(doc.paths).length === 0) {
@@ -520,6 +525,17 @@ export class Validator {
         code: 'NO_SECURITY_SCHEMES',
       });
     }
+    const schemesPointer = swagger ? '/securityDefinitions' : '/components/securitySchemes';
+    if (isSpecObject(schemes)) {
+      this.validateSecuritySchemes(schemes, schemesPointer, context);
+    } else if (schemes !== undefined) {
+      // Read as a map that defines no scheme: every requirement naming one is unsatisfiable
+      errors.push({
+        message: `The security schemes must be a map, found ${describeValue(schemes)}`,
+        path: schemesPointer,
+        code: 'INVALID_SECURITY_SCHEME',
+      });
+    }
 
     return {
       valid: errors.items.length === 0,
@@ -528,13 +544,75 @@ export class Validator {
     };
   }
 
+  /** `INVALID_FIELD_TYPE` for each field of `object` that is present with another type than `types` gives it. */
+  private validateFieldTypes(
+    object: unknown,
+    types: Readonly<Record<string, FieldType>>,
+    pointer: string,
+    context: ValidationContext,
+  ): void {
+    for (const [field, type] of Object.entries(types)) {
+      const value = ownProperty(object, field);
+      // A falsy value reads as absent, to generation and to the checks for a missing field
+      if (!value || hasFieldType(value, type)) continue;
+      context.errors.push({
+        message: `${field} must be ${FIELD_TYPE_NAMES[type]}, found ${describeValue(value)}`,
+        path: appendPointer(pointer, field),
+        code: 'INVALID_FIELD_TYPE',
+      });
+    }
+  }
+
+  /**
+   * `INVALID_FIELD_TYPE` for each entry of a list or map that is not an object (a server, a Security Requirement,
+   * a response; a map's extensions hold any value), and for each of its fields `entryTypes` names.
+   */
+  private validateEntries(
+    entries: unknown,
+    pointer: string,
+    context: ValidationContext,
+    entryTypes: Readonly<Record<string, FieldType>> = {},
+  ): void {
+    if (!isSpecObject(entries) && !Array.isArray(entries)) return;
+    for (const [key, entry] of Object.entries(entries)) {
+      if (key.startsWith('x-') && !Array.isArray(entries)) continue;
+      if (!isSpecObject(entry)) {
+        context.errors.push({
+          message: `Each entry must be an object, found ${describeValue(entry)}`,
+          path: appendPointer(pointer, key),
+          code: 'INVALID_FIELD_TYPE',
+        });
+      } else {
+        this.validateFieldTypes(entry, entryTypes, appendPointer(pointer, key), context);
+      }
+    }
+  }
+
+  /**
+   * `INVALID_SECURITY_SCHEME` for a scheme whose `type`, or an `apiKey` scheme whose `in` or `name`, the declared
+   * version does not define (`SpecProfile.securitySchemeTypes`, `apiKeyLocations`), compared exactly: the
+   * generator cannot send such a scheme and drops the requirements naming it.
+   */
+  private validateSecuritySchemes(schemes: Record<string, unknown>, pointer: string, context: ValidationContext): void {
+    for (const [name, scheme] of Object.entries(schemes)) {
+      if (!isSpecObject(scheme) || isReferenceObject(scheme)) continue;
+      const found = securitySchemeProblem(scheme, context.profile);
+      if (found === undefined) continue;
+      context.errors.push({
+        message: `Security scheme ${describeValue(name)} ${found.problem}`,
+        path: appendPointer(pointer, name, found.field),
+        code: 'INVALID_SECURITY_SCHEME',
+      });
+    }
+  }
+
   /**
    * Resolve a local `#/components/parameters/<name>` reference (Swagger 2.0:
    * `#/parameters/<name>`; JSON Pointer tokens decoded). Returns undefined for
    * external or dangling references.
    */
   private resolveParameterRef(param: any, context: ValidationContext): any {
-    if (!param || typeof param !== 'object' || !('$ref' in param)) return param;
+    if (!isReferenceObject(param)) return param;
     const match = context.parameterRef.exec(String(param.$ref));
     if (!match) return undefined;
     const name = match[1].replace(/~1/g, '/').replace(/~0/g, '~');
@@ -582,8 +660,16 @@ export class Validator {
           path: legacyBase,
           code: 'INVALID_PATH_FORMAT',
         });
+      } else {
+        const problem = pathTemplateProblem(path);
+        if (problem !== undefined) {
+          errors.push({ message: `Path ${messageText(path)} ${problem}`, path: legacyBase, code: 'INVALID_PATH_FORMAT' });
+        }
       }
       if (!isSpecObject(pathItem)) continue;
+
+      this.validateFieldTypes(pathItem, PATH_ITEM_FIELD_TYPES, pointer, context);
+      this.validateEntries(pathItem['servers'], appendPointer(pointer, 'servers'), context, SERVER_FIELD_TYPES);
 
       // Operation fields the declared version does not define: not read, reported
       warnings.push(...skippedOperationDiagnostics(pathItem, context.layout, context.version, pointer).map(toFinding));
@@ -597,22 +683,24 @@ export class Validator {
         this.validateParameters(pathLevelParameters, `${legacyBase}/parameters`, pathLevelPointer, context);
       }
       const resolvedPathLevel = pathLevelParameters.map((p: unknown) => withTextName(this.resolveParameterRef(p, context)));
+      const pathLevel = parameterFacts(resolvedPathLevel);
       // A path-level violation is reported once, here, not again for each operation. Swagger 2.0
       // has no `in: querystring` (its body rules are checked per operation instead)
       const pathLevelQuerystringValid =
         context.swagger ||
-        this.validateQuerystringUse(
-          effectiveParameters(resolvedPathLevel, []),
-          pathLevelPointer,
-          `Path ${messageText(path)}`,
-          context,
-        );
+        this.validateQuerystringUse(pathLevel, pathLevelPointer, `Path ${messageText(path)}`, context);
+      // Template expressions the path item does not define, by bounded key; each operation must then define them
+      const templateNames = new Map(
+        pathTemplateNames(path)
+          .map((name): [string, string] => [boundedKey(name), name])
+          .filter(([key]) => !pathLevel.pathNames.has(key)),
+      );
 
       for (const entry of listed.operations) {
-        this.validateOperation(entry, path, pathLevelParameters, resolvedPathLevel, pathLevelQuerystringValid, context);
+        this.validateOperation(entry, path, resolvedPathLevel, pathLevel, templateNames, pathLevelQuerystringValid, context);
       }
 
-      if (listed.operations.length === 0 && !pathItem['$ref']) {
+      if (listed.operations.length === 0 && !isReferenceObject(pathItem)) {
         warnings.push({
           message: `Path has no operations: ${messageText(path)}`,
           path: legacyBase,
@@ -628,8 +716,9 @@ export class Validator {
   private validateOperation(
     entry: OperationEntry,
     path: string,
-    pathLevelParameters: unknown[],
     resolvedPathLevel: unknown[],
+    pathLevel: ParameterFacts,
+    templateNames: ReadonlyMap<string, string>,
     pathLevelQuerystringValid: boolean,
     context: ValidationContext,
   ): void {
@@ -637,9 +726,14 @@ export class Validator {
     const { method, operation } = entry;
     const legacyBase = legacyPathBase(path);
     const basePath =
-      entry.source === 'fixed' ? `${legacyBase}/${method}` : `${legacyBase}/additionalOperations/${method}`;
+      entry.source === 'fixed' ? `${legacyBase}/${method}` : `${legacyBase}/additionalOperations/${legacyKey(method)}`;
     const pointer = operationPointer(path, entry);
     const label = operationLabel(method, path);
+    this.validateFieldTypes(operation, OPERATION_FIELD_TYPES, pointer, context);
+    for (const field of ['servers', 'security', 'responses']) {
+      const entryTypes = field === 'servers' ? SERVER_FIELD_TYPES : {};
+      this.validateEntries(ownProperty(operation, field), appendPointer(pointer, field), context, entryTypes);
+    }
 
     // Check for operationId
     if (!operation.operationId) {
@@ -648,6 +742,18 @@ export class Validator {
         path: `${basePath}/operationId`,
         code: 'NO_OPERATION_ID',
       });
+    }
+    const operationId: unknown = operation.operationId;
+    if (typeof operationId === 'string' && operationId !== '') {
+      const key = boundedKey(operationId);
+      if (context.operationIds.has(key)) {
+        warnings.push({
+          message: `Operation ${label} repeats the operationId ${describeValue(operationId)}, which must be unique; its tool gets a different name, and includeOperations matches every operation using it`,
+          path: appendPointer(pointer, 'operationId'),
+          code: 'DUPLICATE_OPERATION_ID',
+        });
+      }
+      context.operationIds.add(key);
     }
 
     // Check for responses: required in 3.0 only; never empty when present
@@ -678,9 +784,15 @@ export class Validator {
         `Operation ${label}`,
         context,
       );
-    } else if (pathLevelQuerystringValid) {
+    }
+    // Merged with the path item's by counting: the path item's are never listed again for each operation
+    const operationLevel = parameterFacts(resolvedOperationLevel, pathLevel.identities);
+    if (!context.swagger && pathLevelQuerystringValid) {
       this.validateQuerystringUse(
-        effectiveParameters(resolvedPathLevel, resolvedOperationLevel),
+        {
+          querystrings: pathLevel.querystrings + operationLevel.querystrings,
+          queries: pathLevel.queries + operationLevel.queries,
+        },
         appendPointer(pointer, 'parameters'),
         `Operation ${label}`,
         context,
@@ -693,20 +805,11 @@ export class Validator {
     // ref cannot mask a missing path variable; only refs that CANNOT be
     // resolved here (external or dangling) defer the check to the
     // dereferenced validation pass in initialize().
-    const allParameters = [...resolvedPathLevel, ...resolvedOperationLevel];
-    const hasUnresolvableRefs = allParameters.some((p: any) => p === undefined);
-    const pathParams = path.match(/\{([^{}]+)\}/g)?.map((p) => p.slice(1, -1)) ?? [];
-    // Bounded keys: a set of long strings of one length hashes into one bucket
-    const definedPathParams = new Set(
-      allParameters
-        .filter((p: any) => p && p.in === 'path' && typeof p.name === 'string')
-        .map((p: any) => boundedKey(p.name)),
-    );
-
-    for (const param of pathParams) {
-      if (!hasUnresolvableRefs && !definedPathParams.has(boundedKey(param))) {
+    if (pathLevel.unresolvable || operationLevel.unresolvable) return;
+    for (const [key, name] of templateNames) {
+      if (!operationLevel.pathNames.has(key)) {
         errors.push({
-          message: `Path parameter '${messageText(param)}' not defined in parameters: ${label}`,
+          message: `Path parameter '${messageText(name)}' not defined in parameters: ${label}`,
           path: `${basePath}/parameters`,
           code: 'MISSING_PATH_PARAMETER',
         });
@@ -722,13 +825,11 @@ export class Validator {
    * location anyway. Returns whether the list follows them.
    */
   private validateQuerystringUse(
-    parameters: unknown[],
+    { querystrings, queries }: Pick<ParameterFacts, 'querystrings' | 'queries'>,
     pointer: string,
     where: string,
     context: ValidationContext,
   ): boolean {
-    const objects = parameters.filter(isSpecObject);
-    const querystrings = objects.filter((p) => p['in'] === 'querystring').length;
     if (querystrings === 0) return true;
     let valid = true;
     if (querystrings > 1) {
@@ -739,7 +840,7 @@ export class Validator {
       });
       valid = false;
     }
-    if (objects.some((p) => p['in'] === 'query')) {
+    if (queries > 0) {
       context.errors.push({
         message: `${where}: a parameter in: querystring is combined with parameters in: query, but a querystring parameter holds the whole query string`,
         path: pointer,
@@ -842,9 +943,15 @@ export class Validator {
 
       // Reference Objects are opaque until dereferenced (initialize() resolves
       // them before its validation pass) — structural checks don't apply
-      if ('$ref' in param) {
-        continue;
+      if (isReferenceObject(param)) continue;
+      if (param['$ref'] !== undefined) {
+        errors.push({
+          message: `A Reference Object's $ref must be a string, found ${describeValue(param['$ref'])}`,
+          path: appendPointer(pointer, i, '$ref'),
+          code: 'INVALID_PARAMETER',
+        });
       }
+      this.validateFieldTypes(param, PARAMETER_FIELD_TYPES, appendPointer(pointer, i), context);
 
       // A number or boolean name (an unquoted YAML `2024`) is read as its text, with a warning;
       // `String()` is never applied to an object, whose text can throw and is no name to send
@@ -868,6 +975,15 @@ export class Validator {
       }
 
       const location = param['in'];
+      // A header or cookie name is sent as written: an HTTP token (RFC 9110, RFC 6265 cookie-name)
+      const sentAsWritten = location === 'header' || location === 'cookie';
+      if (sentAsWritten && nameRead.kind !== 'invalid' && !isHttpToken(nameRead.name)) {
+        errors.push({
+          message: `A ${location} parameter name must be an HTTP token, found ${describeValue(nameRead.name)}`,
+          path: appendPointer(pointer, i, 'name'),
+          code: 'INVALID_PARAMETER_NAME',
+        });
+      }
       if (!location) {
         errors.push({
           message: 'Parameter missing "in" field',
@@ -946,6 +1062,56 @@ export class Validator {
   }
 }
 
+/** Why a path key starting with `/` is no path template a URL keeps as written, or `undefined` */
+function pathTemplateProblem(path: string): string | undefined {
+  if (path.includes('\\')) return 'holds a backslash, which URL parsers read as a slash';
+  const segments = path.split('/');
+  if (segments.slice(1, -1).some((segment) => segment === '')) return 'has an empty segment (`//`)';
+  if (segments.some(isDotSegment)) {
+    return 'has a `.` or `..` segment, which URL parsers resolve to another path';
+  }
+  if (!/^(?:[^{}]|\{[^{}]+\})*$/.test(path)) return 'has a `{` or `}` that is not part of a `{name}` template expression';
+  return undefined;
+}
+
+/** The JSON type a field must have, as the official schemas require and generation reads it */
+type FieldType = 'array' | 'object' | 'string' | 'boolean' | 'schema';
+
+const FIELD_TYPE_NAMES: Readonly<Record<FieldType, string>> = {
+  array: 'an array',
+  object: 'an object',
+  string: 'a string',
+  boolean: 'a boolean',
+  schema: 'a Schema Object or a boolean',
+};
+
+function hasFieldType(value: unknown, type: FieldType): boolean {
+  if (type === 'array') return Array.isArray(value);
+  if (type === 'object') return isSpecObject(value);
+  if (type === 'schema') return typeof value === 'boolean' || isSpecObject(value);
+  return typeof value === type;
+}
+
+const ROOT_FIELD_TYPES = { servers: 'array', security: 'array' } as const;
+const SERVER_FIELD_TYPES = { url: 'string' } as const;
+const INFO_FIELD_TYPES = { title: 'string', version: 'string' } as const;
+const PATH_ITEM_FIELD_TYPES = { parameters: 'array', servers: 'array' } as const;
+const OPERATION_FIELD_TYPES = {
+  operationId: 'string',
+  parameters: 'array',
+  servers: 'array',
+  security: 'array',
+  responses: 'object',
+  deprecated: 'boolean',
+} as const;
+// `content` has its own warning, `INVALID_PARAMETER_CONTENT`
+const PARAMETER_FIELD_TYPES = {
+  required: 'boolean',
+  description: 'string',
+  deprecated: 'boolean',
+  schema: 'schema',
+} as const;
+
 /**
  * An operation's parameters merged with its path item's as generation merges
  * them (`analyzeParameters`): an operation-level parameter replaces the
@@ -955,4 +1121,43 @@ export class Validator {
  */
 function effectiveParameters(pathLevel: unknown[], operationLevel: unknown[]): unknown[] {
   return analyzeParameters(pathLevel, operationLevel).effective.map((slot) => slot.parameter);
+}
+
+/**
+ * What the querystring and path template rules read from one parameter list, merged within itself. An
+ * operation's list is merged with its path item's by counting (`replaced`), never by listing both again.
+ */
+interface ParameterFacts {
+  /** The identity (`name` and `in`) of each parameter that has one */
+  identities: Set<string>;
+  /** How many are `in: querystring`, not counting one that replaces a parameter of `replaced` */
+  querystrings: number;
+  /** How many are `in: query`, counted the same way */
+  queries: number;
+  /** The bounded keys of the names of the `in: path` parameters */
+  pathNames: Set<string>;
+  /** Whether one is a reference the validator cannot resolve */
+  unresolvable: boolean;
+}
+
+function parameterFacts(parameters: unknown[], replaced: ReadonlySet<string> = new Set()): ParameterFacts {
+  const facts: ParameterFacts = {
+    identities: new Set(),
+    querystrings: 0,
+    queries: 0,
+    pathNames: new Set(),
+    unresolvable: false,
+  };
+  for (const parameter of effectiveParameters(parameters, [])) {
+    if (parameter === undefined) facts.unresolvable = true;
+    if (!isSpecObject(parameter)) continue;
+    const identity = parameterIdentity(parameter);
+    if (identity === undefined) continue;
+    facts.identities.add(identity);
+    if (replaced.has(identity)) continue;
+    if (parameter['in'] === 'querystring') facts.querystrings++;
+    if (parameter['in'] === 'query') facts.queries++;
+    if (parameter['in'] === 'path') facts.pathNames.add(boundedKey(parameter['name']));
+  }
+  return facts;
 }

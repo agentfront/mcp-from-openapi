@@ -2,6 +2,8 @@ import type { JSONSchema } from 'zod/v4/core';
 import { SchemaError } from './errors';
 import { chargeBudget, copyJsonValue, mapSlots, type CopyBudget } from './json-copy';
 import { isExtensionKey, referenceAt } from './reference-sites';
+import { setOwnProperty } from './spec';
+import { DEFINITION_KEYWORDS, keepAccepting } from './types';
 
 /** JSON Schema type from Zod v4 */
 type JsonSchema = JSONSchema.JSONSchema;
@@ -28,6 +30,9 @@ export interface TruncateDepthOptions {
  */
 export const DEFAULT_MAX_SCHEMA_NODES = 25_000;
 
+/** The `maxTotalSchemaNodes` of a generator loaded with `secureDefaults: true` */
+export const SECURE_MAX_TOTAL_SCHEMA_NODES = 10_000_000;
+
 /**
  * Guard a depth bound: NaN/Infinity would disable truncation (`depth >= NaN`
  * is always false) and hang on circular graphs; fractional depths floor.
@@ -51,12 +56,25 @@ export function resolveSchemaLimits(options: { maxSchemaDepth?: number; maxSchem
   return {
     maxDepth: normalizeDepthBound(Math.max(1, options.maxSchemaDepth ?? 10)),
     maxNodes:
-      nodes === undefined || Number.isNaN(nodes)
+      typeof nodes !== 'number' || Number.isNaN(nodes)
         ? DEFAULT_MAX_SCHEMA_NODES
         : nodes === Infinity
           ? Infinity
           : Math.max(1, Math.floor(nodes)),
   };
+}
+
+/** `value` when it is a positive number, else `fallback` */
+export function positiveOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && value > 0 ? value : fallback;
+}
+
+/** The `maxTotalSchemaNodes` of a run: the option, else the `secureDefaults` value or no limit */
+export function resolveMaxTotalSchemaNodes(maxTotalSchemaNodes: unknown, secureDefaults: boolean): number {
+  return positiveOr(
+    maxTotalSchemaNodes,
+    maxTotalSchemaNodes === undefined && secureDefaults ? SECURE_MAX_TOTAL_SCHEMA_NODES : Infinity,
+  );
 }
 
 /** Whether `error` is a node-budget failure (`maxSchemaNodes`), which a smaller depth may avoid */
@@ -101,6 +119,26 @@ export function fitSchemaDepth<T>(
 function isObject(value: unknown): value is object {
   return value !== null && typeof value === 'object';
 }
+
+/** Whether a node of the value graph `root` satisfies `test`; each object is looked at once, with its own stack */
+function holdsNode(root: unknown, test: (node: Record<string, unknown>) => boolean): boolean {
+  const pending = [root];
+  const seen = new Set<object>();
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!isObject(node) || seen.has(node)) continue;
+    seen.add(node);
+    if (test(node as Record<string, unknown>)) return true;
+    for (const value of Object.values(node)) pending.push(value);
+  }
+  return false;
+}
+
+/** Keywords that refuse what a removed `properties` or `prefixItems` allowed, when `false` */
+const CLOSING_KEYWORDS = ['additionalProperties', 'unevaluatedProperties', 'items', 'unevaluatedItems'] as const;
+
+/** Keywords whose subschema a value must not match (`not`) or only selects a branch (`if`) */
+const NEGATED_OR_CONDITIONAL_KEYWORDS: ReadonlySet<string> = new Set(['not', 'if']);
 
 /**
  * Helper class for building and manipulating JSON schemas
@@ -462,7 +500,7 @@ export class SchemaBuilder {
         );
       },
     };
-    return this.truncateDepthRecursive(schema, 0, normalizeDepthBound(maxDepth), budget);
+    return this.truncateDepthRecursive(schema, 0, normalizeDepthBound(maxDepth), budget, new WeakSet());
   }
 
   /** Keys whose value is a map of schemas (JSON Schema 2020-12) */
@@ -503,12 +541,15 @@ export class SchemaBuilder {
   // shared subschemas come out as independent copies. Because the walk is
   // depth-bounded it terminates even on circular schema graphs (which
   // `clone()`'s JSON round-trip would reject), and its work is bounded by the
-  // size of the tree it returns — which `budget.maxNodes` caps.
+  // size of the tree it returns — which `budget.maxNodes` caps. `loosened`
+  // holds the copies that accept more than their node: a cut that removed a
+  // constraint, and a copy holding one (`keepAccepting`).
   private static truncateDepthRecursive(
     node: JsonSchema,
     depth: number,
     maxDepth: number,
     budget: CopyBudget,
+    loosened: WeakSet<object>,
   ): JsonSchema {
     if (!node || typeof node !== 'object') {
       // A boolean schema (`properties: { a: true }`) is one value
@@ -525,17 +566,24 @@ export class SchemaBuilder {
     const copyRecord = copy as Record<string, unknown>;
     const kinds = this.TRUNCATE_KEY_KINDS;
 
+    // Whether a removed keyword allowed something a closing keyword would then refuse: not an empty map or list
+    let opened = false;
+    // Whether the cut removed `required`, which accepts more too
+    let requiredRemoved = false;
     if (depth >= maxDepth) {
       let stripped = false;
       for (const key of Object.keys(copyRecord)) {
-        if (kinds.has(key) && isObject(copyRecord[key])) {
-          delete copyRecord[key];
-          stripped = true;
-        }
+        const value = copyRecord[key];
+        if (!kinds.has(key) || !isObject(value)) continue;
+        delete copyRecord[key];
+        stripped = true;
+        opened ||= !DEFINITION_KEYWORDS.has(key) && (kinds.get(key) === 'schema' || Object.keys(value).length > 0);
       }
       if (stripped) {
-        // `required` refers to stripped properties; drop it alongside them
+        // `required` refers to stripped properties, and a closing keyword would refuse what they allowed
+        requiredRemoved = copyRecord['required'] !== undefined;
         delete copyRecord['required'];
+        if (opened) for (const key of CLOSING_KEYWORDS) if (copyRecord[key] === false) delete copyRecord[key];
         const note = '[Truncated: nested schema exceeds maxSchemaDepth]';
         copy.description = copy.description ? `${copy.description} ${note}` : note;
       }
@@ -565,15 +613,15 @@ export class SchemaBuilder {
         chargeBudget(budget);
         const mapped: Record<string, JsonSchema> = {};
         for (const [name, sub] of Object.entries(value as Record<string, JsonSchema>)) {
-          mapped[name] = this.truncateDepthRecursive(sub, childDepth, maxDepth, budget);
+          setOwnProperty(mapped, name, this.truncateDepthRecursive(sub, childDepth, maxDepth, budget, loosened));
         }
         copyRecord[key] = mapped;
       } else if (kind === 'schema' && !Array.isArray(value)) {
-        copyRecord[key] = this.truncateDepthRecursive(value as JsonSchema, childDepth, maxDepth, budget);
+        copyRecord[key] = this.truncateDepthRecursive(value as JsonSchema, childDepth, maxDepth, budget, loosened);
       } else if (kind === 'schema' || (kind === 'list' && Array.isArray(value))) {
         // A list of schemas — or `items` as a tuple array (pre-2020-12 style)
         copyRecord[key] = mapSlots(value as JsonSchema[], budget, (member) =>
-          this.truncateDepthRecursive(member, childDepth, maxDepth, budget),
+          this.truncateDepthRecursive(member, childDepth, maxDepth, budget, loosened),
         );
       } else {
         // Any other object value (`default`, `examples`, `enum`, `x-*`, ...)
@@ -586,15 +634,19 @@ export class SchemaBuilder {
         });
       }
     }
+    const isLoosened = (value: unknown): boolean => loosened.has(value as object);
+    if (opened || requiredRemoved || keepAccepting(copyRecord, isLoosened)) loosened.add(copy);
     return copy;
   }
 
   // Copy-on-walk over every structural keyword (same key groups as
   // truncateDepth): `visit` transforms each node top-down and must return a
-  // new node when it changes anything.
+  // new node when it changes anything. The subschema of a `kept` keyword (of
+  // TRUNCATE_SCHEMA_KEYS) is left as it is.
   private static walkCopy(
     node: JsonSchema,
     visit: (node: JsonSchema) => JsonSchema,
+    kept: ReadonlySet<string> = new Set(),
     seen = new Map<JsonSchema, JsonSchema>(),
   ): JsonSchema {
     /* c8 ignore next -- guard for boolean/degenerate schemas in recursive traversal */
@@ -612,23 +664,24 @@ export class SchemaBuilder {
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
         const mapped: Record<string, JsonSchema> = {};
         for (const [name, sub] of Object.entries(value as Record<string, JsonSchema>)) {
-          mapped[name] = this.walkCopy(sub, visit, seen);
+          setOwnProperty(mapped, name, this.walkCopy(sub, visit, kept, seen));
         }
         copy[key] = mapped;
       }
     }
     for (const key of this.TRUNCATE_SCHEMA_KEYS) {
+      if (kept.has(key)) continue;
       const value = copy[key];
       if (Array.isArray(value)) {
-        copy[key] = value.map((item) => this.walkCopy(item as JsonSchema, visit, seen));
+        copy[key] = value.map((item) => this.walkCopy(item as JsonSchema, visit, kept, seen));
       } else if (value !== null && typeof value === 'object') {
-        copy[key] = this.walkCopy(value as JsonSchema, visit, seen);
+        copy[key] = this.walkCopy(value as JsonSchema, visit, kept, seen);
       }
     }
     for (const key of this.TRUNCATE_LIST_KEYS) {
       const value = copy[key];
       if (Array.isArray(value)) {
-        copy[key] = value.map((member) => this.walkCopy(member as JsonSchema, visit, seen));
+        copy[key] = value.map((member) => this.walkCopy(member as JsonSchema, visit, kept, seen));
       }
     }
 
@@ -663,8 +716,40 @@ export class SchemaBuilder {
         }
       }
       next.description = node.description ? `${node.description} ${note}` : note;
+      // The omitted properties stay allowed
+      if (next.additionalProperties === false) delete next.additionalProperties;
+      if (next.unevaluatedProperties === false) delete next.unevaluatedProperties;
       return next;
     });
+  }
+
+  /**
+   * `schema` without the properties whose own schema says `keyword: true`, at
+   * every depth, and without their `required` entries: `readOnly` ones in a
+   * request, `writeOnly` ones in a response (OpenAPI Schema Object). Comes
+   * back unchanged, not copied, when no property is marked. A `not` or `if`
+   * subschema is left as it is: leaving a property out of it would change
+   * which values the schema accepts the other way.
+   */
+  static omitMarkedProperties(schema: JsonSchema, keyword: 'readOnly' | 'writeOnly'): JsonSchema {
+    const isMarked = (property: unknown): boolean => isObject(property) && (property as Record<string, unknown>)[keyword] === true;
+    if (!holdsNode(schema, (node) => isObject(node['properties']) && Object.values(node['properties']).some(isMarked))) {
+      return schema;
+    }
+    const omitMarked = (node: JsonSchema): JsonSchema => {
+      const properties = node.properties;
+      if (!isObject(properties) || !Object.values(properties).some(isMarked)) return node;
+      const omitted = new Set(Object.keys(properties).filter((name) => isMarked((properties as Record<string, unknown>)[name])));
+      const next: JsonSchema = {
+        ...node,
+        properties: Object.fromEntries(Object.entries(properties).filter(([name]) => !omitted.has(name))),
+      };
+      const required = Array.isArray(node.required) ? node.required.filter((name) => !omitted.has(String(name))) : [];
+      if (required.length > 0) next.required = required;
+      else delete next.required;
+      return next;
+    };
+    return this.walkCopy(schema, omitMarked, NEGATED_OR_CONDITIONAL_KEYWORDS);
   }
 
   /**

@@ -9,7 +9,13 @@
  * schemas and mapper so an executor needs no second spec pass. This library
  * never fetches source URLs, performs HTTP, or evaluates expressions.
  */
-import { OpenAPIToolGenerator, fnv1aHex, normalizeToolName } from './generator';
+import {
+  MAX_NAME_DEDUP_ATTEMPTS,
+  OpenAPIToolGenerator,
+  dedupedToolName,
+  maxToolNameLength,
+  normalizeToolName,
+} from './generator';
 import { ArazzoError, SchemaError } from './errors';
 import { collectPayloadExpressions, parseExpressionValue, parseRuntimeExpression } from './arazzo-expressions';
 import { inferAnnotationsFromMethod } from './annotations';
@@ -27,12 +33,14 @@ import {
   listOperations,
   ownProperty,
   resolveOperationLayout,
+  setOwnProperty,
   toStandardMethod,
   wireMethod,
   type SpecDiagnostic,
 } from './spec';
 import { fragmentPointerTokens } from './base-uri';
-import * as yaml from 'yaml';
+import { assertBoundedExpansion } from './json-copy';
+import { parseYamlText } from './yaml-document';
 import type {
   GenerateOptions,
   HTTPMethod,
@@ -166,6 +174,7 @@ function err(message: string, path: string, extra?: Record<string, unknown>): ne
  */
 function toPlainJson(value: unknown): unknown {
   try {
+    assertBoundedExpansion(value);
     return JSON.parse(JSON.stringify(value));
   } catch (error: unknown) {
     /* c8 ignore next -- JSON.stringify only throws Error instances */
@@ -180,7 +189,7 @@ function parseArazzoInput(input: ArazzoDocument | string): ArazzoDocument {
   if (typeof input === 'string') {
     let parsed: unknown;
     try {
-      parsed = yaml.parse(input);
+      parsed = parseYamlText(input);
     } catch (error: unknown) {
       /* c8 ignore next -- yaml only throws Error instances */
       const message = error instanceof Error ? error.message : String(error);
@@ -467,9 +476,15 @@ function resolveReusable<T>(
 }
 
 /** Resolve `#/components/inputs/...` $refs inside a workflow inputs schema. */
-function resolveInputRefs(node: unknown, components: ArazzoComponents | undefined, path: string, seen: Set<string>): unknown {
+function resolveInputRefs(
+  node: unknown,
+  components: ArazzoComponents | undefined,
+  path: string,
+  seen: Set<string>,
+  resolved: Map<string, unknown>,
+): unknown {
   if (Array.isArray(node)) {
-    return node.map((item) => resolveInputRefs(item, components, path, seen));
+    return node.map((item) => resolveInputRefs(item, components, path, seen, resolved));
   }
   if (!node || typeof node !== 'object') {
     return node;
@@ -482,6 +497,8 @@ function resolveInputRefs(node: unknown, components: ArazzoComponents | undefine
       err(`Unsupported $ref "${ref}" in workflow inputs (only ${prefix}<name> is resolvable)`, path);
     }
     const name = ref.slice(prefix.length);
+    // Each input is resolved once and shared: a chain that references the previous input twice stays linear
+    if (resolved.has(name)) return resolved.get(name);
     const target = ownComponent(components?.inputs, name);
     if (!target) {
       err(`Unknown workflow inputs reference "${ref}"`, path);
@@ -490,13 +507,14 @@ function resolveInputRefs(node: unknown, components: ArazzoComponents | undefine
       err(`Cyclic workflow inputs reference "${ref}"`, path);
     }
     seen.add(name);
-    const resolved = resolveInputRefs(target, components, path, seen);
+    const value = resolveInputRefs(target, components, path, seen, resolved);
     seen.delete(name);
-    return resolved;
+    resolved.set(name, value);
+    return value;
   }
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
-    out[key] = resolveInputRefs(value, components, path, seen);
+    out[key] = resolveInputRefs(value, components, path, seen, resolved);
   }
   return out;
 }
@@ -851,7 +869,7 @@ function parseOutputs(outputs: Record<string, string> | undefined, path: string)
   if (!outputs) return undefined;
   const parsed: Record<string, RuntimeExpressionAST> = {};
   for (const [name, expression] of Object.entries(outputs)) {
-    parsed[name] = parseRuntimeExpression(expression, `${path}/${name}`);
+    setOwnProperty(parsed, name, parseRuntimeExpression(expression, `${path}/${name}`));
   }
   return parsed;
 }
@@ -1005,10 +1023,10 @@ function walkPointer(schema: unknown, pointer: string | undefined): unknown {
   return node;
 }
 
-/** Prefer the first status variant of a ResponseBuilder `oneOf` union. */
+/** Prefer the first status variant of a ResponseBuilder `anyOf` union. */
 function primaryResponseSchema(outputSchema: unknown): unknown {
-  if (isRecord(outputSchema) && Array.isArray(outputSchema['oneOf'])) {
-    const variants = outputSchema['oneOf'] as unknown[];
+  if (isRecord(outputSchema) && Array.isArray(outputSchema['anyOf'])) {
+    const variants = outputSchema['anyOf'] as unknown[];
     if (variants.length > 0 && variants.every((v) => isRecord(v) && v['x-status-code'] !== undefined)) {
       return variants[0];
     }
@@ -1078,11 +1096,9 @@ function deriveOutputsSchema(
   const stepMap = new Map(steps.map((s) => [s.stepId, s]));
   const properties: Record<string, JsonSchema> = {};
   for (const [name, ast] of Object.entries(outputs)) {
+    // Shared with the step schemas of the IR: the tool gets the fresh, budgeted tree `truncateDepth` makes of it
     const derived = deriveOutputSchema(ast, stepMap, inputSchema, 0);
-    // Deep-copy so the tool's output schema never aliases the embedded step
-    // schemas inside the IR (mutating one view must not corrupt the other)
-    const copied = JSON.parse(JSON.stringify(derived)) as JsonSchema;
-    properties[name] = { ...copied, description: `Arazzo output: ${ast.raw}` };
+    setOwnProperty(properties, name, { ...derived, description: `Arazzo output: ${ast.raw}` });
   }
   // No `required`: outputs exist only after successful execution
   return { type: 'object', properties };
@@ -1177,7 +1193,7 @@ function buildWorkflowTool(
   // kept once it fits the budget
   const resolvedInputs =
     workflow.inputs !== undefined
-      ? resolveInputRefs(workflow.inputs, ctx.doc.components, `${wPath}/inputs`, new Set())
+      ? resolveInputRefs(workflow.inputs, ctx.doc.components, `${wPath}/inputs`, new Set(), new Map())
       : undefined;
   let inputsAtMaxDepth: JsonSchema | undefined;
   const convertInputs = (depth: number): JsonSchema => {
@@ -1189,9 +1205,13 @@ function buildWorkflowTool(
   let inputSchema: JsonSchema;
   let rawInputSchema: JsonSchema | undefined;
   if (resolvedInputs !== undefined) {
+    // The IR keeps the inputs before formats, as a tree within the budget too: a conversion shares nodes
     const input = fit('input schema', `${wPath}/inputs`, (depth) => {
       const raw = convertInputs(depth);
-      return { raw, truncated: SchemaBuilder.truncateDepth(resolveFormats(raw, options), depth, { maxNodes }) };
+      return {
+        raw: SchemaBuilder.truncateDepth(raw, depth, { maxNodes }),
+        truncated: SchemaBuilder.truncateDepth(resolveFormats(raw, options), depth, { maxNodes }),
+      };
     });
     rawInputSchema = input.raw;
     inputSchema = shapeSchema(input.truncated, options, true);
@@ -1210,7 +1230,8 @@ function buildWorkflowTool(
   });
   const outputSchema = output && shapeSchema(output, options, false);
 
-  const name = normalizeToolName(workflow.workflowId, options.maxToolNameLength ?? 64, workflow.workflowId);
+  const maxLength = maxToolNameLength(options.maxToolNameLength);
+  const name = normalizeToolName(workflow.workflowId, maxLength, workflow.workflowId);
   const description =
     workflow.summary && workflow.description
       ? `${workflow.summary}\n\n${workflow.description}`
@@ -1379,13 +1400,14 @@ export async function fromArazzo(document: ArazzoDocument | string, options: Fro
     // Distinct workflowIds can still normalize to the same name (`_flow` and
     // `flow` both become `flow`) — dedupe with the generator's hash pattern.
     if (usedNames.has(tool.name)) {
-      const maxLength = ctx.generateOptions.maxToolNameLength ?? 64;
-      let seed = workflow.workflowId;
-      let deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
-      /* c8 ignore next 4 -- reachable only via an fnv1a hash collision between distinct ids */
-      while (usedNames.has(deduped)) {
-        seed += '#';
-        deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
+      const maxLength = maxToolNameLength(ctx.generateOptions.maxToolNameLength);
+      const deduped = dedupedToolName(tool.name, workflow.workflowId, maxLength, usedNames);
+      if (deduped === undefined) {
+        err(
+          `Unable to find a unique tool name for "${tool.name}" within ${MAX_NAME_DEDUP_ATTEMPTS} attempts: the name ` +
+            `space under maxToolNameLength=${maxLength} is exhausted`,
+          wPath,
+        );
       }
       tool = { ...tool, name: deduped };
     }

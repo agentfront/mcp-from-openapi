@@ -287,7 +287,7 @@ describe('emitToolTypeScript assembly', () => {
 
   it('annotates root output status variants from x-status-code', () => {
     const { declaration } = emitToolTypeScript('t', undefined, { type: 'object', properties: {} } as JsonSchema, {
-      oneOf: [
+      anyOf: [
         { type: 'object', properties: { ok: { type: 'boolean' } }, 'x-status-code': 200, 'x-content-type': 'application/json' },
         { type: 'object', properties: { error: { type: 'string' } }, 'x-status-code': '404' },
         { type: 'string' },
@@ -299,6 +299,19 @@ describe('emitToolTypeScript assembly', () => {
     expect(declaration).toContain('  | /** status 404 */ {');
     expect(declaration).toContain('  | string');
     expect(declaration).toContain('  | unknown');
+  });
+
+  it('declares never for an output that accepts nothing, whatever its status variants', () => {
+    const output = {
+      not: {},
+      anyOf: [
+        { type: 'string', 'x-status-code': 200 },
+        { type: 'number', 'x-status-code': 404 },
+      ],
+    } as JsonSchema;
+    const { signature, declaration } = emitToolTypeScript('t', undefined, { type: 'object', properties: {} } as JsonSchema, output);
+    expect(signature).toContain('Promise<never>');
+    expect(declaration).toContain('type TOutput = never;');
   });
 
   it('falls back to a plain union for root oneOf without status codes', () => {
@@ -346,7 +359,7 @@ describe('emitToolTypeScript assembly', () => {
 
   it('escapes comment-breaking content types and statuses in variant comments', () => {
     const { declaration } = emitToolTypeScript('t', undefined, { type: 'object', properties: {} } as JsonSchema, {
-      oneOf: [
+      anyOf: [
         { type: 'string', 'x-status-code': 200, 'x-content-type': '*/*' },
         { type: 'number', 'x-status-code': 500 },
       ],

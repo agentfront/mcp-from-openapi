@@ -11,7 +11,7 @@ import {
   decodeIpv4MappedIpv6,
   normalizeSsrfOptions,
   normalizeHostname,
-  hostListIncludes,
+  blockListIncludes,
   defaultLookup,
   makePinnedLookup,
   pickHttpModule,
@@ -200,7 +200,7 @@ describe('ssrf: isBlockedHostname', () => {
   });
 });
 
-describe('ssrf: normalizeHostname / hostListIncludes', () => {
+describe('ssrf: normalizeHostname / blockListIncludes', () => {
   it.each([
     ['Example.COM', 'example.com'],
     ['example.com.', 'example.com'],
@@ -215,11 +215,11 @@ describe('ssrf: normalizeHostname / hostListIncludes', () => {
   });
 
   it('compares the hostname and every entry in normalized form', () => {
-    expect(hostListIncludes(['API.Example.com.'], 'api.example.com')).toBe(true);
-    expect(hostListIncludes(['api.example.com'], 'api.example.com.')).toBe(true);
-    expect(hostListIncludes(['::1'], '[::1]')).toBe(true);
-    expect(hostListIncludes(['api.example.com'], 'api.example.org')).toBe(false);
-    expect(hostListIncludes([], 'api.example.com')).toBe(false);
+    expect(blockListIncludes(['API.Example.com.'], 'api.example.com')).toBe(true);
+    expect(blockListIncludes(['api.example.com'], 'api.example.com.')).toBe(true);
+    expect(blockListIncludes(['::1'], '[::1]')).toBe(true);
+    expect(blockListIncludes(['api.example.com'], 'api.example.org')).toBe(false);
+    expect(blockListIncludes([], 'api.example.com')).toBe(false);
   });
 });
 
@@ -348,7 +348,9 @@ describe('ssrf: assertUrlSafe', () => {
 
   it('rejects DNS names that resolve to a NAT64 address embedding an internal IPv4', async () => {
     const lookup = lookupTo('64:ff9b::a00:5');
-    await expect(assertUrlSafe('https://nat64.attacker.example/x', OPEN, lookup)).rejects.toThrow(/64:ff9b::a00:5/);
+    await expect(assertUrlSafe('https://nat64.attacker.example/x', OPEN, lookup)).rejects.toThrow(
+      'Host "nat64.attacker.example" resolves to a blocked internal address',
+    );
   });
 
   it('fails CLOSED when the resolver errors (no silent fail-open)', async () => {

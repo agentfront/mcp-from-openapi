@@ -23,16 +23,19 @@ permissions:
 jobs:
   create:
     runs-on: ubuntu-latest
-    environment: release
+    # Its own environment: `release` deploys only from release/X.Y.x branches, and this job runs from main
+    environment: release-branch
+    # Inputs reach the shell as variables, never as script text; the first step validates them
+    env:
+      MAJOR: ${{ inputs.major_version }}
+      MINOR: ${{ inputs.minor_version }}
+      BASE_BRANCH: ${{ inputs.base_branch }}
 
     steps:
       - name: Validate inputs
         shell: bash
         run: |
           set -euo pipefail
-
-          MAJOR="${{ inputs.major_version }}"
-          MINOR="${{ inputs.minor_version }}"
 
           # Validate major version is a number
           if ! [[ "$MAJOR" =~ ^[0-9]+$ ]]; then
@@ -46,18 +49,26 @@ jobs:
             exit 1
           fi
 
+          # The base branch selects the code this job runs with a write token
+          if ! [[ "$BASE_BRANCH" =~ ^(main|release/[0-9]+\.[0-9]+\.x)$ ]]; then
+            echo "::error::Base branch must be main or a release/X.Y.x branch. Got: $BASE_BRANCH"
+            exit 1
+          fi
+
           echo "Creating release branch for version $MAJOR.$MINOR.x"
 
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ inputs.base_branch }}
 
+      # Node only: the job bumps a version and writes a changelog header, no dependency runs with its token
       - name: Setup Node + Yarn
         uses: ./.github/actions/setup-node-yarn
         with:
           node-version-file: ".nvmrc"
+          install: "false"
 
       - name: Configure git user
         run: |
@@ -70,8 +81,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          MAJOR="${{ inputs.major_version }}"
-          MINOR="${{ inputs.minor_version }}"
           BRANCH_NAME="release/${MAJOR}.${MINOR}.x"
 
           # Check if branch exists on remote
@@ -88,8 +97,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          MAJOR="${{ inputs.major_version }}"
-          MINOR="${{ inputs.minor_version }}"
           INITIAL_VERSION="${MAJOR}.${MINOR}.0"
 
           echo "initial_version=$INITIAL_VERSION" >> "$GITHUB_OUTPUT"
@@ -102,7 +109,6 @@ jobs:
           set -euo pipefail
 
           BRANCH_NAME="${{ steps.check_branch.outputs.branch_name }}"
-          BASE_BRANCH="${{ inputs.base_branch }}"
 
           git fetch origin "$BASE_BRANCH" --tags
           git switch -c "$BRANCH_NAME" "origin/$BASE_BRANCH"
@@ -150,7 +156,7 @@ jobs:
           BRANCH_NAME="${{ steps.check_branch.outputs.branch_name }}"
 
           if [ -n "$(git status --porcelain)" ]; then
-            git add -A
+            git add package.json CHANGELOG.md
             git commit -m "chore(release): initialize $BRANCH_NAME at v$INITIAL_VERSION" \
               -m "- Set package version to $INITIAL_VERSION"
             echo "Created initialization commit"
@@ -175,10 +181,10 @@ jobs:
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| **Branch** | \`${{ steps.check_branch.outputs.branch_name }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Initial Version** | \`${{ steps.version.outputs.initial_version }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Base Branch** | \`${{ inputs.base_branch }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Base Branch** | \`$BASE_BRANCH\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "1. Create PRs targeting \`${{ steps.check_branch.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "2. When ready to publish, run the **Publish Release** workflow from this branch" >> $GITHUB_STEP_SUMMARY
+          echo "2. When ready to publish, run the **Prepare Release** workflow from this branch, then review and merge its pull request" >> $GITHUB_STEP_SUMMARY
           echo "3. Subsequent releases from this branch will increment: ${{ steps.version.outputs.initial_version }} -> x.y.1 -> x.y.2 ..." >> $GITHUB_STEP_SUMMARY

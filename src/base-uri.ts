@@ -99,7 +99,7 @@ export interface DocumentBase {
 }
 
 /** `%7e` becomes `~` (unreserved, RFC 3986 section 6.2.2.2) and `%2f` becomes `%2F` (section 6.2.2.1). */
-function normalizeEscapes(text: string): string {
+export function normalizeEscapes(text: string): string {
   return text.replace(/%[0-9A-Fa-f]{2}/g, (escape) => {
     const character = String.fromCharCode(parseInt(escape.slice(1), 16));
     return /^[A-Za-z0-9\-._~]$/.test(character) ? character : escape.toUpperCase();
@@ -179,7 +179,8 @@ const SEGMENT_WITH_USER_INFO = /(^|[\\/])((?:https?|wss?|ftp|file):[\\/]*)[^\\/?
  *   `https://u:p@h`);
  * - the authority starts after a special scheme (`http`, `https`, `ws`,
  *   `wss`, `ftp`, `file`, any case) and any slashes or backslashes, after
- *   another scheme followed by `//`, or after a leading `//`; everything in
+ *   another scheme followed by `//`, or after two leading slashes or
+ *   backslashes in any mix (`//`, `\\`, `/\`); everything in
  *   it up to its last `@` goes;
  * - anywhere in the text, a path segment starting with a special scheme and
  *   holding an `@` before the next `/`, `\`, `?` or `#` is redacted the same
@@ -197,13 +198,20 @@ export function redactUserInfo(text: string): string {
 
 /**
  * The user information `redactUserInfo` removes from `text`, each stretch as
- * it appears once tabs and line breaks are removed. A reference resolved
- * into a path no longer has it where `redactUserInfo` looks
- * (`https:u:p@h/x` read as a local file becomes `/srv/u:p@h/x`), so a
- * message about the resolved path removes these stretches from it too.
+ * it appears once tabs and line breaks are removed, and as a URL path writes
+ * it (`a b` is `a%20b`). A reference resolved into a path no longer has it
+ * where `redactUserInfo` looks (`https:u:p@h/x` read as a local file becomes
+ * `/srv/u:p@h/x`), so a message about the resolved path removes these
+ * stretches from it too.
  */
 export function userInfoOf(text: string): string[] {
-  return scanUserInfo(text).parts;
+  const parts = scanUserInfo(text).parts;
+  return [...new Set([...parts, ...parts.map(asUrlPath)])].filter((part) => part !== '');
+}
+
+/** `text` as a URL path writes it: `a b` is `a%20b`, `/a b/` is `/a%20b/`. */
+export function asUrlPath(text: string): string {
+  return new URL(`http://h/${text}`).pathname.slice(1);
 }
 
 /** `text` without tabs and line breaks, the same with its user information redacted, and what was removed. */
@@ -213,7 +221,8 @@ function scanUserInfo(text: string): { flat: string; redacted: string; parts: st
   const [start, , scheme, slashes] = URI_START.exec(flat) as RegExpExecArray;
   let redacted = flat;
   const special = scheme !== undefined && SPECIAL_SCHEMES.has(scheme.toLowerCase());
-  if (special || slashes.startsWith('//')) {
+  // Without a scheme, any two slashes or backslashes start an authority, as against a special base
+  if (special || (scheme === undefined ? slashes.length >= 2 : slashes.startsWith('//'))) {
     const rest = flat.slice(start.length);
     // A special URL's authority also ends at a backslash; another's does not
     const end = rest.search(special ? /[/\\?#]/ : /[/?#]/);
@@ -254,6 +263,7 @@ export function parseDocumentUri(value: unknown): string {
   if (url.username !== '' || url.password !== '') throw problem('must not contain user information');
   if (value.includes('#')) throw problem('must not contain a fragment');
   if (url.protocol === 'file:' && url.host !== '') throw problem('must not name a host in a file URI');
+  if (url.href.length > MAX_BASE_URI_LENGTH) throw problem(`must be at most ${MAX_BASE_URI_LENGTH} characters once normalized`);
   return url.href;
 }
 
@@ -562,6 +572,20 @@ function identityBases(base: DocumentBase): string[] {
   return bases;
 }
 
+/** A value reached by a walk, linked to its container so its location is built only when needed */
+interface PathVisit {
+  node: unknown;
+  parent: PathVisit | null;
+  key: string;
+}
+
+/** The reference tokens from the root to `visit` */
+function locationOf(visit: PathVisit): string[] {
+  const tokens: string[] = [];
+  for (let at: PathVisit | null = visit; at !== null && at.parent !== null; at = at.parent) tokens.push(at.key);
+  return tokens.reverse();
+}
+
 /**
  * Every `$ref` of `root` that names the document `base` describes, in
  * document order, without changing anything. A reference names the document
@@ -597,18 +621,10 @@ export function findSelfReferences(root: unknown, base: DocumentBase): SelfRefer
     return found;
   };
 
-  interface Visit {
-    node: unknown;
-    parent: Visit | null;
-    key: string;
+  interface Visit extends PathVisit {
     /** Under (or at) a Schema Object with its own `$id` */
     scoped: boolean;
   }
-  const locationOf = (visit: Visit): string[] => {
-    const tokens: string[] = [];
-    for (let at: Visit | null = visit; at !== null && at.parent !== null; at = at.parent) tokens.push(at.key);
-    return tokens.reverse();
-  };
   const references: SelfReference[] = [];
   const seen = new Set<object>();
   const stack: Visit[] = [{ node: root, parent: null, key: '', scoped: false }];
@@ -661,29 +677,38 @@ export function refParserScopesIds(document: unknown): boolean {
 }
 
 /**
- * The first `$ref` of `root`, in document order, that is a relative
- * reference to another document (not empty, not starting with `#`, without a
- * scheme), with where it is; `undefined` when there is none. Walks with its
- * own stack.
+ * The first `$ref` of `root`, in document order, whose text `matches`, with
+ * where it is; `undefined` when there is none. Walks with its own stack.
  */
-export function findRelativeReference(root: unknown): { ref: string; location: string[] } | undefined {
+export function findReference(
+  root: unknown,
+  matches: (ref: string) => boolean,
+): { ref: string; location: string[] } | undefined {
   const seen = new Set<object>();
-  const stack: Array<{ node: unknown; location: string[] }> = [{ node: root, location: [] }];
+  const stack: PathVisit[] = [{ node: root, parent: null, key: '' }];
   while (stack.length > 0) {
-    const { node, location } = stack.pop() as { node: unknown; location: string[] };
+    const visit = stack.pop() as PathVisit;
+    const { node } = visit;
     if (node === null || typeof node !== 'object' || seen.has(node)) continue;
     seen.add(node);
     const ref = Array.isArray(node) ? undefined : ownProperty(node, '$ref');
-    if (typeof ref === 'string' && ref !== '' && !ref.startsWith('#') && !HAS_SCHEME.test(ref)) {
-      return { ref, location };
-    }
+    if (typeof ref === 'string' && matches(ref)) return { ref, location: locationOf(visit) };
     const record = node as Record<string, unknown>;
     const keys = Object.keys(record);
     for (let index = keys.length - 1; index >= 0; index--) {
-      stack.push({ node: record[keys[index]], location: [...location, keys[index]] });
+      stack.push({ node: record[keys[index]], parent: visit, key: keys[index] });
     }
   }
   return undefined;
+}
+
+/**
+ * The first `$ref` of `root`, in document order, that is a relative
+ * reference to another document (not empty, not starting with `#`, without a
+ * scheme), with where it is; `undefined` when there is none.
+ */
+export function findRelativeReference(root: unknown): { ref: string; location: string[] } | undefined {
+  return findReference(root, (ref) => ref !== '' && !ref.startsWith('#') && !HAS_SCHEME.test(ref));
 }
 
 /**

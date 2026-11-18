@@ -3,6 +3,7 @@ export { OpenAPIToolGenerator } from './generator';
 export { SchemaBuilder } from './schema-builder';
 export type { TruncateDepthOptions } from './schema-builder';
 export { ParameterResolver } from './parameter-resolver';
+export type { IgnoredParameter } from './parameter-resolver';
 export { ResponseBuilder } from './response-builder';
 export { Validator } from './validator';
 export { SecurityResolver, createSecurityContext } from './security-resolver';

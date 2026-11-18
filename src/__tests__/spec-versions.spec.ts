@@ -8,6 +8,7 @@ import * as diagnosticsModule from '../spec/diagnostics';
 import * as operationsModule from '../spec/operations';
 import * as upgradeModule from '../spec/upgrade-v2';
 import * as parametersModule from '../spec/parameters';
+import * as schemaReferencesModule from '../spec/schema-references';
 import * as versionsModule from '../spec/versions';
 import {
   DESCRIBED_VALUE_MAX_LENGTH,
@@ -374,6 +375,9 @@ describe('profiles', () => {
       componentsPathItems: false,
       componentsMediaTypes: false,
       self: false,
+      securitySchemeTypes: ['basic', 'apiKey', 'oauth2'],
+      apiKeyLocations: ['header', 'query'],
+      schemaReferenceSiblings: false,
     },
     '3.0': {
       fixedMethods: ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'],
@@ -388,6 +392,9 @@ describe('profiles', () => {
       componentsPathItems: false,
       componentsMediaTypes: false,
       self: false,
+      securitySchemeTypes: ['apiKey', 'http', 'oauth2', 'openIdConnect'],
+      apiKeyLocations: ['header', 'query', 'cookie'],
+      schemaReferenceSiblings: false,
     },
     '3.1': {
       fixedMethods: ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'],
@@ -402,6 +409,9 @@ describe('profiles', () => {
       componentsPathItems: true,
       componentsMediaTypes: false,
       self: false,
+      securitySchemeTypes: ['apiKey', 'http', 'mutualTLS', 'oauth2', 'openIdConnect'],
+      apiKeyLocations: ['query', 'header', 'cookie'],
+      schemaReferenceSiblings: true,
     },
     '3.2': {
       fixedMethods: ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace', 'query'],
@@ -416,6 +426,9 @@ describe('profiles', () => {
       componentsPathItems: true,
       componentsMediaTypes: true,
       self: true,
+      securitySchemeTypes: ['apiKey', 'http', 'mutualTLS', 'oauth2', 'openIdConnect'],
+      apiKeyLocations: ['query', 'header', 'cookie'],
+      schemaReferenceSiblings: true,
     },
   };
 
@@ -933,6 +946,7 @@ describe('the spec barrel', () => {
       'MAX_POINTER_SEGMENT_LENGTH',
       'POINTER_TRUNCATION_MARKER',
       'SPEC_DIAGNOSTIC_CODES',
+      'UNSAFE_CHARACTER_CLASS',
       'appendPointer',
       'describeValue',
       'diagnosticKey',
@@ -951,6 +965,7 @@ describe('the spec barrel', () => {
       'isStandardMethod',
       'listOperations',
       'ownProperty',
+      'setOwnProperty',
       'toStandardMethod',
       'wireMethod',
     ],
@@ -969,16 +984,19 @@ describe('the spec barrel', () => {
       'isSwagger2',
       'listSkippedNewerOperations',
       'resolveOperationLayout',
+      'securitySchemeProblem',
     ],
     upgrade: [
       'MAX_CONVERSION_ENTRIES',
       'MAX_MEDIA_TYPES_PER_LIST',
       'UPGRADED_OPENAPI_VERSION',
+      'isDotSegment',
       'readSwagger2BasePath',
       'swagger2SkippedOperations',
       'upgradeSwagger2',
     ],
-    parameters: ['parameterNameNotStringDiagnostic', 'readParameterName'],
+    parameters: ['parameterNameNotStringDiagnostic', 'pathTemplateNames', 'readParameterName', 'withTextName'],
+    schemaReferences: ['wrapReferenceSiblings'],
   };
   const modules: Record<keyof typeof RUNTIME_EXPORTS, Record<string, unknown>> = {
     diagnostics: diagnosticsModule,
@@ -986,6 +1004,7 @@ describe('the spec barrel', () => {
     versions: versionsModule,
     upgrade: upgradeModule,
     parameters: parametersModule,
+    schemaReferences: schemaReferencesModule,
   };
 
   it('exports every runtime value of the layer and nothing else', () => {

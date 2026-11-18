@@ -793,8 +793,8 @@ paths:
       const tool = await generator.generateTool('/users/{id}', 'get');
 
       expect(tool.outputSchema).toBeDefined();
-      expect(tool.outputSchema?.oneOf).toBeDefined();
-      expect(tool.outputSchema?.oneOf).toHaveLength(2);
+      expect(tool.outputSchema?.anyOf).toBeDefined();
+      expect(tool.outputSchema?.anyOf).toHaveLength(2);
     });
 
     it('should handle responses with no content', async () => {
@@ -1339,14 +1339,9 @@ describe('ParameterResolver', () => {
       expect(oauthSchema.description).not.toContain('scopes:');
     });
 
-    it('should throw when request body has empty content', () => {
+    it('reads a request body with empty content as no body', () => {
       const resolver = new ParameterResolver();
-      expect(() => resolver.resolve({
-        requestBody: {
-          required: true,
-          content: {},
-        },
-      })).toThrow('No content type available in request body');
+      expect(resolver.resolve({ requestBody: { required: true, content: {} } }).mapper).toEqual([]);
     });
 
     it('should use fallback content type when none match preferences', () => {
@@ -1840,21 +1835,19 @@ describe('OpenAPIToolGenerator - Additional Coverage', () => {
         components: { securitySchemes: { token: { type: 'http', scheme: 'bearer' } } },
         paths: {
           '/users': {
-            // `security` must be a list: with schemes defined, this tool fails
-            get: { operationId: 'getUsers', security: { token: [] }, responses: { '200': { description: 'OK' } } },
+            // An operationId must be a string: this tool fails
+            get: { operationId: { name: 'getUsers' }, responses: { '200': { description: 'OK' } } },
             post: { operationId: 'createUser', responses: { '200': { description: 'OK' } } },
           },
         },
       };
 
-      const generator = await OpenAPIToolGenerator.fromJSON(openapi);
+      // Validation refuses an operationId that is not a string (INVALID_FIELD_TYPE): read with validate: false
+      const generator = await OpenAPIToolGenerator.fromJSON(openapi, { validate: false });
       const tools = await generator.generateTools();
 
       expect(tools.map((t) => t.name)).toEqual(['createUser']);
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Failed to generate tool for GET /users:',
-        '/paths/~1users/get/security must be an array of Security Requirement Objects, found an object',
-      );
+      expect(consoleSpy).toHaveBeenCalledWith('Failed to generate tool for GET /users:', expect.any(String));
 
       consoleSpy.mockRestore();
     });
@@ -2003,8 +1996,8 @@ describe('ResponseBuilder', () => {
       },
     });
 
-    expect(schema?.oneOf).toBeDefined();
-    expect(schema?.oneOf).toHaveLength(2);
+    expect(schema?.anyOf).toBeDefined();
+    expect(schema?.anyOf).toHaveLength(2);
   });
 });
 
@@ -2378,7 +2371,7 @@ describe('SSRF Prevention - $ref resolution security', () => {
     expect(tool.metadata.security).toEqual([]);
   });
 
-  it('should handle apiKey securityScheme with invalid in value', async () => {
+  it('refuses an apiKey securityScheme with an invalid in value instead of sending the key elsewhere', async () => {
     const openapi = {
       openapi: '3.0.0',
       info: { title: 'Test', version: '1.0.0' },
@@ -2403,9 +2396,11 @@ describe('SSRF Prevention - $ref resolution security', () => {
     };
 
     const generator = await OpenAPIToolGenerator.fromJSON(openapi, { dereference: false });
-    const tool = await generator.generateTool('/test', 'get');
-
-    expect(tool.metadata.security![0].in).toBeUndefined();
+    await expect(generator.generateTool('/test', 'get')).rejects.toThrow(
+      'is an apiKey scheme sent in "invalid-location", which is none of header, query, cookie',
+    );
+    const lenient = await OpenAPIToolGenerator.fromJSON(openapi, { dereference: false, validate: false });
+    await expect(lenient.generateTool('/test', 'get')).rejects.toThrow(GenerationError);
   });
 
   it('should handle http securityScheme without scheme property', async () => {
@@ -3728,7 +3723,7 @@ describe('Curation filtering (Tier 2)', () => {
     expect(await namesFor({ readOnlyOnly: true })).toEqual(['getSettings', 'health', 'listUsers', 'getUser']);
   });
 
-  it('readOnlyOnly honors extension overrides in both directions', async () => {
+  it('readOnlyOnly lets an extension take a safe method out, never put an unsafe one in', async () => {
     const spec: any = {
       openapi: '3.0.0',
       info: { title: 'RO API', version: '1.0.0' },
@@ -3749,12 +3744,13 @@ describe('Curation filtering (Tier 2)', () => {
             responses: { '200': { description: 'OK' } },
           },
         },
+        '/status': { get: { operationId: 'status', responses: { '200': { description: 'OK' } } } },
       },
     };
     const generator = await OpenAPIToolGenerator.fromJSON(spec, { validate: false });
     const names = (await generator.generateTools({ readOnlyOnly: true })).map((t) => t.name);
 
-    expect(names).toEqual(['searchReports']);
+    expect(names).toEqual(['status']);
   });
 
   it('combines filters (intersection semantics)', async () => {
@@ -3855,7 +3851,8 @@ describe('includeSecurityInInput per-scheme selection', () => {
 
     expect(props).toContain('ApiKeyAuth');
     expect(props).not.toContain('BearerAuth');
-    expect((tool.inputSchema as any).required).toEqual(['ApiKeyAuth']);
+    // The two requirements are a choice, so neither input is required
+    expect((tool.inputSchema as any).required).toBeUndefined();
     expect(securitySchemes).toEqual(expect.arrayContaining(['BearerAuth', 'ApiKeyAuth']));
   });
 
@@ -6601,22 +6598,34 @@ describe('OpenAPI 3.2 operations, versions and diagnostics (issue #55)', () => {
       expect(codes(generator)).toEqual(['UNRESOLVED_SECURITY_SCHEME', 'INVALID_SECURITY_REQUIREMENT']);
     });
 
-    it('fails a tool whose security is not a list when schemes exist, as before, with a typed error', async () => {
+    it('reads an operation security that is not a list as absent, and fails on such a document security', async () => {
+      // The operation's: the document's requirements apply, with a diagnostic
       const generator = await OpenAPIToolGenerator.fromJSON(securedSpec({ basic: [] }), { validate: false });
-      await expect(generator.generateTool('/pets', 'put')).rejects.toThrow(GenerationError);
-      await expect(generator.generateTool('/pets', 'put')).rejects.toThrow(
-        '/paths/~1pets/put/security must be an array of Security Requirement Objects, found an object',
+      expect((await generator.generateTool('/pets', 'put')).metadata.security).toBeUndefined();
+      expect(generator.getDiagnostics().map((diagnostic) => diagnostic.code)).toEqual(['INVALID_SECURITY_REQUIREMENT']);
+
+      // The document's, with schemes: the tool fails with a typed error
+      const pets = { '/pets': { put: op({ operationId: 'updatePet' }) } };
+      const documentLevel = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', pets, { ...schemes, security: { basic: [] } }),
+        { validate: false },
+      );
+      await expect(documentLevel.generateTool('/pets', 'put')).rejects.toThrow(GenerationError);
+      await expect(documentLevel.generateTool('/pets', 'put')).rejects.toThrow(
+        '/security must be an array of Security Requirement Objects, found an object',
       );
       const warn = silenceWarnings();
       try {
-        expect(await generator.generateTools()).toEqual([]);
+        expect(await documentLevel.generateTools()).toEqual([]);
         expect(warn).toHaveBeenCalledWith('Failed to generate tool for PUT /pets:', expect.any(String));
       } finally {
         warn.mockRestore();
       }
 
       // without schemes there was never anything to read: the tool is generated
-      const noSchemes = await OpenAPIToolGenerator.fromJSON(securedSpec({ basic: [] }, {}), { validate: false });
+      const noSchemes = await OpenAPIToolGenerator.fromJSON(clean('3.2.0', pets, { security: { basic: [] } }), {
+        validate: false,
+      });
       expect((await noSchemes.generateTool('/pets', 'put')).metadata.security).toEqual([]);
     });
   });
@@ -7074,19 +7083,20 @@ describe('OpenAPI 3.2 parameters and responses (issue #55)', () => {
       expect(generator.getDiagnostics().filter((d) => d.code === 'UNSUPPORTED_STREAMING_REQUEST_BODY')).toEqual([]);
     });
 
-    it('keeps the earlier outcome for a request body with an empty content map', async () => {
-      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-      try {
-        const generator = await OpenAPIToolGenerator.fromJSON(
-          clean('3.2.0', { '/a': { post: op({ operationId: 'a', requestBody: { content: {} } }) } }),
-          { validate: false },
-        );
-        expect(await generator.generateTools()).toEqual([]);
-        expect(warn).toHaveBeenCalledWith('Failed to generate tool for POST /a:', 'No content type available in request body');
-        expect(generator.getDiagnostics()).toEqual([]);
-      } finally {
-        warn.mockRestore();
-      }
+    it('reads a request body with an empty content map as no body, with a diagnostic', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', { '/a': { post: op({ operationId: 'a', requestBody: { content: {} } }) } }),
+        { validate: false },
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.mapper).toEqual([]);
+      expect(generator.getDiagnostics()).toEqual([
+        expect.objectContaining({
+          severity: 'warning',
+          code: 'REQUEST_BODY_WITHOUT_MEDIA_TYPE',
+          path: '/paths/~1a/post/requestBody/content',
+        }),
+      ]);
     });
   });
 
@@ -7641,7 +7651,7 @@ describe('OpenAPI 3.2 parameters and responses: review fixes (issue #55)', () =>
         ),
       );
       const [tool] = await generator.generateTools();
-      expect(tool.mapper.map((m) => m.inputKey)).toEqual(['q', 'key', 'hdr', 'key', 'other']);
+      expect(tool.mapper.map((m) => m.inputKey)).toEqual(['q', 'key', 'hdr', 'other']);
       expect(generator.getDiagnostics()).toEqual([
         {
           severity: 'warning',
@@ -7872,19 +7882,24 @@ describe('Base URI, $self and references to other documents', () => {
     it('keeps resolving against the working directory without a base URI, and says so', async () => {
       await withFiles(files, async (dir) => {
         const document = JSON.parse(fs.readFileSync(path.join(dir, 'api/openapi.yaml'), 'utf8'));
-        const cwdBase = `${process.cwd()}${path.sep}`;
-        // Refused: the message says why relative references land in the working directory
+        // Refused: the message says why relative references land in the working directory, without naming it
         const refused = await rejection((await OpenAPIToolGenerator.fromJSON(document)).generateTools());
-        expect(refused.message).toContain(`resolved against ${JSON.stringify(cwdBase)}`);
+        expect(refused.message).toContain('resolved against "<working directory>/"');
+        expect(refused.message).not.toContain(process.cwd());
         expect(refused.message).toContain(
           '(the document has no base URI, so its relative references resolve against the working directory: ' +
             'load it with fromFile or fromURL, or pass LoadOptions.documentUri)',
         );
-        expect(refused.context).toMatchObject({ reference: 'schemas/pet.yaml', base: cwdBase, rule: 'protocol' });
+        expect(refused.context).toMatchObject({
+          reference: 'schemas/pet.yaml',
+          base: '<working directory>/',
+          resolved: '<working directory>/schemas/pet.yaml',
+          rule: 'protocol',
+        });
         // Allowed: read from the working directory, as in earlier releases
         const missing = await rejection((await OpenAPIToolGenerator.fromJSON(document, allowFile)).generateTools());
         expect(missing.message).toContain(
-          `resolved against ${JSON.stringify(cwdBase)} to ${JSON.stringify(path.join(process.cwd(), 'schemas/pet.yaml'))}: ` +
+          'resolved against "<working directory>/" to "<working directory>/schemas/pet.yaml": ' +
             'the file cannot be read (ENOENT)',
         );
         expect(missing.context).toMatchObject({ rule: 'file-error' });
@@ -8588,7 +8603,7 @@ describe('Base URI, $self and references to other documents', () => {
       jest.spyOn(dns.promises, 'lookup').mockResolvedValue([{ address: '10.0.0.5', family: 4 }] as never);
       const error = await refusedFor('http://schemas.internal.example/pet.json');
       expect(error.message).toContain(
-        'to "http://schemas.internal.example/pet.json": Host "schemas.internal.example" resolves to blocked address 10.0.0.5',
+        'to "http://schemas.internal.example/pet.json": Host "schemas.internal.example" resolves to a blocked internal address',
       );
       expect(error.context).toMatchObject({ rule: 'resolved-address' });
     });
@@ -9106,10 +9121,10 @@ describe('Base URI, $self and references to other documents', () => {
       const withQuery = await rejection(
         (await failing({ A: `${origin}/pet.json?token=REF-SECRET` })).generateTools(),
       );
-      // The reference is quoted as the document wrote it; the URL it resolved to is shown without its query
+      // A query may hold a credential: neither the reference nor the URL it resolved to shows it
       expect(withQuery.context).toMatchObject({
         rule: 'response',
-        reference: `${origin}/pet.json?token=REF-SECRET`,
+        reference: `${origin}/pet.json?...`,
         resolved: `${origin}/pet.json?...`,
       });
       expect(withQuery.message).toContain(`to "${origin}/pet.json?..."`);
@@ -9219,7 +9234,7 @@ describe('boolean schemas through generation', () => {
       name: { type: 'string', 'x-parameter-location': 'body' },
       gone: { ...NEVER, 'x-parameter-location': 'body' },
     });
-    expect((tool.outputSchema as any).oneOf[1]).toEqual({
+    expect((tool.outputSchema as any).anyOf[1]).toEqual({
       ...NEVER,
       'x-status-code': 404,
       description: 'never',
@@ -9369,7 +9384,7 @@ describe('response status ranges through generation', () => {
     const both = await generate({ 200: json('object'), '4xx': json('string'), '5XX': json('number') });
     expect(both.metadata.responseStatusCodes).toEqual([200]);
     expect(both.metadata.responseStatusRanges).toEqual(['4XX', '5XX']);
-    expect((both.outputSchema as any).oneOf.map((v: any) => v['x-status-code'])).toEqual([200, '4XX', '5XX']);
+    expect((both.outputSchema as any).anyOf.map((v: any) => v['x-status-code'])).toEqual([200, '4XX', '5XX']);
 
     const rangeOnly = await generate({ '2XX': json('object') });
     expect(rangeOnly.metadata.responseStatusCodes).toBeUndefined();
@@ -10046,9 +10061,14 @@ describe('Swagger 2.0 documents', () => {
         '/locked': { get: { operationId: 'locked', security: [{ mtls: [] }], responses: ok } },
         '/open': { get: { operationId: 'open', responses: ok } },
       };
-      const only = await OpenAPIToolGenerator.fromJSON(minimal(operations, { securityDefinitions: { mtls: { type: 'mutualTLS' } } }));
+      // mutualTLS is no Swagger 2.0 type, which validation refuses (INVALID_SECURITY_SCHEME)
+      const only = await OpenAPIToolGenerator.fromJSON(
+        minimal(operations, { securityDefinitions: { mtls: { type: 'mutualTLS' } } }),
+        { validate: false },
+      );
       const withOthers = await OpenAPIToolGenerator.fromJSON(
         minimal(operations, { securityDefinitions: { mtls: { type: 'mutualTLS' }, key: { type: 'apiKey', name: 'K', in: 'header' } } }),
+        { validate: false },
       );
       for (const generator of [only, withOthers]) {
         expect((await generator.generateTools()).map((t) => t.name)).toEqual(['open']);

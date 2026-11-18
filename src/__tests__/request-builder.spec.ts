@@ -2130,12 +2130,15 @@ describe('names the input chooses cannot take a name the tool reserves', () => {
       }
     });
 
-    it('compares names exactly: another case or another location is not the credential', () => {
+    it('compares a credential name in any case, and only in its own location', () => {
+      expect(() =>
+        buildHttpRequest(fooTool([formWhole, credential('query', 'api_key')]), { q: { API_KEY: 'x' }, cred: 'real' }),
+      ).toThrow(RequestBuildError);
       const exact = buildHttpRequest(fooTool([formWhole, credential('query', 'api_key')]), {
-        q: { API_KEY: 'x', api_key2: 'y' },
+        q: { api_key2: 'y' },
         cred: 'real',
       });
-      expect(exact.url).toBe('https://example.com/foo?API_KEY=x&api_key2=y&api_key=real');
+      expect(exact.url).toBe('https://example.com/foo?api_key2=y&api_key=real');
 
       for (const type of ['header', 'cookie'] as const) {
         const built = buildHttpRequest(fooTool([formWhole, credential(type, 'api_key')]), { q: { api_key: 'x' }, cred: 'real' });

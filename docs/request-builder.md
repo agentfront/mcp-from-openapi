@@ -37,14 +37,15 @@ await fetch(request.url, {
 | Path styles     | `simple`, `label`, `matrix` — primitives, arrays, and objects, explode both ways                                                 |
 | Headers         | `simple` serialization, RFC 7230 name check, value check (tab, space, visible ASCII, U+0080 to U+00FF; CR/LF/NUL named as injection)  |
 | Cookies         | Folded `Cookie` header with verbatim values, RFC 6265 name/value validation; `form` (the default) and the OpenAPI 3.2 `cookie` style |
-| Reserved names  | A name the input chooses (a form whole query, an exploded `form` object in the query, an exploded `style: cookie` object) never adds or replaces a credential or a sibling parameter |
+| Reserved names  | A name the input chooses (a form whole query, an exploded `form` object in the query, an exploded `style: cookie` object) never adds or replaces a credential or a sibling parameter. It is compared as common servers read it: `api_key[]` and `api_key[x]` are `api_key`, and a credential's name is matched in any case (`API_KEY`) |
 | `allowReserved` | `: / ? @ ! $ ' ( ) * , ;` left as they are in a query value or a form field; `& = + # [ ]` always encoded ([`allowReserved`](#allowreserved)) |
-| Bodies          | JSON (incl. `+json`), `x-www-form-urlencoded` (`null` properties left out), `multipart/form-data` (`FormData`, or a `Blob` when a part needs a header), raw binary pass-through, text |
+| Bodies          | JSON (incl. `+json`), `x-www-form-urlencoded` (`null` properties left out), `multipart/form-data` (`FormData`, or a `Blob` when a part needs a header), raw binary pass-through, text. JSON text goes through the same check as a parameter's (at most 1000 levels deep), and the body media type, a key of the document's `content` map, through the header value check |
 | Encoding Objects | Per-field `style`, `explode` and `allowReserved` in a form body, a form whole query and a form `content` parameter; those and `contentType` and `headers` for the parts of a multipart body ([Encoding Objects](#encoding-objects)) |
 | `wholeBody`     | Non-object/union bodies sent as the entire body (never wrapped)                                                                  |
-| Security        | Values applied only when present in `input`; `bearer`/`basic` get prefixes, structured schemes (digest) pass through verbatim    |
+| `requiredBody`  | A required flattened body is sent empty (`{}`, or an empty form) when the input gives none of its properties                     |
+| Security        | Values applied only when present in `input`, and only a string, number or boolean; `bearer`/`basic` get prefixes, structured schemes (digest) pass through verbatim |
 | Methods         | A standard method is sent upper-case (`GET`, `QUERY`); an OpenAPI 3.2 `additionalOperations` method is sent exactly as written in the document (`LINK`, `M-SEARCH`) because HTTP methods are case-sensitive. The method must be an RFC 9110 token, and `CONNECT` is refused                                    |
-| Safety          | Header-injection guards (CR/LF), sendable header and cookie values, lone surrogates refused, path traversal-safe encoding, http(s)-only base URLs, unresolved path/server-template detection |
+| Safety          | Header-injection guards (CR/LF), sendable header and cookie values, lone surrogates refused, path values percent-encoded per segment, and a resolved path that starts with a single `/` and keeps every segment of its template (`.`, `..` and empty values are refused), http(s)-only base URLs, unresolved path/server-template detection |
 
 ## Result shape
 

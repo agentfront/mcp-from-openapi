@@ -64,7 +64,7 @@ toPascalIdentifier('3d.scan'); // "T3dScan"
 | `enum` | literal union (`"a" \| "b" \| 1`) |
 | primitive `const` | literal type |
 | `nullable` wrapper (`anyOf: [X, {type:'null'}]`) | `X \| null` |
-| `oneOf` / `anyOf` | union; root output status variants gain `/** status 200 (application/json) */` comments from `x-status-code` / `x-content-type` |
+| `oneOf` / `anyOf` | union; root output status variants (the `anyOf` of several responses) gain `/** status 200 (application/json) */` comments from `x-status-code` / `x-content-type` |
 | `allOf` | intersection (`A & B`) |
 | `array` + `items` | `T[]`; `prefixItems` become tuples (`[string, ...number[]]`) |
 | object with `properties` | object type; optionality from `required`; non-identifier keys quoted |

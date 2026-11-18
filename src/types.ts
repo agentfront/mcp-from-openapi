@@ -26,7 +26,7 @@ import type {
   SchemaOrBoolean,
   StandardMethod,
 } from './spec';
-import { SPEC_DIAGNOSTIC_CODES } from './spec';
+import { SPEC_DIAGNOSTIC_CODES, setOwnProperty } from './spec';
 import { SchemaError } from './errors';
 import { isExtensionKey, referenceAt } from './reference-sites';
 
@@ -93,7 +93,8 @@ export type AuthType = 'apiKey' | 'http' | 'oauth2' | 'openIdConnect' | 'mutualT
  * Helper to check if an object is a ReferenceObject
  */
 export function isReferenceObject(obj: any): obj is ReferenceObject {
-  return obj && typeof obj === 'object' && '$ref' in obj;
+  // A `$ref` that is not a string refers to nothing: the object is read as what it otherwise is
+  return Boolean(obj) && typeof obj === 'object' && typeof obj.$ref === 'string';
 }
 
 /**
@@ -121,6 +122,9 @@ export interface SchemaConversionOptions {
    * converted once per path). Unbounded when omitted.
    */
   maxNodes?: number;
+
+  /** A budget several conversions share (all parameters of one tool, all its responses), so their sum stays bounded */
+  sharedBudget?: { nodes: number; readonly maxNodes: number };
 }
 
 /** Structural keywords whose value is a map of subschemas (besides `properties`). */
@@ -137,6 +141,52 @@ const SCHEMA_SINGLE_KEYWORDS = [
   'unevaluatedItems',
   'unevaluatedProperties',
 ] as const;
+
+/** Map-of-schemas keywords whose subschemas apply to the instance (`$defs`/`definitions` never do) */
+const APPLIED_SCHEMA_MAP_KEYWORDS: ReadonlySet<string> = new Set(['properties', 'patternProperties', 'dependentSchemas']);
+
+/** Keywords holding only definitions: a subschema there never applies to the instance */
+export const DEFINITION_KEYWORDS: ReadonlySet<string> = new Set(['$defs', 'definitions']);
+
+/** In-place applicators that collect annotations: what `unevaluatedProperties`/`unevaluatedItems` read */
+const ANNOTATING_APPLICATORS = ['allOf', 'anyOf', 'oneOf', 'if', 'then', 'else', 'dependentSchemas'] as const;
+
+/**
+ * Keeps `schema` accepting every value the document's accepts when some of its subschemas accept more
+ * (`isLoosened`: cut at a depth, or a cycle cut with `{}`), and returns whether one does, which makes
+ * `schema` accept more too. Over such a subschema a `not` would refuse more and an `if` select more, so
+ * they are left out (with the `then`/`else` an `if` selects), as is a `contains`'s `maxContains`; a
+ * `oneOf` becomes `anyOf`, as a value can now match two members (beside an `anyOf`, it is left out); and
+ * `unevaluated*` goes when an annotating applicator holds one, as it may no longer count what that one
+ * did. Nothing is added, so no node or level. Internal.
+ */
+export function keepAccepting(schema: Record<string, unknown>, isLoosened: (value: unknown) => boolean): boolean {
+  const loosenedUnder = (keyword: string): boolean => {
+    const value = schema[keyword];
+    if (value === null || typeof value !== 'object' || DEFINITION_KEYWORDS.has(keyword)) return false;
+    const members = Array.isArray(value)
+      ? value
+      : APPLIED_SCHEMA_MAP_KEYWORDS.has(keyword)
+        ? Object.values(value)
+        : [value];
+    return members.some(isLoosened);
+  };
+  if (!Object.keys(schema).some(loosenedUnder)) return false;
+  if (ANNOTATING_APPLICATORS.some(loosenedUnder)) {
+    delete schema['unevaluatedProperties'];
+    delete schema['unevaluatedItems'];
+  }
+  if (loosenedUnder('not')) delete schema['not'];
+  if (loosenedUnder('if')) for (const keyword of ['if', 'then', 'else']) delete schema[keyword];
+  if (loosenedUnder('contains')) delete schema['maxContains'];
+  if (loosenedUnder('oneOf')) {
+    const members = schema['oneOf'];
+    delete schema['oneOf'];
+    // Beside an `anyOf` it is left out: joining the two would add nodes past the budget and a level past the depth
+    if (schema['anyOf'] === undefined) schema['anyOf'] = members;
+  }
+  return true;
+}
 
 /**
  * Convert OpenAPI schema to JsonSchema
@@ -175,11 +225,13 @@ export function toJsonSchema(schema: object | boolean, options: SchemaConversion
     maxDepth: normalizeConversionLimit(options.maxDepth, 0),
     maxNodes: normalizeConversionLimit(options.maxNodes, 1),
     nodes: 0,
+    sharedBudget: options.sharedBudget,
     stack: new Map(),
     cache: new Map(),
     cyclic: undefined,
     cut: false,
     lowWater: Infinity,
+    loosened: new WeakSet(),
   };
   // Any object converts (a Schema or Reference Object of any version, or a
   // schema-shaped object the caller built); a boolean becomes its object form
@@ -221,6 +273,7 @@ interface ConversionState {
   readonly maxNodes: number;
   /** Nodes charged so far: one per schema visited, plus one per keyword of each schema converted. */
   nodes: number;
+  readonly sharedBudget: { nodes: number; readonly maxNodes: number } | undefined;
   /** Ancestors on the current path, with their stack index: a revisit is a cycle, cut with `{}`. */
   readonly stack: Map<object, number>;
   /** The latest result for every converted node; reused only when it is valid anywhere. */
@@ -236,6 +289,8 @@ interface ConversionState {
   cut: boolean;
   /** Lowest stack index a cycle cut in the subtree being converted pointed at. */
   lowWater: number;
+  /** Results that accept more than their schema: a `{}` placeholder, and a result holding one (`keepAccepting`). */
+  readonly loosened: WeakSet<object>;
 }
 
 interface CachedConversion {
@@ -317,7 +372,8 @@ function convertSchema(schema: SchemaObject | ReferenceObject, depth: number, st
         state,
         frames,
       );
-      if (value !== PENDING) (slots[at] as Record<string, unknown>)[slots[at + 1] as string] = value;
+      // A child's key can be a document's `__proto__`: defined, never assigned
+      if (value !== PENDING) setOwnProperty(slots[at] as object, slots[at + 1] as string, value);
       continue;
     }
     frames.pop();
@@ -325,7 +381,7 @@ function convertSchema(schema: SchemaObject | ReferenceObject, depth: number, st
     const parent = frames[frames.length - 1];
     if (!parent) return result;
     const at = parent.next - 4;
-    (parent.slots[at] as Record<string, unknown>)[parent.slots[at + 1] as string] = result;
+    setOwnProperty(parent.slots[at] as object, parent.slots[at + 1] as string, result);
   }
 }
 
@@ -350,7 +406,7 @@ function visitSchema(
   }
   if (depth > state.maxDepth) {
     state.cut = true;
-    return {} as JsonSchema;
+    return placeholder(state);
   }
   const node: unknown = schema;
   if (typeof node === 'boolean') {
@@ -373,18 +429,28 @@ function visitSchema(
   const onStack = state.stack.get(node);
   if (onStack !== undefined) {
     state.lowWater = Math.min(state.lowWater, onStack);
-    return {} as JsonSchema;
+    return placeholder(state);
   }
   return enterSchema(schema, depth, node, state, frames);
 }
 
+/** `{}` in place of a schema the conversion does not reach (below `maxDepth`, or a cycle): it accepts any value */
+function placeholder(state: ConversionState): JsonSchema {
+  const schema = {} as JsonSchema;
+  state.loosened.add(schema);
+  return schema;
+}
+
 /** Charge `cost` nodes against the conversion's budget, throwing once it is exceeded */
 function charge(state: ConversionState, cost: number): void {
-  if ((state.nodes += cost) > state.maxNodes) {
+  const shared = state.sharedBudget;
+  const sharedExceeded = shared !== undefined && (shared.nodes += cost) > shared.maxNodes;
+  if ((state.nodes += cost) > state.maxNodes || sharedExceeded) {
+    const maxNodes = sharedExceeded ? shared.maxNodes : state.maxNodes;
     throw new SchemaError(
-      `Schema conversion exceeded the node budget of ${state.maxNodes} (maxSchemaNodes): shared or recursive ` +
+      `Schema conversion exceeded the node budget of ${maxNodes} (maxSchemaNodes): shared or recursive ` +
         `$refs expand into more schema nodes than allowed. Lower maxSchemaDepth or raise maxSchemaNodes.`,
-      { maxNodes: state.maxNodes },
+      { maxNodes },
     );
   }
 }
@@ -397,7 +463,9 @@ function charge(state: ConversionState, cost: number): void {
  * is rejected before it is walked.
  */
 function queueMembers(members: unknown[], depth: number, slots: unknown[], state: ConversionState): JsonSchema[] {
-  if (state.nodes + members.length > state.maxNodes) charge(state, members.length);
+  const shared = state.sharedBudget;
+  const sharedFull = shared !== undefined && shared.nodes + members.length > shared.maxNodes;
+  if (state.nodes + members.length > state.maxNodes || sharedFull) charge(state, members.length);
   const converted: JsonSchema[] = new Array(members.length);
   let holes = 0;
   for (let i = 0; i < members.length; i++) {
@@ -413,6 +481,7 @@ function queueMembers(members: unknown[], depth: number, slots: unknown[], state
  * result, store the result for reuse, and pop the node off the path.
  */
 function finishSchema(frame: ConversionFrame, state: ConversionState): JsonSchema {
+  const loosened = keepAccepting(frame.result, (value) => state.loosened.has(value as object));
   let result = frame.result as JsonSchema;
   if (frame.wrapNullable) {
     // Hoist pure annotation keywords onto the wrapper so descriptions and
@@ -428,6 +497,7 @@ function finishSchema(frame: ConversionFrame, state: ConversionState): JsonSchem
     wrapper['anyOf'] = [inner, { type: 'null' }];
     result = wrapper as JsonSchema;
   }
+  if (loosened) state.loosened.add(result);
   const node = frame.node;
   if (node) {
     state.cache.set(node, {
@@ -596,7 +666,7 @@ function findCyclicNodes(root: object, maxDepth: number, maxNodes: number): Set<
  * Applied whatever version the document declares, like `nullable` itself:
  *
  * - `x-nullable: <boolean>` stands for `nullable` when the schema has no
- *   `nullable` (the extension is then dropped, as `nullable` is);
+ *   `nullable`, and is dropped either way, as `nullable` is;
  * - `type: file` (or `file` in a `type` list) is a binary string: `type:
  *   string, format: binary`;
  * - a string `discriminator` (the 2.0 form, a property name) becomes the
@@ -606,9 +676,10 @@ function findCyclicNodes(root: object, maxDepth: number, maxNodes: number): Set<
  */
 function normalizeSwaggerKeywords(result: Record<string, unknown>, nullable: unknown): boolean {
   let effective = nullable;
+  // Dropped whenever it is a boolean, also next to `nullable`, so a converted schema converts to itself
   const xNullable = result['x-nullable'];
-  if (nullable === undefined && typeof xNullable === 'boolean') {
-    effective = xNullable;
+  if (typeof xNullable === 'boolean') {
+    if (nullable === undefined) effective = xNullable;
     delete result['x-nullable'];
   }
 
@@ -1063,6 +1134,13 @@ export interface SerializationInfo {
    * (`format: binary`), e.g. a multipart file part or a raw binary body.
    */
   binary?: boolean;
+
+  /**
+   * On a flattened body property of a required body none of whose properties
+   * is required: `buildHttpRequest` sends an empty body when the input gives
+   * no property.
+   */
+  requiredBody?: boolean;
 }
 
 /**
@@ -1109,6 +1187,27 @@ export interface SecurityParameterInfo {
    * Description of the security scheme
    */
   description?: string;
+
+  /**
+   * With a choice of Security Requirement objects (`metadata.securityAlternatives`), the indexes of the
+   * alternatives that need this scheme; one alternative is applied, not every scheme
+   */
+  alternatives?: number[];
+
+  /**
+   * With `alternatives`, the scopes each of them asks of this scheme, in the same order; present only when they
+   * differ (`scopes` holds those of the first)
+   */
+  alternativeScopes?: string[][];
+
+  /**
+   * With a choice, each `mutualTLS` scheme the alternatives name, with the alternatives that need it (it has no
+   * mapper entry: the HTTP client presents the certificate)
+   */
+  clientCertificates?: Array<{ scheme: string; alternatives: number[] }>;
+
+  /** With a choice, whether one alternative is empty (`{}`): the operation also accepts a call without credentials */
+  optional?: boolean;
 }
 
 /**
@@ -1156,6 +1255,12 @@ export interface ToolMetadata {
    * Security requirements
    */
   security?: SecurityRequirement[];
+
+  /**
+   * With more than one Security Requirement object, each as listed (`[]` for `{}`, no authentication): any one of
+   * them authenticates a call. `security` lists their schemes together
+   */
+  securityAlternatives?: SecurityRequirement[][];
 
   /**
    * Server information
@@ -1478,7 +1583,25 @@ export interface RefResolutionOptions {
    * @default false
    */
   allowInternalIPs?: boolean;
+
+  /**
+   * The most referenced documents one dereference reads; past it the load fails (rule `too-many-documents`).
+   * @default 10000
+   */
+  maxDocuments?: number;
+
+  /**
+   * The most bytes all referenced documents of one dereference may hold together; past it the load fails (rule `too-large`).
+   * @default 104857600
+   */
+  maxTotalBytes?: number;
 }
+
+/** Default `RefResolutionOptions.maxDocuments` */
+export const DEFAULT_MAX_REFERENCED_DOCUMENTS = 10_000;
+
+/** Default `RefResolutionOptions.maxTotalBytes`: 100 MiB */
+export const DEFAULT_MAX_REFERENCED_BYTES = 100 * 1024 * 1024;
 
 /**
  * Options for loading OpenAPI specifications
@@ -1715,6 +1838,13 @@ export interface GenerateOptions {
    * @default 25000
    */
   maxSchemaNodes?: number;
+
+  /**
+   * The most schema nodes all generated tools may hold together (input, output and stream item schemas).
+   * Past it generation stops with a `SchemaError`. Unlimited by default; `SECURE_MAX_TOTAL_SCHEMA_NODES`
+   * for a generator loaded with `secureDefaults: true`.
+   */
+  maxTotalSchemaNodes?: number;
 
   /**
    * How the tool description is assembled from the operation:
@@ -2005,6 +2135,21 @@ export const DIAGNOSTIC_CODES = Object.freeze({
   NO_OPERATIONS: 'NO_OPERATIONS',
   /** Validator warning: an operation has no `operationId` (its tool name comes from the method and path). */
   NO_OPERATION_ID: 'NO_OPERATION_ID',
+  /** An operation `generateTools` could not turn into a tool, for a reason no other code names. */
+  TOOL_GENERATION_FAILED: 'TOOL_GENERATION_FAILED',
+  /** A parameter, request body or response generation needs is a reference that was not resolved. */
+  UNRESOLVED_REFERENCE: 'UNRESOLVED_REFERENCE',
+  /** A response key that is no status code (three digits from 100 to 599), range (`2XX`) or `default`: ignored. */
+  INVALID_RESPONSE_KEY: 'INVALID_RESPONSE_KEY',
+  /**
+   * A security scheme the library cannot send (an unknown `type`, an `apiKey` without a usable `in` or `name`): the
+   * requirements naming it are dropped. As an `info`, a `mutualTLS` scheme, which the HTTP client applies.
+   */
+  UNSUPPORTED_SECURITY_SCHEME: 'UNSUPPORTED_SECURITY_SCHEME',
+  /** A parameter left out of the tool: a header the HTTP client or a credential sets, or where a credential is sent. */
+  PARAMETER_IGNORED: 'PARAMETER_IGNORED',
+  /** Validator warning: two operations share an `operationId`, which must be unique. */
+  DUPLICATE_OPERATION_ID: 'DUPLICATE_OPERATION_ID',
   /** Validator warning: the document defines no servers. */
   NO_SERVERS: 'NO_SERVERS',
   /** Validator warning: the document has security requirements but no security schemes. */
@@ -2160,6 +2305,8 @@ export const DIAGNOSTIC_CODES = Object.freeze({
    * streamed upload), which is not supported: the tool takes no body input.
    */
   UNSUPPORTED_STREAMING_REQUEST_BODY: 'UNSUPPORTED_STREAMING_REQUEST_BODY',
+  /** A request body's `content` lists no media type: the tool takes no body input. */
+  REQUEST_BODY_WITHOUT_MEDIA_TYPE: 'REQUEST_BODY_WITHOUT_MEDIA_TYPE',
   /** The list reached `MAX_DIAGNOSTICS`; later findings are not recorded. */
   DIAGNOSTICS_TRUNCATED: 'DIAGNOSTICS_TRUNCATED',
 } as const);

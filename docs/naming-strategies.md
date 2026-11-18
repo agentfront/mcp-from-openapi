@@ -29,7 +29,7 @@ When no custom strategy is provided, conflicted parameters are prefixed with the
 | `cookie` | `id` | `cookieId` |
 | `body` | `id` | `bodyId` |
 
-Only conflicted names are renamed. Unique parameter names are kept as-is.
+Only conflicted names are renamed. Unique parameter names are kept as-is. A renamed key that another input already uses gets a number (`headerId2`), so every input key names one value.
 
 ---
 

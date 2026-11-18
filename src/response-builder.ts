@@ -27,20 +27,20 @@ function responseDescription(response: ResponseObject): unknown {
 }
 
 /** A response's status as the output gives it: a code, a range (`'2XX'`), or 0 for `default`. */
-type ResponseStatus = number | ResponseStatusRange;
+export type ResponseStatus = number | ResponseStatusRange;
 
 /** A range key: one digit from 1 to 5, then `XX` in any case (`2XX`, `4xx`). */
 const RANGE_KEY = /^[1-5][Xx]{2}$/;
 
 /**
- * The status a response key gives: a range key upper-cased (`'2XX'`), else
- * the number `parseInt` reads (as it always has), or `undefined` when there is
- * none (`default` and other keys are handled apart).
+ * The status a Responses Object key names: a code from 100 to 599 written as
+ * three digits, or a range upper-cased (`'2XX'`); `undefined` for any other
+ * key (`default`, an extension, `200 `, `0200`). Shared by generation and
+ * lint. Internal.
  */
-function readStatusKey(key: string): ResponseStatus | undefined {
+export function readStatusKey(key: string): ResponseStatus | undefined {
   if (RANGE_KEY.test(key)) return `${key[0]}XX` as ResponseStatusRange;
-  const code = parseInt(key, 10);
-  return isNaN(code) ? undefined : code;
+  return /^[1-5]\d{2}$/.test(key) ? Number(key) : undefined;
 }
 
 /** Whether `status` is the range of `code`'s class (`'2XX'` covers 200 to 299). */
@@ -114,15 +114,27 @@ export class ResponseBuilder {
     }
 
     if (this.includeAllResponses) {
-      // Return union of all response schemas
+      // The union of all response schemas: `anyOf`, as a value can match more than one (two bodiless responses)
       return {
-        oneOf: candidates.map((candidate) => this.extractResponseSchema(candidate)),
+        anyOf: candidates.map((candidate) => this.extractResponseSchema(candidate)),
         description: 'Response can be one of multiple status codes',
       };
     } else {
       // Return only the preferred status code
       return this.extractResponseSchema(this.selectPreferredResponse(candidates));
     }
+  }
+
+  /**
+   * The status of each response `build` reads, in its order: a code, a range
+   * (`'2XX'`) or 0 for `default`. Read from the responses, never from a
+   * schema, which the document writes.
+   */
+  statuses(responses?: ResponsesObject): Array<number | ResponseStatusRange> {
+    const candidates = responses ? this.collectResponses(responses) : [];
+    const read =
+      candidates.length > 1 && !this.includeAllResponses ? [this.selectPreferredResponse(candidates)] : candidates;
+    return read.map((candidate) => candidate.statusCode);
   }
 
   /**

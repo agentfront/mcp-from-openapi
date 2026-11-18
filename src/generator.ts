@@ -1,6 +1,5 @@
-import * as yaml from 'yaml';
-// NOTE: `node:path` / `node:fs` are imported LAZILY inside `fromFile` (the only
-// consumer) so this module stays importable on V8-isolate runtimes (Cloudflare
+// NOTE: `node:path` / `node:fs` are imported LAZILY inside `fromFile` and the
+// file `$ref` reader (the only consumers) so this module stays importable on V8-isolate runtimes (Cloudflare
 // Workers / Deno), where those builtins (and the `node:process` they pull) are
 // unavailable. `fromJSON` / `fromYAML` / generation / `SecurityResolver` never
 // touch the filesystem and therefore never load them.
@@ -21,7 +20,6 @@ import type {
   OperationWithContext,
   ParameterMapper,
   ToolMetadata,
-  ServerObject,
   ServerInfo,
   PathItemObject,
   JsonSchema,
@@ -30,24 +28,35 @@ import type {
   ReferenceObject,
   ResponseStatusRange,
 } from './types';
-import { DIAGNOSTIC_CODES, MAX_DIAGNOSTICS } from './types';
+import {
+  DEFAULT_MAX_REFERENCED_BYTES,
+  DEFAULT_MAX_REFERENCED_DOCUMENTS,
+  DIAGNOSTIC_CODES,
+  MAX_DIAGNOSTICS,
+} from './types';
 import {
   appendPointer,
   describeValue,
   detectSpecVersion,
   getOperation,
+  getSpecProfile,
   isFeatureAvailable,
+  LATEST_SPEC_FAMILY,
   isSpecObject,
   jsonPointer,
   listOperations,
   ownProperty,
   parameterNameNotStringDiagnostic,
+  pathTemplateNames,
   readParameterName,
   resolveOperationLayout,
+  securitySchemeProblem,
+  setOwnProperty,
   toStandardMethod,
   MAX_CONVERSION_ENTRIES,
   upgradeSwagger2,
   wireMethod,
+  wrapReferenceSiblings,
   diagnosticKey,
   type OperationEntry,
   type OperationLayout,
@@ -56,6 +65,7 @@ import {
   type WithExtensions,
 } from './spec';
 import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
+import type { FileHandle } from 'node:fs/promises';
 import { isNeverSchema, isPresentSchema, isReferenceObject } from './types';
 import {
   ParameterResolver,
@@ -68,8 +78,14 @@ import {
   type ParameterSlot,
   type QuerystringProblem,
 } from './parameter-resolver';
-import { ResponseBuilder } from './response-builder';
-import { SchemaBuilder, fitSchemaDepth, resolveSchemaLimits } from './schema-builder';
+import { ResponseBuilder, readStatusKey, type ResponseStatus } from './response-builder';
+import {
+  SchemaBuilder,
+  fitSchemaDepth,
+  positiveOr,
+  resolveMaxTotalSchemaNodes,
+  resolveSchemaLimits,
+} from './schema-builder';
 import {
   extractExtensionOverrides,
   extractExtensionSettings,
@@ -94,16 +110,21 @@ import { GenerationError, LoadError, OverlayError, ParseError, SchemaError, Ssrf
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { emitToolTypeScript } from './type-signature';
 import {
-  hostListIncludes,
+  allowListIncludes,
+  blockListIncludes,
   isBlockedHostname,
   normalizeSsrfOptions,
   safeFetch,
   safeFetchWithFinalUrl,
+  DEFAULT_MAX_RESPONSE_BYTES,
 } from './ssrf';
 import {
+  asUrlPath,
+  findReference,
   findRelativeReference,
   findSelfReferences,
   fragmentPointerTokens,
+  normalizeEscapes,
   parseDocumentUri,
   pointerTargetProblem,
   redactUserInfo,
@@ -114,7 +135,8 @@ import {
   retrievalUriOf,
   type DocumentBase,
 } from './base-uri';
-import { copyJsonValue, type CopyBudget } from './json-copy';
+import { assertBoundedExpansion, copyJsonValue, type CopyBudget } from './json-copy';
+import { parseYamlText } from './yaml-document';
 import { copyReferenceSites, recordReferenceSite } from './reference-sites';
 import { classifyMediaType } from './media-type';
 
@@ -129,7 +151,7 @@ const DEFAULT_MAX_TOOL_NAME_LENGTH = 64;
  * almost always succeeds), but finite so a tiny `maxToolNameLength` whose
  * entire name space is exhausted fails loudly instead of looping forever.
  */
-const MAX_NAME_DEDUP_ATTEMPTS = 256;
+export const MAX_NAME_DEDUP_ATTEMPTS = 256;
 
 /**
  * Parameter locations the generator maps to a request (`querystring`, from
@@ -140,31 +162,41 @@ const MAX_NAME_DEDUP_ATTEMPTS = 256;
  */
 const MAPPED_PARAMETER_LOCATIONS: readonly string[] = Object.freeze(['path', 'query', 'querystring', 'header', 'cookie']);
 
+/** A Security Scheme Object a requirement names, or why it names none (`code`: `UNRESOLVED_SECURITY_SCHEME` if absent) */
+type FoundSecurityScheme =
+  | { name: string; scheme: Record<string, unknown> }
+  | { problem: string; code?: typeof DIAGNOSTIC_CODES.UNSUPPORTED_SECURITY_SCHEME };
+
 /**
- * Whether `method` (an operation's method as `listOperations` gives it)
- * passes a method filter: a standard method matches in any case (`'GET'`
- * matches `get`), an `additionalOperations` method only exactly as written.
+ * `scheme` as found, or why it cannot be sent: generation sends every version's scheme types. A Reference Object
+ * left by `dereference: false` is read as before (`toSecurityRequirement`).
  */
-function matchesMethodFilter(filter: readonly string[], method: string): boolean {
-  const standard = toStandardMethod(method);
-  return filter.some((candidate) =>
-    standard === undefined ? candidate === method : toStandardMethod(candidate) === standard,
-  );
+function sendableScheme(name: string, scheme: Record<string, unknown>): FoundSecurityScheme {
+  const found = isReferenceObject(scheme)
+    ? undefined
+    : securitySchemeProblem(scheme, getSpecProfile(LATEST_SPEC_FAMILY));
+  return found === undefined
+    ? { name, scheme }
+    : { problem: found.problem, code: DIAGNOSTIC_CODES.UNSUPPORTED_SECURITY_SCHEME };
 }
 
 /**
- * Sets `key` as an own data property. Plain assignment of the key
- * `__proto__` replaces the object's prototype instead, so a document key
- * `__proto__` (which `JSON.parse` creates as an own property) would vanish
- * and its value's fields would be inherited by the object.
+ * Whether a method filter names `method` (an operation's method as
+ * `listOperations` gives it): a standard method in any case (`'GET'` names
+ * `get`), an `additionalOperations` method exactly as written, or in any case
+ * with `additionalInAnyCase` (an exclusion: a document cannot pass one by
+ * spelling `PURGE` as `Purge`).
  */
-function setOwnProperty(target: Record<string, unknown>, key: string, value: unknown): void {
-  if (key === '__proto__') {
-    Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
-  } else {
-    target[key] = value;
-  }
+function matchesMethodFilter(filter: readonly string[], method: string, additionalInAnyCase: boolean): boolean {
+  const standard = toStandardMethod(method);
+  const additional = additionalInAnyCase ? method.toLowerCase() : method;
+  return filter.some((candidate) =>
+    standard === undefined
+      ? (additionalInAnyCase ? candidate.toLowerCase() : candidate) === additional
+      : toStandardMethod(candidate) === standard,
+  );
 }
+
 
 /** A validation warning as a diagnostic. */
 function fromValidationWarning(warning: ValidationWarning): SpecDiagnostic {
@@ -213,11 +245,19 @@ function pathKey(path: string): string {
  */
 const skippedOperations = new WeakSet<object>();
 
+/** All conversions of one tool schema together may charge this many times `maxSchemaNodes`; truncation then cuts the result to it */
+const SHARED_CONVERSION_BUDGET_FACTOR = 4;
+
+/** Errors that end a whole `generateTools` run instead of one tool */
+const runFailures = new WeakSet<object>();
+
 /**
  * Apply the `secureDefaults` load preset: redirects off, external `$ref`
  * resolution disabled. Explicitly-set options always win over the preset.
  */
-function applySecureDefaults(options: LoadOptions): LoadOptions {
+function applySecureDefaults(given: LoadOptions | null): LoadOptions {
+  // `null`, from a caller without types, is no options
+  const options = given ?? {};
   if (!options.secureDefaults) return options;
   return {
     ...options,
@@ -246,7 +286,7 @@ interface RefTarget {
 
 /** The part of `$RefParser`'s `$Refs` a resolver reads: where the entry document is. */
 interface RefParserRefs {
-  _root$Ref?: { path?: string };
+  _root$Ref?: { path?: string; value?: unknown };
 }
 
 /** Longest stretch of a reference, base or URL quoted in a dereference error. */
@@ -303,6 +343,7 @@ type RefRule =
   | 'missing-target'
   | 'invalid-document'
   | 'base-too-long'
+  | 'too-many-documents'
   | 'unreadable';
 
 /** Why a reference cannot be read, for `ExternalRefError`. */
@@ -346,14 +387,14 @@ function explainUnreadableRef(url: string, policy: RefPolicy): RefRefusal {
   const parsed = parseUrl(url);
   if (parsed === undefined) return { rule: 'unreadable', reason: 'it is not a valid URL' };
   const host = describeValue(parsed.hostname, REF_TEXT_MAX_LENGTH);
-  if (policy.allowedHosts.length > 0 && !hostListIncludes(policy.allowedHosts, parsed.hostname)) {
+  if (policy.allowedHosts.length > 0 && !allowListIncludes(policy.allowedHosts, parsed.hostname)) {
     return {
       rule: 'host-not-allowed',
       reason: `its host ${host} is not in refResolution.allowedHosts`,
       allow: 'add the host to refResolution.allowedHosts to read it',
     };
   }
-  if (hostListIncludes(policy.blockedHosts, parsed.hostname)) {
+  if (blockListIncludes(policy.blockedHosts, parsed.hostname)) {
     return { rule: 'host-blocked', reason: `its host ${host} is in refResolution.blockedHosts` };
   }
   // The http resolver's canRead refuses an allowed protocol for no other reason
@@ -412,6 +453,94 @@ function withoutQuery(url: string): string {
   return url.replace(/\?[^#]*/s, '?...');
 }
 
+/** The URL a document's own `$id` names, as `$RefParser` scopes it: absolute, or resolved against `base` */
+function idScopeOf(document: unknown, base: string | undefined): string | undefined {
+  const id = ownProperty(document, '$id');
+  if (typeof id !== 'string') return undefined;
+  if (URL.canParse(id)) return new URL(id).href;
+  return URL.canParse(id, base) ? new URL(id, base).href : undefined;
+}
+
+/** Escapes `$RefParser` decodes in a file path before `decodeURI`, which keeps them */
+const RESERVED_PATH_ESCAPES = /%(?:23|24|26|2C|3F|40)/gi;
+
+const FILE_READ_CHUNK_BYTES = 64 * 1024;
+
+/** The bytes of `handle` to its end, or `undefined` past `limit`: a size can be wrong (procfs says 0, a file grows) */
+async function readUpTo(handle: FileHandle, limit: number): Promise<Buffer | undefined> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const { bytesRead, buffer } = await handle.read({ buffer: Buffer.alloc(FILE_READ_CHUNK_BYTES) });
+    if (bytesRead === 0) return Buffer.concat(chunks, total);
+    total += bytesRead;
+    if (total > limit) return undefined;
+    chunks.push(buffer.subarray(0, bytesRead));
+  }
+}
+
+/**
+ * The local file a reference names, found as `$RefParser`'s file resolver finds it, read only when it is a
+ * regular file of at most `DEFAULT_MAX_RESPONSE_BYTES`: a device never ends, and opening a pipe waits for a writer
+ * (it is opened without waiting). A `file:` URL naming a host (a network share) is refused.
+ */
+async function readLocalFile(reference: string): Promise<Buffer | RefRefusal> {
+  const [{ promises, constants }, { fileURLToPath }] = await Promise.all([import('node:fs'), import('node:url')]);
+  try {
+    let path: string;
+    if (/^file:/i.test(reference)) {
+      const url = new URL(reference);
+      if (url.host !== '') return { rule: 'file-error', reason: 'it names a host (a network share)' };
+      path = fileURLToPath(url);
+    } else {
+      const escaped = reference.replace(/%(?![0-9A-Fa-f]{2})/g, '%25');
+      path = decodeURI(escaped.replace(RESERVED_PATH_ESCAPES, (escape) => String.fromCharCode(parseInt(escape.slice(1), 16))));
+    }
+    // `O_NONBLOCK` is undefined on Windows, which `|` reads as 0
+    const handle = await promises.open(path.replace(/[\\/]$/, ''), constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      const stats = await handle.stat();
+      if (!stats.isFile()) return { rule: 'file-error', reason: 'it is not a regular file' };
+      const tooLarge: RefRefusal = {
+        rule: 'too-large',
+        reason: `the file exceeds ${DEFAULT_MAX_RESPONSE_BYTES} bytes`,
+      };
+      if (stats.size > DEFAULT_MAX_RESPONSE_BYTES) return tooLarge;
+      return (await readUpTo(handle, DEFAULT_MAX_RESPONSE_BYTES)) ?? tooLarge;
+    } finally {
+      await handle.close();
+    }
+  } catch (error: unknown) {
+    const { code, message } = Object(error) as { code?: unknown; message?: unknown };
+    return {
+      rule: 'file-error',
+      reason:
+        typeof code === 'string'
+          ? `the file cannot be read (${messageText(code, 32)})`
+          : messageText(String(message), REF_TEXT_MAX_LENGTH),
+    };
+  }
+}
+
+/**
+ * The message of an error a load met, for a load error: a parser quotes the document, so the text is bounded and
+ * escaped, and a YAML code frame (after the first blank line) is left out.
+ */
+function parserMessage(error: unknown): string {
+  /* c8 ignore next -- every parser and reader throws an Error */
+  const message = error instanceof Error ? error.message : String(error);
+  return messageText(message.split('\n\n', 1)[0], DEREFERENCE_ERROR_MAX_LENGTH);
+}
+
+/** What a reference error shows for the working directory, which tells a document's author where the host runs */
+const WORKING_DIRECTORY = '<working directory>/';
+
+/** The working directory as a reference resolved against it holds it, written out and as a URL path writes it */
+function workingDirectoryForms(): string[] {
+  const directory = `${process.cwd().replace(/\\/g, '/').replace(/\/$/, '')}/`;
+  return directory === '/' ? [] : [...new Set([directory, asUrlPath(directory)])];
+}
+
 /**
  * An external reference that cannot be read, thrown from a `$RefParser`
  * resolver (and carried out as the `cause` of its error) or before it runs:
@@ -439,14 +568,22 @@ class ExternalRefError extends Error {
         : hash === -1
           ? ''
           : (target.baseUrl as string).slice(hash);
-    const base = (hash === -1 ? target.baseUrl : target.baseUrl?.slice(0, hash))?.replace(/\?.*$/s, '?...');
-    // A reference can carry user information, which may be a real credential: never quoted, also where
-    // resolving moved it into a path (`https:u:p@h/x` read as the local file `<cwd>/u:p@h/x`)
+    // User information may be a real credential: never quoted, also where resolving moved it into a path
+    // (`https:u:p@h/x` read as the local file `<cwd>/u:p@h/x`); nor are queries or the working directory
     const secrets = target.reference === undefined ? [] : userInfoOf(target.reference);
+    const hidden = [
+      ...secrets.map((secret): [string, string] => [secret, '***']),
+      ...workingDirectoryForms().map((form): [string, string] => [form, WORKING_DIRECTORY]),
+    ];
     const scrub = (text: string): string =>
-      secrets.reduce((scrubbed, secret) => scrubbed.split(secret).join('***'), redactUserInfo(text));
-    const resolved = scrub(withoutQuery(target.url));
-    const reference = target.reference === undefined ? undefined : redactUserInfo(target.reference);
+      hidden.reduce(
+        (scrubbed, [secret, label]) => scrubbed.split(secret).join(label),
+        redactUserInfo(withoutQuery(text)),
+      );
+    const base =
+      target.baseUrl === undefined ? undefined : scrub(hash === -1 ? target.baseUrl : target.baseUrl.slice(0, hash));
+    const resolved = scrub(target.url);
+    const reference = target.reference === undefined ? undefined : scrub(target.reference);
     const quote = (text: string): string => describeValue(text, REF_TEXT_MAX_LENGTH);
     const what =
       reference === undefined
@@ -456,7 +593,7 @@ class ExternalRefError extends Error {
     // A relative reference of a document that has no base URI resolves against the working directory
     const relative = reference !== undefined && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(reference);
     const hint =
-      !options.documentHasBase && relative
+      !options.documentHasBase && relative && (base?.startsWith(WORKING_DIRECTORY) ?? true)
         ? ' (the document has no base URI, so its relative references resolve against the working directory: ' +
           'load it with fromFile or fromURL, or pass LoadOptions.documentUri)'
         : '';
@@ -469,7 +606,8 @@ class ExternalRefError extends Error {
       ...(base === undefined ? {} : { base: bounded(base) }),
       resolved: bounded(resolved),
     };
-    if (options.location !== undefined) this.pointer = jsonPointer(...options.location);
+    // Bounded like the other context fields: a pointer of many levels is display-only then
+    if (options.location !== undefined) this.pointer = bounded(jsonPointer(...options.location));
   }
 }
 
@@ -538,27 +676,80 @@ interface OrderedReads {
    * request or file read running after it settles.
    */
   settle(): Promise<void>;
+  /** Counts one more referenced document; why it may not be read when a limit is reached, which stops reading */
+  admit(): RefRefusal | undefined;
+  /** Counts the bytes of a document read; why reading stops when they pass the limit */
+  account(size: number): RefRefusal | undefined;
+}
+
+/** How many referenced documents are read at the same time */
+const MAX_CONCURRENT_READS = 8;
+
+/** A dereference may run this many times `LoadOptions.timeout` */
+const DEREFERENCE_TIMEOUT_FACTOR = 10;
+
+/** The limits of the referenced documents one dereference reads */
+interface ReadLimits {
+  /** `refResolution.maxDocuments` */
+  maxDocuments: number;
+  /** `refResolution.maxTotalBytes` */
+  maxTotalBytes: number;
+  /** `LoadOptions.timeout`; the dereference may take `DEREFERENCE_TIMEOUT_FACTOR` times it */
+  timeoutMs: number;
 }
 
 const ignore = (): void => undefined;
 
+const notRead = (): Error => new Error('Not read: an earlier reference could not be read');
+
 /**
  * Wraps the reads of one dereference so their results are delivered in the
- * order they were asked for, one per turn of the event loop, while the reads
- * themselves run in parallel. `$RefParser` asks in document order (the entry
- * document's references depth-first, then each document's as it is parsed),
+ * order they were asked for, one per turn of the event loop, while at most
+ * `MAX_CONCURRENT_READS` run at a time. `$RefParser` asks in document order,
  * so the first reference that cannot be read is always the one reported,
- * whatever order the network or the disk answers in. Once one fails, reads
- * asked for later are not started; neither are they once `settle` is called
- * (the dereference failed some other way: a document that does not parse).
+ * whatever order the network or the disk answers in. Once one fails, or
+ * `settle` is called, reads asked for later are not started.
  */
-function orderedReads(): OrderedReads {
+function orderedReads(limits: ReadLimits): OrderedReads {
   let tail: Promise<unknown> = Promise.resolve();
   let failed = false;
+  let running = 0;
+  let documents = 0;
+  let bytes = 0;
+  const deadline = Date.now() + limits.timeoutMs * DEREFERENCE_TIMEOUT_FACTOR;
+  const pastDeadline = (): RefRefusal | undefined => {
+    if (Date.now() <= deadline) return undefined;
+    failed = true;
+    return {
+      rule: 'timeout',
+      reason: `reading the referenced documents takes longer than ${limits.timeoutMs * DEREFERENCE_TIMEOUT_FACTOR} ms (ten times LoadOptions.timeout)`,
+    };
+  };
+  const waiting: Array<() => void> = [];
   const started: Array<Promise<void>> = [];
+  const startWaiting = (): void => {
+    while (waiting.length > 0 && (failed || running < MAX_CONCURRENT_READS)) (waiting.shift() as () => void)();
+  };
+  const startWhenFree = <T>(read: () => Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      waiting.push(() => {
+        if (failed) {
+          reject(notRead());
+          return;
+        }
+        running++;
+        read()
+          .then(resolve, reject)
+          .finally(() => {
+            running--;
+            startWaiting();
+          });
+      });
+      startWaiting();
+    });
   return {
     read: <T>(read: () => Promise<T>): Promise<T> => {
-      const reading = failed ? Promise.reject(new Error('Not read: an earlier reference could not be read')) : read();
+      const reading = failed ? Promise.reject(notRead()) : startWhenFree(read);
       if (!failed) started.push(reading.then(ignore, ignore));
       reading.catch(ignore);
       const delivered = tail.then(() => reading);
@@ -570,9 +761,46 @@ function orderedReads(): OrderedReads {
     },
     settle: async () => {
       failed = true;
+      startWaiting();
       await Promise.all(started);
     },
+    admit: () => {
+      if (++documents > limits.maxDocuments) {
+        failed = true;
+        return {
+          rule: 'too-many-documents',
+          reason: `the document needs more than ${limits.maxDocuments} referenced documents (refResolution.maxDocuments)`,
+          allow: 'raise refResolution.maxDocuments to read them',
+        };
+      }
+      return pastDeadline();
+    },
+    // Checked when a read completes too: one that ends past the deadline fails the dereference
+    account: (size) => {
+      if ((bytes += size) > limits.maxTotalBytes) {
+        failed = true;
+        return {
+          rule: 'too-large',
+          reason: `the referenced documents read hold more than ${limits.maxTotalBytes} bytes (refResolution.maxTotalBytes)`,
+          allow: 'raise refResolution.maxTotalBytes to read them',
+        };
+      }
+      return pastDeadline();
+    },
   };
+}
+
+/** The JSON values in `roots`, counted without recursion */
+function countJsonValues(roots: unknown[]): number {
+  let count = 0;
+  const stack = [...roots];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (value === undefined) continue;
+    count++;
+    if (value !== null && typeof value === 'object') for (const child of Object.values(value)) stack.push(child);
+  }
+  return count;
 }
 
 /** Does the schema tree contain an array without maxItems? Cycle-safe. */
@@ -646,6 +874,16 @@ function onlyScalarJson(schema: unknown): boolean {
   );
 }
 
+/** The `UNRESOLVED_REFERENCE` warning for a Reference Object at `pointer` that generation needs resolved */
+function unresolvedReference(method: string, path: string, pointer: string, consequence: string): SpecDiagnostic {
+  return {
+    severity: 'warning',
+    code: DIAGNOSTIC_CODES.UNRESOLVED_REFERENCE,
+    message: `${operationLabel(method, path)}: a reference at ${describeValue(pointer)} was not resolved (secureDefaults does not read external references); ${consequence}`,
+    path: pointer,
+  };
+}
+
 /** Assemble the tool description per the configured strategy. */
 function composeDescription(
   operation: OperationObject,
@@ -696,7 +934,8 @@ function propertyNames(schema: Record<string, unknown>, cap = 8): string {
 function summarizeOutputSchema(schema: JsonSchema): string | undefined {
   const record = schema as Record<string, unknown>;
 
-  const variants = record['oneOf'];
+  // The union ResponseBuilder makes of several responses
+  const variants = record['anyOf'];
   if (Array.isArray(variants) && variants.length > 0) {
     const first = variants[0];
     /* c8 ignore next 2 -- ResponseBuilder variants are always objects; guard for hand-built schemas */
@@ -732,31 +971,34 @@ function summarizeOutputSchema(schema: JsonSchema): string | undefined {
 }
 
 /**
- * Convert a path glob to a RegExp: `*` matches within one path segment,
- * `**` across segments, `?` a single non-slash character.
+ * Whether `path` matches `glob`: `*` matches within one path segment, `**` across segments, `?` one character
+ * other than `/`. Every glob position is followed at once, so the time is at most glob x path (no backtracking).
  */
-function globToRegExp(glob: string): RegExp {
-  let pattern = '^';
-  for (let i = 0; i < glob.length; i++) {
-    const char = glob[i];
-    if (char === '*') {
-      if (glob[i + 1] === '*') {
-        pattern += '.*';
-        i++;
-      } else {
-        pattern += '[^/]*';
-      }
-    } else if (char === '?') {
-      pattern += '[^/]';
-    } else {
-      pattern += char.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+function matchesGlob(glob: string, path: string): boolean {
+  const tokens = Array.from(glob.matchAll(/\*\*|[\s\S]/g), ([token]) => token);
+  // A star also matches nothing; a Set visits what is added while it is iterated
+  const withEmptyStars = (positions: Set<number>): Set<number> => {
+    for (const position of positions) if (tokens[position]?.startsWith('*')) positions.add(position + 1);
+    return positions;
+  };
+  let positions = withEmptyStars(new Set([0]));
+  for (let index = 0; index < path.length && positions.size > 0; index++) {
+    const character = path[index];
+    const next = new Set<number>();
+    for (const position of positions) {
+      const token = tokens[position];
+      if (token === '**' || (token === '*' && character !== '/')) next.add(position);
+      else if (token === character || (token === '?' && character !== '/')) next.add(position + 1);
     }
+    positions = withEmptyStars(next);
   }
-  return new RegExp(`${pattern}$`);
+  return positions.has(tokens.length);
 }
 
+/** A path key and each glob are matched as a client sends them: `%61` is `a`, any other escape upper-cased */
 function matchesAnyGlob(path: string, globs: string[]): boolean {
-  return globs.some((glob) => globToRegExp(glob).test(path));
+  const canonicalPath = normalizeEscapes(path);
+  return globs.some((glob) => matchesGlob(normalizeEscapes(glob), canonicalPath));
 }
 
 /**
@@ -808,6 +1050,28 @@ export function fnv1aHex(input: string): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/** `GenerateOptions.maxToolNameLength`: the default unless it is a number of at least 1 */
+export function maxToolNameLength(value: unknown): number {
+  return typeof value === 'number' && value >= 1 ? value : DEFAULT_MAX_TOOL_NAME_LENGTH;
+}
+
+/**
+ * `name` with a hash of `seed` appended, reseeded (`seed#`) while the result is in `usedNames`; `undefined`
+ * after `MAX_NAME_DEDUP_ATTEMPTS`, since a tiny `maxLength` (1 leaves 16 hex names) can exhaust the name space.
+ */
+export function dedupedToolName(
+  name: string,
+  seed: string,
+  maxLength: number,
+  usedNames: ReadonlySet<string>,
+): string | undefined {
+  for (let attempt = 0, attemptSeed = seed; attempt < MAX_NAME_DEDUP_ATTEMPTS; attempt++, attemptSeed += '#') {
+    const deduped = normalizeToolName(`${name}_${fnv1aHex(attemptSeed)}`, maxLength, attemptSeed);
+    if (!usedNames.has(deduped)) return deduped;
+  }
+  return undefined;
 }
 
 /**
@@ -893,6 +1157,9 @@ export class OpenAPIToolGenerator {
    * user information or fragment); `LoadOptions.documentUri` replaces it.
    */
   private constructor(document: OpenAPIDocument, rawOptions: LoadOptions = {}, retrievalUri?: string) {
+    if (!isSpecObject(document)) {
+      throw new ParseError(`An OpenAPI document must be an object, found ${describeValue(document)}`);
+    }
     this.document = document;
     const options = applySecureDefaults(rawOptions);
     // Checked before anything else: a bad option fails the load, whatever the document
@@ -1121,7 +1388,7 @@ export class OpenAPIToolGenerator {
 
       let document: OpenAPIDocument;
       if (contentType.includes('yaml') || contentType.includes('yml') || url.match(/\.ya?ml$/i)) {
-        document = yaml.parse(text);
+        document = parseYamlText(text) as OpenAPIDocument;
       } else {
         document = JSON.parse(text);
       }
@@ -1131,8 +1398,7 @@ export class OpenAPIToolGenerator {
       if (error instanceof LoadError || error instanceof OverlayError) {
         throw error;
       }
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      throw new LoadError(`Failed to load OpenAPI spec from URL: ${errorMessage}`, {
+      throw new LoadError(`Failed to load OpenAPI spec from URL: ${parserMessage(error)}`, {
         url,
         originalError: error,
       });
@@ -1150,7 +1416,7 @@ export class OpenAPIToolGenerator {
   static async fromFile(filePath: string, options: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
     try {
       // A bad option fails before anything is read
-      if (options.documentUri !== undefined) parseDocumentUri(options.documentUri);
+      if (options?.documentUri !== undefined) parseDocumentUri(options.documentUri);
       // Lazy-load Node builtins so the module is importable off-Node (Workers).
       const [path, fs, url] = await Promise.all([import('path'), import('fs/promises'), import('url')]);
       /* c8 ignore next -- both branches tested but V8 source-map misaligns ternary */
@@ -1160,7 +1426,7 @@ export class OpenAPIToolGenerator {
 
       let document: OpenAPIDocument;
       if (ext === '.yaml' || ext === '.yml') {
-        document = yaml.parse(content);
+        document = parseYamlText(content) as OpenAPIDocument;
       } else if (ext === '.json') {
         document = JSON.parse(content);
       } else {
@@ -1168,7 +1434,7 @@ export class OpenAPIToolGenerator {
         try {
           document = JSON.parse(content);
         } catch {
-          document = yaml.parse(content);
+          document = parseYamlText(content) as OpenAPIDocument;
         }
       }
 
@@ -1177,9 +1443,7 @@ export class OpenAPIToolGenerator {
       if (error instanceof OverlayError || error instanceof LoadError) {
         throw error;
       }
-      /* c8 ignore next */
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      throw new LoadError(`Failed to load OpenAPI spec from file: ${errorMessage}`, {
+      throw new LoadError(`Failed to load OpenAPI spec from file: ${parserMessage(error)}`, {
         filePath,
         originalError: error,
       });
@@ -1191,16 +1455,14 @@ export class OpenAPIToolGenerator {
    */
   static async fromYAML(yamlString: string, options: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
     try {
-      const document = yaml.parse(yamlString);
+      const document = parseYamlText(yamlString) as OpenAPIDocument;
       return new OpenAPIToolGenerator(document, options);
     } catch (error: unknown) {
       // An overlay or `documentUri` problem is not a YAML one
       if (error instanceof OverlayError || error instanceof LoadError) {
         throw error;
       }
-      /* c8 ignore next */
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      throw new ParseError(`Failed to parse YAML: ${errorMessage}`, {
+      throw new ParseError(`Failed to parse YAML: ${parserMessage(error)}`, {
         originalError: error,
       });
     }
@@ -1216,6 +1478,7 @@ export class OpenAPIToolGenerator {
   static async fromJSON(json: object, options: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
     let document: OpenAPIDocument;
     try {
+      assertBoundedExpansion(json);
       document = JSON.parse(JSON.stringify(json));
     } catch (error: unknown) {
       // JSON throws an Error for each: a RangeError for the call stack (or a text too long), a TypeError, ...
@@ -1369,15 +1632,13 @@ export class OpenAPIToolGenerator {
    * read goes through `orderedReads`, so the failure reported is the first in
    * document order whatever order the reads finish in.
    *
-   * `fileResolver` is `$RefParser`'s own file resolver, whose `read` is
-   * wrapped (its `canRead` is kept); `ordered` is the dereference's read queue.
+   * A local file is read by `readLocalFile` (`$RefParser`'s file resolver
+   * keeps its `canRead`); `reads` is the dereference's read queue.
    */
-  private buildRefParserOptions(
-    fileResolver: { read(file: RefTarget): unknown },
-    ordered: OrderedReads['read'],
-  ): ParserOptions {
+  private buildRefParserOptions(reads: OrderedReads): ParserOptions {
+    const ordered = reads.read;
     const raw = this.options.refResolution;
-    const refOpts: Required<RefResolutionOptions> = {
+    const refOpts: Omit<Required<RefResolutionOptions>, 'maxDocuments' | 'maxTotalBytes'> = {
       allowedProtocols: raw.allowedProtocols ?? ['http', 'https'],
       allowedHosts: raw.allowedHosts ?? [],
       blockedHosts: raw.blockedHosts ?? [],
@@ -1409,7 +1670,7 @@ export class OpenAPIToolGenerator {
         }
 
         // Check host allowlist (if configured), case- and trailing-dot-insensitively
-        if (hasHostAllowlist && !hostListIncludes(refOpts.allowedHosts, parsed.hostname)) {
+        if (hasHostAllowlist && !allowListIncludes(refOpts.allowedHosts, parsed.hostname)) {
           return false;
         }
 
@@ -1425,14 +1686,39 @@ export class OpenAPIToolGenerator {
     };
     const fileAllowed = allowedProtocols.has('file');
     const documentHasBase = this.documentBase?.href !== undefined;
-    // Where the `$ref` is, when it is in the entry document (`$RefParser` passes its `$Refs` third)
+    // Where the `$ref` is, when it is in the entry document (`$RefParser` passes its `$Refs` third). The base
+    // names it by pointer; with `$id` scopes (3.1, a root `$id` or `$schema`) it names the scope, so it is the
+    // entry document's first `$ref` to that document (one read serves every `$ref` to it)
     const locate = (file: RefTarget, refs: RefParserRefs | undefined): string[] | undefined => {
+      const root = refs?._root$Ref;
       const hash = file.baseUrl?.indexOf('#') ?? -1;
-      if (hash === -1 || (file.baseUrl as string).slice(0, hash) !== refs?._root$Ref?.path) return undefined;
-      return fragmentPointerTokens((file.baseUrl as string).slice(hash + 1));
+      if (hash !== -1) {
+        const inRoot = (file.baseUrl as string).slice(0, hash) === root?.path;
+        return inRoot ? fragmentPointerTokens((file.baseUrl as string).slice(hash + 1)) : undefined;
+      }
+      const inRoot = file.baseUrl === root?.path || file.baseUrl === idScopeOf(root?.value, root?.path);
+      const reference = file.reference;
+      if (!inRoot || typeof reference !== 'string') return undefined;
+      return findReference(root?.value, (ref) => ref.split('#', 1)[0] === reference)?.location;
     };
     const refuse = (file: RefTarget, refs: RefParserRefs | undefined, refusal: RefRefusal): never => {
       throw new ExternalRefError(file, refusal, { documentHasBase, location: locate(file, refs) });
+    };
+    const withinLimits = async <T>(
+      file: RefTarget,
+      refs: RefParserRefs | undefined,
+      read: () => Promise<T>,
+    ): Promise<T> => {
+      const refusal = reads.admit();
+      if (refusal) refuse(file, refs, refusal);
+      const content = await read();
+      // A file is read as bytes; a fetched document as text, counted in the UTF-8 bytes it was sent as
+      const size =
+        typeof content === 'string'
+          ? new TextEncoder().encode(content).byteLength
+          : (content as { length: number }).length;
+      const overLimit = reads.account(size);
+      return overLimit ? refuse(file, refs, overLimit) : content;
     };
 
     const resolveConfig: Record<string, unknown> = {
@@ -1440,22 +1726,12 @@ export class OpenAPIToolGenerator {
       file: fileAllowed
         ? {
             read: (file: RefTarget, _callback: unknown, refs?: RefParserRefs): Promise<unknown> =>
-              ordered(async () => {
-                try {
-                  return await fileResolver.read(file);
-                } catch (error: unknown) {
-                  // `$RefParser`'s file resolver gives the I/O error's code (ENOENT, EISDIR, ...)
-                  const { ioErrorCode, message } = Object(error) as { ioErrorCode?: unknown; message?: unknown };
-                  return refuse(file, refs, {
-                    rule: 'file-error',
-                    /* c8 ignore next 4 -- defensive: an error without a code is described by its message */
-                    reason:
-                      typeof ioErrorCode === 'string'
-                        ? `the file cannot be read (${messageText(ioErrorCode, 32)})`
-                        : messageText(String(message), REF_TEXT_MAX_LENGTH),
-                  });
-                }
-              }),
+              ordered(() =>
+                withinLimits(file, refs, async () => {
+                  const content = await readLocalFile(file.url);
+                  return Buffer.isBuffer(content) ? content : refuse(file, refs, content);
+                }),
+              ),
           }
         : false,
       refused: {
@@ -1484,27 +1760,29 @@ export class OpenAPIToolGenerator {
         // `this.options.headers` (the spec-load credentials) to third-party
         // `$ref` hosts — that would leak the spec's auth token cross-origin.
         read: (file: RefTarget, _callback: unknown, refs?: RefParserRefs): Promise<string> =>
-          ordered(async () => {
-            let response: Response;
-            try {
-              response = await safeFetch(file.url, {
-                timeoutMs: this.options.timeout,
-                followRedirects: false,
-                ssrf: refOpts,
-              });
-            } catch (error: unknown) {
-              // The guard's refusal (an address the name resolves to, a body too large, ...), a
-              // timeout or a network failure, with the reference it concerns
-              return refuse(file, refs, fetchFailure(error, this.options.timeout));
-            }
-            if (!response.ok) {
-              refuse(file, refs, {
-                rule: 'response',
-                reason: `the server answered ${response.status} ${describeValue(response.statusText, REF_TEXT_MAX_LENGTH)}`,
-              });
-            }
-            return response.text();
-          }),
+          ordered(() =>
+            withinLimits(file, refs, async () => {
+              let response: Response;
+              try {
+                response = await safeFetch(file.url, {
+                  timeoutMs: this.options.timeout,
+                  followRedirects: false,
+                  ssrf: refOpts,
+                });
+              } catch (error: unknown) {
+                // The guard's refusal (an address the name resolves to, a body too large, ...), a
+                // timeout or a network failure, with the reference it concerns
+                return refuse(file, refs, fetchFailure(error, this.options.timeout));
+              }
+              if (!response.ok) {
+                refuse(file, refs, {
+                  rule: 'response',
+                  reason: `the server answered ${response.status} ${describeValue(response.statusText, REF_TEXT_MAX_LENGTH)}`,
+                });
+              }
+              return response.text();
+            }),
+          ),
       };
     } else {
       resolveConfig['http'] = false;
@@ -1595,13 +1873,21 @@ export class OpenAPIToolGenerator {
     // The value of a `$ref` (cached under `key`) to `target`: a boolean schema
     // as it is; else a placeholder, cached first so a cycle back to it sees
     // it, filled once its walked target is known
+    const byTarget = new Map<object, Record<string, unknown>>();
     const refTo = (key: string, target: unknown): unknown => {
       if (typeof target === 'boolean') {
         cache.set(key, target);
         return target;
       }
+      // Every spelling of one pointer (`#//a`, `#a/`) shares the placeholder of its target
+      const shared = target !== null && typeof target === 'object' ? byTarget.get(target) : undefined;
+      if (shared !== undefined) {
+        cache.set(key, shared);
+        return shared;
+      }
       const placeholder: Record<string, unknown> = {};
       cache.set(key, placeholder);
+      if (target !== null && typeof target === 'object') byTarget.set(target, placeholder);
       frames.push({ children: [target], keys: null, next: 0, out: [], placeholder });
       return pending;
     };
@@ -1716,6 +2002,8 @@ export class OpenAPIToolGenerator {
         originalError: error,
       });
     }
+    // Before any `$ref` is read: dereferencing would drop the keywords beside a schema's `$ref`
+    if (getSpecProfile(this.specVersion.family)?.schemaReferenceSiblings) wrapReferenceSiblings(copy);
     const exact = new Map<object, readonly string[]>();
     const base = this.documentBase;
     if (base !== undefined) {
@@ -1777,13 +2065,16 @@ export class OpenAPIToolGenerator {
       return;
     }
     let refParser: typeof import('@apidevtools/json-schema-ref-parser') | undefined;
-    const reads = orderedReads();
+    const limits = this.options.refResolution;
+    const reads = orderedReads({
+      maxDocuments: positiveOr(limits.maxDocuments, DEFAULT_MAX_REFERENCED_DOCUMENTS),
+      maxTotalBytes: positiveOr(limits.maxTotalBytes, DEFAULT_MAX_REFERENCED_BYTES),
+      timeoutMs: this.options.timeout,
+    });
     try {
       refParser = await import('@apidevtools/json-schema-ref-parser');
-      // Its `read` is a function; the type also allows the static forms a plugin may take
-      const fileResolver = refParser.FileResolver as unknown as { read(file: RefTarget): unknown };
       const refParserOptions: ParserOptions = {
-        ...this.buildRefParserOptions(fileResolver, reads.read),
+        ...this.buildRefParserOptions(reads),
         dereference: {
           // Where each `$ref` is replaced, for a value that must be given back as written (see
           // src/reference-sites.ts). Called for every replacement, a circular one included
@@ -1907,6 +2198,7 @@ export class OpenAPIToolGenerator {
     const document = this.getDocument();
     const tools: McpOpenAPITool[] = [];
     const usedNames = new Set<string>();
+    const schemaNodes = this.schemaNodeBudget(options);
 
     if (!isSpecObject(document.paths)) {
       return tools;
@@ -1921,8 +2213,16 @@ export class OpenAPIToolGenerator {
     const sortedPaths = Object.entries(document.paths).sort(([a], [b]) => (a < b ? -1 : 1));
 
     for (const [pathStr, pathItem] of sortedPaths) {
-      // A path item that is still a reference (dereferencing off) is skipped, as before
-      if (ownProperty(pathItem, '$ref') !== undefined) continue;
+      // A path item that is still a reference (not read, or dereferencing off) holds no operation to read
+      if (isReferenceObject(pathItem)) {
+        this.addDiagnostic({
+          severity: 'warning',
+          code: DIAGNOSTIC_CODES.UNRESOLVED_REFERENCE,
+          message: `Path ${describeValue(pathStr)} is a reference that was not resolved; its operations make no tools`,
+          path: jsonPointer('paths', pathStr),
+        });
+        continue;
+      }
 
       for (const entry of this.walkPathItem(pathStr, pathItem, true)) {
         // Fixed methods are lowercase field names (names and dedup hashes are
@@ -1942,28 +2242,16 @@ export class OpenAPIToolGenerator {
           // stable, content-derived suffix — the (method, path) pair is unique
           // per operation, so the suffixed name is deterministic across runs.
           if (usedNames.has(tool.name)) {
-            const maxLength = options.maxToolNameLength ?? DEFAULT_MAX_TOOL_NAME_LENGTH;
-            // Recheck after renaming: the suffixed name can itself be taken
-            // (e.g. an operationId that mimics a suffixed name, or truncated
-            // hash-only names under tiny caps). Extending the seed reseeds
-            // the hash deterministically until a free name is found — bounded,
-            // because a tiny cap (e.g. 1 = 16 possible hex names) can exhaust
-            // the name space entirely.
-            let seed = `${method} ${pathStr}`;
-            let deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
-            let attempts = 1;
-            while (usedNames.has(deduped)) {
-              if (attempts >= MAX_NAME_DEDUP_ATTEMPTS) {
-                throw new GenerationError(
-                  `Unable to find a unique tool name for "${tool.name}" (${operationLabel(method, pathStr)}) ` +
-                    `within ${MAX_NAME_DEDUP_ATTEMPTS} attempts — the name space under maxToolNameLength=${maxLength} ` +
-                    `is exhausted. Increase maxToolNameLength or rename the operation.`,
-                  { name: tool.name, method, path: pathStr, maxToolNameLength: maxLength },
-                );
-              }
-              seed += '#';
-              deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
-              attempts++;
+            const maxLength = maxToolNameLength(options.maxToolNameLength);
+            // The suffixed name can itself be taken (an operationId mimicking one, hash-only names under a tiny cap)
+            const deduped = dedupedToolName(tool.name, `${method} ${pathStr}`, maxLength, usedNames);
+            if (deduped === undefined) {
+              throw new GenerationError(
+                `Unable to find a unique tool name for "${tool.name}" (${operationLabel(method, pathStr)}) ` +
+                  `within ${MAX_NAME_DEDUP_ATTEMPTS} attempts — the name space under maxToolNameLength=${maxLength} ` +
+                  `is exhausted. Increase maxToolNameLength or rename the operation.`,
+                { name: tool.name, method, path: pathStr, maxToolNameLength: maxLength },
+              );
             }
             tool = { ...tool, name: deduped };
             // The TypeScript declaration derives its type names from the tool
@@ -1977,14 +2265,22 @@ export class OpenAPIToolGenerator {
               };
             }
           }
+          schemaNodes.charge(tool);
           usedNames.add(tool.name);
           tools.push(tool);
         } catch (error: unknown) {
+          if (runFailures.has(error as object)) throw error;
           // Skipped on purpose: the reason is already a diagnostic
           if (skippedOperations.has(error as object)) continue;
           /* c8 ignore next */
           const errorMessage = error instanceof Error ? error.message : String(error);
           console.warn(`Failed to generate tool for ${operationLabel(method, pathStr)}:`, errorMessage);
+          this.addDiagnostic({
+            severity: 'warning',
+            code: DIAGNOSTIC_CODES.TOOL_GENERATION_FAILED,
+            message: `${operationLabel(method, pathStr)} makes no tool: ${messageText(errorMessage, DEREFERENCE_ERROR_MAX_LENGTH)}`,
+            path: operationPointer(pathStr, entry),
+          });
         }
       }
     }
@@ -2040,7 +2336,7 @@ export class OpenAPIToolGenerator {
     const document = this.getDocument();
 
     if (!document.paths) {
-      throw new Error('No paths defined in OpenAPI document');
+      throw new GenerationError('No paths defined in OpenAPI document', { path: pathStr, method });
     }
 
     // Own-property lookups: a path or method named `constructor` must not
@@ -2050,9 +2346,49 @@ export class OpenAPIToolGenerator {
     const entry = getOperation(pathItem, method, { layout: this.operationLayout });
 
     if (!entry) {
-      throw new Error(`Operation not found: ${operationLabel(String(method), pathStr)}`);
+      throw new GenerationError(`Operation not found: ${operationLabel(String(method), pathStr)}`, { path: pathStr, method });
     }
-    return this.buildToolGuarded(pathStr, pathItem, entry, options);
+    const tool = this.buildToolGuarded(pathStr, pathItem, entry, options);
+    this.schemaNodeBudget(options).charge(tool);
+    return tool;
+  }
+
+  /** Counts the schema nodes of the tools of one run against `maxTotalSchemaNodes` */
+  private schemaNodeBudget(options: GenerateOptions): { charge(tool: McpOpenAPITool): void } {
+    const limit = resolveMaxTotalSchemaNodes(options.maxTotalSchemaNodes, this.options.secureDefaults);
+    let total = 0;
+    return {
+      charge: (tool) => {
+        if (limit === Infinity) return;
+        total += countJsonValues([tool.inputSchema, tool.outputSchema, tool.metadata.responseStream?.itemSchema]);
+        if (total <= limit) return;
+        const error = new SchemaError(
+          `The generated tools hold more than ${limit} schema nodes (maxTotalSchemaNodes); generation stops. ` +
+            'Filter the operations, lower maxSchemaDepth or maxSchemaNodes, or raise maxTotalSchemaNodes.',
+          { maxTotalSchemaNodes: limit },
+        );
+        runFailures.add(error);
+        throw error;
+      },
+    };
+  }
+
+  /** Skips an operation whose request body is an unresolved reference, and reports each unresolved response */
+  private checkUnresolvedReferences(pathStr: string, entry: OperationEntry): void {
+    const pointer = operationPointer(pathStr, entry);
+    const { method, operation } = entry;
+    if (isReferenceObject(operation.requestBody)) {
+      const at = appendPointer(pointer, 'requestBody');
+      throw this.skipOperation(unresolvedReference(method, pathStr, at, 'the operation makes no tool'), {
+        path: pathStr,
+        method,
+      });
+    }
+    for (const [status, response] of isSpecObject(operation.responses) ? Object.entries(operation.responses) : []) {
+      if (isReferenceObject(response)) {
+        this.addDiagnostic(unresolvedReference(method, pathStr, appendPointer(pointer, 'responses', status), 'the response is ignored'));
+      }
+    }
   }
 
   /**
@@ -2127,9 +2463,12 @@ export class OpenAPIToolGenerator {
       if (!Array.isArray(parameters)) continue;
       for (let index = 0; index < parameters.length; index++) {
         const parameter: unknown = parameters[index];
-        if (isReferenceObject(parameter)) continue;
-        const name = ownProperty(parameter, 'name');
         const at = appendPointer(pointer, this.sourceIndex(parameters, index));
+        if (isReferenceObject(parameter)) {
+          if (this.options.dereference) return unresolvedReference(entry.method, pathStr, at, 'the operation makes no tool');
+          continue;
+        }
+        const name = ownProperty(parameter, 'name');
         if (unnamed === undefined && readParameterName(name).kind === 'invalid') {
           unnamed = {
             severity: 'warning',
@@ -2244,13 +2583,31 @@ export class OpenAPIToolGenerator {
     if (analysis.querystring) {
       return { skip: this.querystringDiagnostic(pathStr, entry, analysis.querystring, pointerOf(analysis.querystring.slot)) };
     }
+    // A path parameter the path has no template expression for would never be sent: it is no input
+    const templateNames = new Set(pathTemplateNames(pathStr));
+    const unsent = new Set<string>();
     for (const slot of analysis.effective) {
       const pointer = pointerOf(slot);
       for (const problem of parameterContentDiagnostics(slot.parameter, pointer)) this.addDiagnostic(problem);
       const generationOnly = this.parameterUseDiagnostic(slot.parameter, pointer);
       if (generationOnly !== undefined) this.addDiagnostic(generationOnly);
+      const name = ownProperty(slot.parameter, 'name');
+      if (ownProperty(slot.parameter, 'in') !== 'path' || typeof name !== 'string' || templateNames.has(name)) continue;
+      unsent.add(name);
+      this.addDiagnostic({
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.PARAMETER_IGNORED,
+        message:
+          `${operationLabel(entry.method, pathStr)}: the path parameter ${describeValue(name)} is not an input of ` +
+          `the tool: the path has no template expression for it, so its value would never be sent`,
+        path: pointer,
+      });
     }
-    return { analysis, pointerOf, pathLevel, operationLevel };
+    const sent = (list: unknown[]): unknown[] =>
+      unsent.size === 0
+        ? list
+        : list.filter((parameter) => ownProperty(parameter, 'in') !== 'path' || !unsent.has(ownProperty(parameter, 'name') as string));
+    return { analysis, pointerOf, pathLevel: sent(pathLevel), operationLevel: sent(operationLevel) };
   }
 
   /**
@@ -2387,16 +2744,28 @@ export class OpenAPIToolGenerator {
   }
 
   /**
-   * `UNSUPPORTED_STREAMING_REQUEST_BODY` when the media type a request body
-   * is read in declares `itemSchema` (OpenAPI 3.2, a streamed upload) and no
-   * `schema`: the body is left out of the tool's input.
+   * Why a request body is left out of the tool's input: its `content` lists no
+   * media type (`REQUEST_BODY_WITHOUT_MEDIA_TYPE`), or the media type it is
+   * read in declares `itemSchema` (OpenAPI 3.2, a streamed upload) and no
+   * `schema` (`UNSUPPORTED_STREAMING_REQUEST_BODY`).
    */
-  private streamingRequestBodyDiagnostic(pathStr: string, entry: OperationEntry): SpecDiagnostic | undefined {
+  private ignoredRequestBodyDiagnostic(pathStr: string, entry: OperationEntry): SpecDiagnostic | undefined {
     const content = ownProperty(ownProperty(entry.operation, 'requestBody'), 'content');
     if (!isSpecObject(content)) return undefined;
     const mediaType = selectRequestMediaType(content);
+    // A Swagger 2.0 body always converts with a media type, so this is a 3.x document's
+    if (mediaType === undefined) {
+      return {
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.REQUEST_BODY_WITHOUT_MEDIA_TYPE,
+        message:
+          `${operationLabel(entry.method, pathStr)}: the request body lists no media type; ` +
+          'the tool takes no body input',
+        path: appendPointer(operationPointer(pathStr, entry), 'requestBody', 'content'),
+      };
+    }
     // The resolver reads the body when its media type has a schema (`false` included)
-    const media = mediaType === undefined ? undefined : ownProperty(content, mediaType);
+    const media = ownProperty(content, mediaType);
     if (!isSpecObject(media) || isPresentSchema(media['schema'])) return undefined;
     const itemSchema = ownProperty(media, 'itemSchema');
     if (itemSchema === undefined || itemSchema === null) return undefined;
@@ -2406,7 +2775,7 @@ export class OpenAPIToolGenerator {
       message:
         `${operationLabel(entry.method, pathStr)}: the request body's media type ${describeValue(mediaType)} ` +
         `declares only itemSchema (a streamed body), which is not supported; the tool takes no body input`,
-      path: appendPointer(operationPointer(pathStr, entry), 'requestBody', 'content', mediaType!, 'itemSchema'),
+      path: appendPointer(operationPointer(pathStr, entry), 'requestBody', 'content', mediaType, 'itemSchema'),
       // A Swagger 2.0 document has no request body: it is one of the conversion's, which never
       // declares itemSchema, so this is defensive
       /* c8 ignore next */
@@ -2433,16 +2802,30 @@ export class OpenAPIToolGenerator {
     if (parameterCheck.skip !== undefined) {
       throw this.skipOperation(parameterCheck.skip, { path: pathStr, method });
     }
-    const streamingBody = this.streamingRequestBodyDiagnostic(pathStr, entry);
-    if (streamingBody !== undefined) this.addDiagnostic(streamingBody);
+    // After dereferencing, a reference left is an external one that was not read (secureDefaults)
+    if (this.options.dereference) this.checkUnresolvedReferences(pathStr, entry);
+    const ignoredBody = this.ignoredRequestBodyDiagnostic(pathStr, entry);
+    if (ignoredBody !== undefined) this.addDiagnostic(ignoredBody);
 
     // Extract security requirements, once: both the mapper and the metadata
-    // read them (an operation's own `security` replaces the document's)
+    // read them (an operation's own `security` list replaces the document's)
     let securityRequirements: SecurityRequirement[] | undefined = undefined;
-    const securitySpec = operation.security ?? document.security;
+    let securityAlternatives: SecurityRequirement[][] | undefined = undefined;
+    const ownSecurity: unknown = operation.security;
+    if (ownSecurity !== undefined && ownSecurity !== null && !Array.isArray(ownSecurity)) {
+      this.addDiagnostic({
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.INVALID_SECURITY_REQUIREMENT,
+        message:
+          `${operationLabel(method, pathStr)}: security must be a list of Security Requirements, found ` +
+          `${describeValue(ownSecurity)}; the document's requirements apply`,
+        path: appendPointer(operationPointer(pathStr, entry), 'security'),
+      });
+    }
+    const operationSecurity = Array.isArray(ownSecurity);
+    const securitySpec = operationSecurity ? ownSecurity : document.security;
     if (securitySpec) {
-      const securityPointer =
-        operation.security !== undefined ? appendPointer(operationPointer(pathStr, entry), 'security') : '/security';
+      const securityPointer = operationSecurity ? appendPointer(operationPointer(pathStr, entry), 'security') : '/security';
       const extracted = this.extractSecurityRequirements(securitySpec, document, securityPointer);
       if (extracted.unsatisfiable) {
         throw this.skipOperation(
@@ -2459,6 +2842,8 @@ export class OpenAPIToolGenerator {
         );
       }
       securityRequirements = extracted.requirements;
+      // Kept only for a choice: one requirement object is what `security` already says
+      if (extracted.alternatives.length > 1) securityAlternatives = extracted.alternatives;
     }
     for (const diagnostic of this.wholeQueryCredentialDiagnostics(
       pathStr,
@@ -2474,7 +2859,11 @@ export class OpenAPIToolGenerator {
     // truncation cuts at (so work stays bounded by what the output keeps), and
     // both phases share the node budget
     const { maxDepth: maxSchemaDepth, maxNodes: maxSchemaNodes } = resolveSchemaLimits(options);
-    const schemaConversion = (depth: number) => ({ maxDepth: depth, maxNodes: maxSchemaNodes });
+    const schemaConversion = (depth: number) => ({
+      maxDepth: depth,
+      maxNodes: maxSchemaNodes,
+      sharedBudget: { nodes: 0, maxNodes: maxSchemaNodes * SHARED_CONVERSION_BUDGET_FACTOR },
+    });
 
     // Format resolution, then depth truncation (applied last, so the final
     // schemas are bounded). Floor of 1: depth 0 would strip the ROOT
@@ -2548,14 +2937,41 @@ export class OpenAPIToolGenerator {
         new ParameterResolver(options.namingStrategy, {
           includeExamples: options.includeExamples,
           schemaConversion: schemaConversion(depth),
-        }).resolve(resolvedOperation, pathParameters, securityRequirements, options.includeSecurityInInput),
+        }).resolve(
+          resolvedOperation,
+          pathParameters,
+          securityRequirements,
+          options.includeSecurityInInput,
+          securityAlternatives,
+        ),
       (resolved) => resolved.inputSchema,
     );
-    const { inputSchema, mapper } = input.converted;
+    const { inputSchema, mapper, ignored } = input.converted;
     for (const diagnostic of this.requiredInputDiagnostics(pathStr, entry, inputSchema)) this.addDiagnostic(diagnostic);
+    for (const parameter of ignored) {
+      this.addDiagnostic({
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.PARAMETER_IGNORED,
+        message:
+          `${operationLabel(entry.method, pathStr)}: the ${parameter.in} parameter ${describeValue(parameter.name)} ` +
+          `is not an input of the tool: ${parameter.reason}`,
+        path: operationPointer(pathStr, entry),
+      });
+    }
 
     // Build response schema, and the streamed response's item schema (OpenAPI
     // 3.2 `itemSchema`), which is reported in metadata, never as outputSchema
+    for (const key of Object.keys(isSpecObject(operation.responses) ? operation.responses : {})) {
+      if (key === 'default' || key.startsWith('x-') || readStatusKey(key) !== undefined) continue;
+      this.addDiagnostic({
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.INVALID_RESPONSE_KEY,
+        message:
+          `${operationLabel(entry.method, pathStr)}: the response key ${describeValue(key)} is no status code (three ` +
+          `digits from 100 to 599), range (2XX) or default; the response is ignored`,
+        path: appendPointer(operationPointer(pathStr, entry), 'responses', key),
+      });
+    }
     const output = fit(
       'output schema',
       (depth) => new ResponseBuilder(options, schemaConversion(depth)).build(operation.responses),
@@ -2568,6 +2984,8 @@ export class OpenAPIToolGenerator {
       (responseStream) => responseStream?.itemSchema,
     );
     const responseStream = stream.converted;
+    // Read now: the naming callback below receives `operation` and may change it
+    const responseStatuses = new ResponseBuilder(options).statuses(operation.responses);
     // A schema cut shallower than maxSchemaDepth is reported once the tool is made (see the end)
     const reducedDepths = (
       [
@@ -2600,7 +3018,16 @@ export class OpenAPIToolGenerator {
       inferred || overrides.annotations ? { ...inferred, ...overrides.annotations } : undefined;
 
     // Extract metadata
-    const metadata = this.extractMetadata(pathStr, method, operation, document, outputSchema, securityRequirements);
+    const metadata = this.extractMetadata(
+      pathStr,
+      method,
+      operation,
+      document,
+      ownProperty(pathItem, 'servers'),
+      responseStatuses,
+      securityRequirements,
+    );
+    if (securityAlternatives) metadata.securityAlternatives = securityAlternatives;
 
     // The schemas with formats resolved and depth bounded (see `finishSchema`);
     // the stream's item schema goes through every step an output schema does
@@ -2611,38 +3038,32 @@ export class OpenAPIToolGenerator {
     // Trimming controls (after depth truncation, before client targets so the
     // dialect transforms see the final trimmed shape). Description caps run
     // BEFORE limitProperties so the "[N properties omitted]" notes survive.
+    // ROOT input properties are mapper-backed parameters — dropping one makes required calls impossible, so a
+    // step that drops properties applies to each parameter subtree; the parameter list itself is never trimmed
+    const belowInputRoot = (schema: JsonSchema, step: (subtree: JsonSchema) => JsonSchema): JsonSchema => {
+      const stepped: Record<string, JsonSchema> = {};
+      // The input root always holds its parameters (`ParameterResolver.resolve`)
+      for (const [key, value] of Object.entries(schema.properties!)) setOwnProperty(stepped, key, step(value as JsonSchema));
+      return { ...schema, properties: stepped };
+    };
     const applyTrim = (schema: JsonSchema, isInputRoot: boolean): JsonSchema => {
-      let trimmed = schema;
+      // A readOnly property is never sent in a request, a writeOnly one never returned (OpenAPI Schema Object)
+      let trimmed = isInputRoot
+        ? belowInputRoot(schema, (subtree) => SchemaBuilder.omitMarkedProperties(subtree, 'readOnly'))
+        : SchemaBuilder.omitMarkedProperties(schema, 'writeOnly');
       if (options.stripExamples) trimmed = SchemaBuilder.stripExamples(trimmed);
       if (options.maxDescriptionLength !== undefined) {
         trimmed = SchemaBuilder.capDescriptions(trimmed, options.maxDescriptionLength);
       }
       if (options.maxProperties !== undefined) {
-        if (isInputRoot) {
-          // ROOT input properties are mapper-backed parameters — dropping one
-          // makes required calls impossible. The cap applies per parameter
-          // subtree; the parameter list itself is never trimmed.
-          const properties = trimmed.properties;
-          if (properties && typeof properties === 'object') {
-            const limited: Record<string, JsonSchema> = {};
-            for (const [key, value] of Object.entries(properties)) {
-              limited[key] = SchemaBuilder.limitProperties(value as JsonSchema, options.maxProperties);
-            }
-            trimmed = { ...trimmed, properties: limited };
-          }
-        } else {
-          trimmed = SchemaBuilder.limitProperties(trimmed, options.maxProperties);
-        }
+        const limit = (subtree: JsonSchema): JsonSchema => SchemaBuilder.limitProperties(subtree, options.maxProperties!);
+        trimmed = isInputRoot ? belowInputRoot(trimmed, limit) : limit(trimmed);
       }
       return trimmed;
     };
-    if (options.stripExamples || options.maxProperties !== undefined || options.maxDescriptionLength !== undefined) {
-      resolvedInputSchema = applyTrim(resolvedInputSchema, true);
-      if (resolvedOutputSchema) {
-        resolvedOutputSchema = applyTrim(resolvedOutputSchema, false);
-      }
-      if (itemSchema) itemSchema = applyTrim(itemSchema, false);
-    }
+    resolvedInputSchema = applyTrim(resolvedInputSchema, true);
+    if (resolvedOutputSchema) resolvedOutputSchema = applyTrim(resolvedOutputSchema, false);
+    if (itemSchema) itemSchema = applyTrim(itemSchema, false);
 
     // Client dialect transforms (final step — the emitted schemas must be
     // exactly what the targeted client accepts)
@@ -2806,15 +3227,15 @@ export class OpenAPIToolGenerator {
     }
 
     // Check deprecated
-    if (operation.deprecated && !options.includeDeprecated) {
+    if (operation.deprecated === true && !options.includeDeprecated) {
       return false;
     }
 
     // Method filters: a standard method in any case, an additional one as written
-    if (options.includeMethods && !matchesMethodFilter(options.includeMethods, method)) {
+    if (options.includeMethods && !matchesMethodFilter(options.includeMethods, method, false)) {
       return false;
     }
-    if (options.excludeMethods && matchesMethodFilter(options.excludeMethods, method)) {
+    if (options.excludeMethods && matchesMethodFilter(options.excludeMethods, method, true)) {
       return false;
     }
 
@@ -2827,7 +3248,7 @@ export class OpenAPIToolGenerator {
     }
 
     // Tag filters
-    const tags = operation.tags ?? [];
+    const tags = Array.isArray(operation.tags) ? operation.tags : [];
     if (options.includeTags && !tags.some((tag) => options.includeTags!.includes(tag))) {
       return false;
     }
@@ -2836,10 +3257,9 @@ export class OpenAPIToolGenerator {
     }
 
     // Check operation ID filters
-    if (options.includeOperations && operation.operationId) {
-      if (!options.includeOperations.includes(operation.operationId)) {
-        return false;
-      }
+    if (options.includeOperations) {
+      const operationId: unknown = operation.operationId;
+      if (typeof operationId !== 'string' || !options.includeOperations.includes(operationId)) return false;
     }
 
     if (options.excludeOperations && operation.operationId) {
@@ -2848,17 +3268,13 @@ export class OpenAPIToolGenerator {
       }
     }
 
-    // Read-only safety switch: effective annotations must say read-only.
-    // Uses inference + extension overrides even when inferAnnotations is off —
-    // the filter's semantics must not depend on output formatting options.
-    if (options.readOnlyOnly) {
-      const effective = {
-        ...inferAnnotationsFromMethod(method),
-        ...extractExtensionSettings(operation).annotations,
-      };
-      if (effective.readOnlyHint !== true) {
-        return false;
-      }
+    // Read-only safety switch: the method must be safe, and an extension can only take an operation out
+    if (
+      options.readOnlyOnly &&
+      (inferAnnotationsFromMethod(method).readOnlyHint !== true ||
+        extractExtensionSettings(operation).annotations?.readOnlyHint === false)
+    ) {
+      return false;
     }
 
     // Custom filter
@@ -2905,7 +3321,7 @@ export class OpenAPIToolGenerator {
     // source — operationIds and custom toolNameGenerator output included.
     return normalizeToolName(
       rawName,
-      options.maxToolNameLength ?? DEFAULT_MAX_TOOL_NAME_LENGTH,
+      maxToolNameLength(options.maxToolNameLength),
       `${method} ${path}`,
     );
   }
@@ -2918,7 +3334,8 @@ export class OpenAPIToolGenerator {
     method: HTTPMethod,
     operation: OperationObject,
     document: OpenAPIDocument,
-    outputSchema: unknown,
+    pathItemServers: unknown,
+    responseStatuses: ResponseStatus[],
     securityRequirements: SecurityRequirement[] | undefined,
   ): ToolMetadata {
     const metadata: ToolMetadata = {
@@ -2936,36 +3353,32 @@ export class OpenAPIToolGenerator {
       metadata.security = securityRequirements;
     }
 
-    // Extract servers
-    const servers = operation.servers ?? document.servers;
+    // The servers of the operation, else of its path item, else of the document: the first list holding a server
+    const servers = [operation.servers, pathItemServers, document.servers]
+      .map((list) => (Array.isArray(list) ? list.filter(isSpecObject) : []))
+      .find((list) => list.length > 0);
     if (servers) {
-      metadata.servers = servers.map((server: ServerObject) => {
+      metadata.servers = servers.map((server) => {
         // OpenAPI 3.2 `name`, when the document gives a string
         const name = ownProperty(server, 'name');
         return {
-          url: this.options.baseUrl || server.url,
+          url: this.options.baseUrl || (server['url'] as string),
           ...(typeof name === 'string' && { name }),
-          description: server.description,
+          description: server['description'] as string | undefined,
           // A parsed document's maps hold no `undefined` values
-          variables: server.variables as ServerInfo['variables'],
+          variables: server['variables'] as ServerInfo['variables'],
         };
       });
     } else if (this.options.baseUrl) {
       metadata.servers = [{ url: this.options.baseUrl }];
     }
 
-    // Extract response status codes (preserve 0 for default responses); a
-    // range (`'2XX'`) is a string, listed apart
-    const schemaObj = outputSchema as Record<string, unknown> | undefined;
-    const statuses: unknown[] =
-      schemaObj && Array.isArray(schemaObj['oneOf'])
-        ? (schemaObj['oneOf'] as Record<string, unknown>[]).map((schema) => schema['x-status-code'])
-        : [schemaObj?.['x-status-code']];
-    const codes = statuses.filter((code): code is number => typeof code === 'number');
+    // Response status codes (0 for `default`); a range (`'2XX'`) is a string, listed apart
+    const codes = responseStatuses.filter((code): code is number => typeof code === 'number');
     if (codes.length > 0) {
       metadata.responseStatusCodes = codes;
     }
-    const ranges = statuses.filter((code): code is ResponseStatusRange => typeof code === 'string');
+    const ranges = responseStatuses.filter((code): code is ResponseStatusRange => typeof code === 'string');
     if (ranges.length > 0) {
       metadata.responseStatusRanges = ranges;
     }
@@ -3010,20 +3423,20 @@ export class OpenAPIToolGenerator {
     security: unknown,
     document: OpenAPIDocument,
     pointer: string,
-  ): { requirements: SecurityRequirement[]; unsatisfiable: boolean } {
+  ): { requirements: SecurityRequirement[]; alternatives: SecurityRequirement[][]; unsatisfiable: boolean } {
+    // Present but not a map (null, an array): defines no scheme, so every requirement naming one is unsatisfiable
     const schemes: unknown = document.components?.securitySchemes;
     if (!Array.isArray(security)) {
       // Not a list: without schemes there was never anything to read; with
       // them the tool fails, as it always has (now with a typed error)
-      if (!schemes) return { requirements: [], unsatisfiable: false };
+      if (schemes === undefined) return { requirements: [], alternatives: [], unsatisfiable: false };
       throw new GenerationError(
         `${pointer} must be an array of Security Requirement Objects, found ${describeValue(security)}`,
         { pointer },
       );
     }
 
-    const requirements: SecurityRequirement[] = [];
-    let kept = 0;
+    const alternatives: SecurityRequirement[][] = [];
     security.forEach((requirement: unknown, index: number) => {
       if (!isSpecObject(requirement)) {
         this.addDiagnostic({
@@ -3042,33 +3455,45 @@ export class OpenAPIToolGenerator {
         const found = this.findSecurityScheme(scheme, schemes);
         if ('scheme' in found) {
           const seen = byComponent.get(found.name);
+          if (seen === undefined && found.scheme['type'] === 'mutualTLS') {
+            this.addDiagnostic({
+              severity: 'info',
+              code: DIAGNOSTIC_CODES.UNSUPPORTED_SECURITY_SCHEME,
+              message:
+                `Security scheme ${describeValue(found.name)} is mutualTLS: the HTTP client presents the client ` +
+                `certificate (SecurityContext.clientCertificate), so the tool has no input for it`,
+              path: appendPointer(pointer, index, scheme),
+            });
+          }
           if (seen === undefined) {
             const entry = this.toSecurityRequirement(found.name, scopes as string[], found.scheme);
             byComponent.set(found.name, entry);
             resolved.push(entry);
           } else if (Array.isArray(scopes)) {
             // Both are required together, so the scopes of both are
-            const merged = Array.isArray(seen.scopes) ? [...seen.scopes] : [];
-            for (const scope of scopes as string[]) if (!merged.includes(scope)) merged.push(scope);
-            seen.scopes = merged;
+            const merged = new Set(Array.isArray(seen.scopes) ? seen.scopes : []);
+            for (const scope of scopes as string[]) merged.add(scope);
+            seen.scopes = [...merged];
           }
           continue;
         }
         satisfiable = false;
         this.addDiagnostic({
           severity: 'warning',
-          code: DIAGNOSTIC_CODES.UNRESOLVED_SECURITY_SCHEME,
+          code: found.code ?? DIAGNOSTIC_CODES.UNRESOLVED_SECURITY_SCHEME,
           message:
             `Security Requirement names scheme ${describeValue(scheme)}, which ${found.problem}; the requirement ` +
             `cannot be satisfied and is dropped with every scheme it combines`,
           path: appendPointer(pointer, index, scheme),
         });
       }
-      if (!satisfiable) return;
-      kept++;
-      requirements.push(...resolved);
+      if (satisfiable) alternatives.push(resolved);
     });
-    return { requirements, unsatisfiable: Boolean(schemes) && security.length > 0 && kept === 0 };
+    return {
+      requirements: alternatives.flat(),
+      alternatives,
+      unsatisfiable: schemes !== undefined && security.length > 0 && alternatives.length === 0,
+    };
   }
 
   /**
@@ -3089,10 +3514,17 @@ export class OpenAPIToolGenerator {
   private findSecurityScheme(
     key: string,
     schemes: unknown,
-  ): { name: string; scheme: Record<string, unknown> } | { problem: string } {
+  ): FoundSecurityScheme {
     // Own properties only: a scheme named `constructor` is not Object's
-    const found = ownProperty(schemes, key);
-    if (isSpecObject(found)) return { name: key, scheme: found };
+    const schemeNamed = (name: string): FoundSecurityScheme | undefined => {
+      const value = ownProperty(schemes, name);
+      if (this.options.dereference && isReferenceObject(value)) {
+        return { problem: 'is a reference that was not resolved' };
+      }
+      return isSpecObject(value) ? sendableScheme(name, value) : undefined;
+    };
+    const byName = schemeNamed(key);
+    if (byName) return byName;
     const notDefined = 'components.securitySchemes does not define';
     if (!/[:#/]/.test(key)) return { problem: notDefined };
     const family = this.specVersion.family;
@@ -3101,8 +3533,8 @@ export class OpenAPIToolGenerator {
     }
     const target = resolveSecuritySchemeUri(key, this.documentBase);
     if ('problem' in target) return { problem: `${notDefined}, and read as a URI it ${target.problem}` };
-    const byUri = ownProperty(schemes, target.name);
-    if (isSpecObject(byUri)) return { name: target.name, scheme: byUri };
+    const byUri = schemeNamed(target.name);
+    if (byUri) return byUri;
     return {
       problem: `names the scheme ${describeValue(target.name)} of this document by URI, but ${notDefined} it`,
     };
@@ -3112,7 +3544,7 @@ export class OpenAPIToolGenerator {
   private toSecurityRequirement(scheme: string, scopes: string[], found: Record<string, unknown>): SecurityRequirement {
     const securityScheme = found as unknown as SecuritySchemeObject | ReferenceObject;
 
-    // Skip if it's a reference object
+    // With dereference: false, a scheme left as a reference is read as HTTP bearer, as before
     if (isReferenceObject(securityScheme)) {
       return { scheme, type: 'http', scopes };
     }

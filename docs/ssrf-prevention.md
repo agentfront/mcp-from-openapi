@@ -66,6 +66,10 @@ IPv6 addresses that embed an IPv4 address are checked against the IPv4 ranges ab
 
 Hostnames are compared in a normalized form: lowercase, with trailing root dots and IPv6 brackets removed. This applies to the built-in names above and to every `allowedHosts` / `blockedHosts` entry, on both sides of the comparison. `localhost.`, `LOCALHOST`, and `localhost` are the same host, so a `blockedHosts: ['internal.corp']` entry also blocks `http://internal.corp./`.
 
+`allowedHosts` and `blockedHosts` entries are also compared as hosts, not spellings. A Unicode name is its ASCII form (`bücher.example` is `xn--bcher-kva.example`), and an IPv6 address matches however its groups are written. In `blockedHosts` only, an IPv6 address that embeds an IPv4 address (mapped, NAT64, 6to4, ...) is that IPv4 address, so `blockedHosts: ['169.254.169.254']` also blocks `http://[::ffff:a9fe:a9fe]/`. An `allowedHosts` entry admits exactly its own host: `8.8.8.8` does not admit `[::ffff:8.8.8.8]`, and one 6to4 address does not admit another of the same network.
+
+`blockedHosts` also applies to the addresses a name resolves to: an address entry blocks every name that resolves to it. With `allowInternalIPs: true`, a name is resolved, and the connection pinned to what was checked, only when `blockedHosts` holds an address; a name that cannot be resolved is then refused (`dns-failed`).
+
 ---
 
 ## Configuration
@@ -124,7 +128,7 @@ const generator = await OpenAPIToolGenerator.fromJSON(spec, {
 
 ### Allow Internal IPs (Not Recommended)
 
-Disables the built-in IP block list. Only user-provided `blockedHosts` are checked:
+Disables the built-in IP block list. Only user-provided `blockedHosts` are checked (an address in it also blocks the names that resolve to it):
 
 ```typescript
 const generator = await OpenAPIToolGenerator.fromJSON(spec, {
@@ -225,7 +229,7 @@ User information is never echoed: it is shown as `***@` in the message and in `e
 A document that has no base at all (`fromJSON` and `fromYAML` without `documentUri`, and no absolute `$self`) behaves as in earlier releases: a relative reference resolves against the process working directory, and the error says so:
 
 ```
-... Cannot read $ref "./schemas/pet.json" resolved against "<cwd>/" to "<cwd>/schemas/pet.json": it is read as a local file,
+... Cannot read $ref "./schemas/pet.json" resolved against "<working directory>/" to "<working directory>/schemas/pet.json": it is read as a local file,
 and refResolution.allowedProtocols ("http", "https") does not include "file"; add "file" to refResolution.allowedProtocols to read it
 (the document has no base URI, so its relative references resolve against the working directory:
 load it with fromFile or fromURL, or pass LoadOptions.documentUri)
@@ -260,7 +264,7 @@ The reference becomes a local one before dereferencing, and it is held to this:
 - **No fragment, an empty one (`#`) and `""` mean the whole document.** `""` counts only when the document has a base; without one it is left as written.
 - **The target must exist as written.** A pointer that leads nowhere fails the load with a `ParseError` of rule `missing-target`: `it names this document, but "#/components/schemas/Nope" points to nothing in it`. It never becomes `{}`.
 - **The pointer may not pass through another `$ref`.** `#/components/schemas/Alias/properties`, where `Alias` is `{ "$ref": "#/components/schemas/Pet" }`, is refused with the same rule (`its pointer goes through another $ref (at "#/components/schemas/Alias"), which is not followed`): the two dereferencers the library uses would not agree on it.
-- **Keywords next to the `$ref` are dropped**, as for any `#/...` reference (the siblings were kept when the document was fetched again).
+- **Keywords next to the `$ref` are dropped**, as for any `#/...` reference (the siblings were kept when the document was fetched again). In a document declaring 3.1 or later, the constraints beside a schema's `$ref` apply instead ([`$ref` beside other keywords](./openapi-versions.md#ref-beside-other-keywords)).
 
 An ordinary local reference (`#/...`) keeps the reading it always had: its percent-escapes are not decoded, and one that leads nowhere becomes `{}` without an error. Only a reference that names the document by URI is checked.
 
@@ -313,7 +317,11 @@ A reference that the allow-list, the host gate or the network guard refuses, or 
 Failed to dereference OpenAPI document: Cannot read $ref "<reference>" [at "<pointer>"] resolved against "<base>" to "<resolved>": <reason>[; <what would allow it>][ (<hint>)]
 ```
 
-- `<reference>` is the `$ref` as written (a query in it stays), `<base>` what it was resolved against and `<resolved>` the URL or path it became. For a file base, `<base>` and `<resolved>` are local paths. The query of `<base>` and of `<resolved>` is shown as `?...`, because a spec URL can carry a token there. `at "<pointer>"` is added when the reference resolver says where in the document the reference is (it does not for a document declaring 3.1, or one with no base).
+- `<reference>` is the `$ref` as written, `<base>` what it was resolved against and `<resolved>` the URL or path it became. For a file base, `<base>` and `<resolved>` are local paths. The document's author may read the message, so none of the three shows:
+  - a query, shown as `?...`, because a URL can carry a token there;
+  - user information, shown as `***`, also where resolving moved it into a path (percent-encoded or not);
+  - the process working directory, shown as `<working directory>/`.
+  A name that resolves to an internal address is refused without naming the address. `at "<pointer>"` is added when the reference resolver says where in the document the reference is (it does not for a document declaring 3.1, or one with no base).
 - Each quoted part is cut at 256 characters and written with control and bidirectional characters escaped, because the document controls all of them, in the message and in `error.context` alike.
 - The `<hint>` appears only when the document has no base URI and the reference is relative.
 - When several references cannot be read, the one named is the first in document order (the entry document depth first, then each referenced document as it is read), whatever order the network or the disk answers in.
@@ -335,21 +343,22 @@ try {
 }
 ```
 
-`rule` is always there. `reference`, `base` and `resolved` come with the rules that name a reference, and `path`, the JSON Pointer of the `$ref` in the document being loaded (`/paths/~1pets/get/responses/200/content/application~1json/schema`), when the resolver or the library knows it: the document of the example above declares 3.1, for which the resolver reports no location, so it has no `path`, where a 3.0 or 3.2 one does. The raw error is not kept in `context`. A failure the library cannot tie to a reference (`invalid-document`, `missing-target` in a referenced document, `unreadable`) keeps the resolver's message and has only `rule`.
+`rule` is always there. `reference`, `base` and `resolved` come with the rules that name a reference, and `path`, the JSON Pointer of the `$ref` in the document being loaded (`/paths/~1pets/get/responses/200/content/application~1json/schema`), when the resolver or the library knows it: in the entry document it always does. For a document declaring 3.1, or with a root `$id` or `$schema`, the resolver names the `$id` scope instead of the `$ref`, so the library takes the entry document's first `$ref` to the document that could not be read (one read serves them all); only a relative root `$id` with no base URI to resolve it against leaves such a reference without a `path`. The raw error is not kept in `context`. A failure the library cannot tie to a reference (`invalid-document`, `missing-target` in a referenced document, `unreadable`) keeps the resolver's message and has only `rule`.
 
 | `rule` | The reference could not be read because | To allow it |
 |--------|-----------------------------------------|-------------|
 | `protocol` | Its protocol is not in `refResolution.allowedProtocols` (a path or relative reference counts as `file`), or it is allowed but not one the network fetcher reads (only `http` and `https` are fetched) | Add the protocol, `file` for a local path (see below) |
 | `host-not-allowed` | `allowedHosts` is set and does not list its host | Add the host to `allowedHosts` |
-| `host-blocked` | Its host is in `blockedHosts` | Remove it from `blockedHosts` |
+| `host-blocked` | Its host, or an address its name resolves to, is in `blockedHosts` | Remove it from `blockedHosts` |
+| `too-many-documents` | The document needs more than `refResolution.maxDocuments` referenced documents (default 10,000) | Raise `maxDocuments` |
 | `internal-address` | Its host is a loopback, private, link-local or cloud-metadata name or address | `allowInternalIPs: true` (unsafe for documents you do not trust) |
-| `resolved-address` | Its name resolves to an internal address (`Host "..." resolves to blocked address 255.255.255.255`) | `allowInternalIPs: true` (unsafe) |
+| `resolved-address` | Its name resolves to an internal address (`Host "..." resolves to a blocked internal address`) | `allowInternalIPs: true` (unsafe) |
 | `dns-failed` | Its name could not be resolved | Fix the name |
-| `too-large` | The response exceeds 10 MiB (`Response body exceeds 10485760 bytes`) | |
-| `timeout` | No answer within `LoadOptions.timeout` (`no answer within 300 ms (LoadOptions.timeout)`) | Raise `timeout` |
+| `too-large` | The response or local file exceeds 10 MiB (`Response body exceeds 10485760 bytes`), or the referenced documents read hold more than `refResolution.maxTotalBytes` together (default 100 MiB) | Raise `maxTotalBytes` for the second |
+| `timeout` | No answer within `LoadOptions.timeout` (`no answer within 300 ms (LoadOptions.timeout)`), or reading every referenced document takes longer than ten times it | Raise `timeout` |
 | `response` | The server answered with a failure status (`the server answered 404 "Not Found"`). A redirect is not followed for a `$ref`, so a `302` is this too | Fix the reference or the server |
 | `fetch-failed` | The fetch failed for another reason (`connect ECONNREFUSED 127.0.0.1:8080`) | |
-| `file-error` | A local file cannot be read (`the file cannot be read (ENOENT)`) | |
+| `file-error` | A local file cannot be read (`the file cannot be read (ENOENT)`), is not a regular file, or is named by a `file:` URL with a host | |
 | `missing-target` | A pointer leads nowhere: in the document itself (a reference by its own URI, see [above](#references-to-the-document-itself)), in a referenced document (`Missing $ref pointer "#/nothing". Token "nothing" does not exist.`), or a plain-name fragment | Fix the pointer |
 | `invalid-document` | A referenced document is not JSON or YAML | |
 | `base-too-long` | A relative reference of a document whose retrieval URI is longer than 2,048 characters | See [Length limits](#length-limits) |
@@ -368,6 +377,8 @@ const generator = await OpenAPIToolGenerator.fromFile("/tmp/petstore/openapi.jso
 ```
 
 `file` lets the document read any local file the process can read, by relative path, absolute path or `file:` URL, with no confinement to the document's directory: read [Trust Model](#trust-model) before you set it for a document you did not write.
+
+Only a regular file of at most 10 MiB is read. A device (`/dev/zero`), a named pipe, a directory or a socket is refused (`file-error`, `it is not a regular file`) without waiting on it. A larger file is refused before it is read (`too-large`). A `file:` URL that names a host (`file://server/share/a.json`, a network share) is refused (`file-error`).
 
 ---
 

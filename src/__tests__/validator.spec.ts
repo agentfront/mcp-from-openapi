@@ -1242,9 +1242,9 @@ describe('version-aware validation (issue #55)', () => {
       ]);
     });
 
-    it('ignores parameters that are not a list, and never resolves references through the prototype', async () => {
+    it('refuses parameters that are not a list, and never resolves references through the prototype', async () => {
       expect(await errorCodes(doc('3.0.3', { '/a': { get: { operationId: 'a', responses: ok, parameters: {} } } }))).toEqual(
-        [],
+        ['INVALID_FIELD_TYPE'],
       );
       // `#/components/parameters/constructor` is dangling: the coverage check is deferred, not fed Object's constructor
       const result = await validate(
@@ -1608,13 +1608,18 @@ describe('Swagger 2.0 validation', () => {
     const pets = {
       '/pets/{petId}': {
         parameters: [{ name: 'petId', in: 'path', required: true, type: 'string' }],
-        get: operation([{ name: 'limit', in: 'query', type: 'integer', format: 'int32' }]),
-        put: operation([{ name: 'pet', in: 'body', required: true, schema: { $ref: '#/definitions/Pet' } }]),
-        post: operation([
-          { name: 'name', in: 'formData', type: 'string' },
-          { name: 'photo', in: 'formData', type: 'file' },
-          { name: 'X-Trace', in: 'header', type: 'string' },
-        ]),
+        get: operation([{ name: 'limit', in: 'query', type: 'integer', format: 'int32' }], { operationId: 'getPet' }),
+        put: operation([{ name: 'pet', in: 'body', required: true, schema: { $ref: '#/definitions/Pet' } }], {
+          operationId: 'putPet',
+        }),
+        post: operation(
+          [
+            { name: 'name', in: 'formData', type: 'string' },
+            { name: 'photo', in: 'formData', type: 'file' },
+            { name: 'X-Trace', in: 'header', type: 'string' },
+          ],
+          { operationId: 'postPet' },
+        ),
       },
     };
     const definitions = { Pet: { type: 'object', discriminator: 'kind', properties: { kind: { type: 'string' } } } };

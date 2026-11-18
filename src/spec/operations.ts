@@ -40,6 +40,20 @@ export function ownProperty(value: unknown, key: string): unknown {
 }
 
 /**
+ * Sets `key` as an own enumerable data property. Plain assignment of the key
+ * `__proto__` replaces the object's prototype instead, so a document key
+ * `__proto__` (which `JSON.parse` creates as an own property) would vanish
+ * and its value's fields would be inherited by the object.
+ */
+export function setOwnProperty(target: object, key: string, value: unknown): void {
+  if (key === '__proto__') {
+    Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+  } else {
+    (target as Record<string, unknown>)[key] = value;
+  }
+}
+
+/**
  * The methods with a fixed Path Item field, lowercase as the field names are.
  *
  * The first eight keep the order the library has always used (tool order and

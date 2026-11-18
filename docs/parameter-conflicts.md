@@ -39,11 +39,11 @@ A flat input schema can't have three properties all named `id`. This library det
 ## How It Works
 
 1. **Merge** the path item's parameters with the operation's: an operation-level parameter overrides a path-level one with the same name and location (see [Same Name and Location](#same-name-and-location-the-operation-wins))
-2. **Collect** all parameters from path, query, header, cookie, and request body
+2. **Collect** all parameters from path, query, header, cookie, and request body, leaving out a header parameter the HTTP client, a credential or a proxy sets (`Accept`, `Content-Type`, `Authorization`, `Host`, `X-Forwarded-*`, ...) one sent where a credential of the operation is sent, and a path parameter the path has no `{name}` template expression for (each is a `PARAMETER_IGNORED` diagnostic)
 3. **Group** parameters by name
 4. **Detect** names that appear in more than one location
-5. **Rename** conflicted parameters using a naming strategy
-6. **Build** the input schema with unique property names
+5. **Rename** conflicted parameters using a naming strategy; a renamed key another input already uses gets a number (`headerId2`)
+6. **Build** the input schema with unique property names, security inputs last (a scheme whose name is taken gets a number too)
 7. **Create** mapper entries that map renamed keys back to original names and locations
 
 ---
@@ -245,15 +245,18 @@ If a body property name conflicts with a path/query parameter, the conflict reso
 
 ### allOf bodies
 
-`allOf` compositions are flattened: object members merge into one property set (later members win on collisions, `required` sets union), so each combined property becomes its own input parameter. Members that carry only a `required` list (the base-`$ref` + required-tightening pattern) still contribute their required fields.
+`allOf` compositions are flattened: object members merge into one property set (`required` sets union), so each combined property becomes its own input parameter. A property that several members define keeps every definition's constraints, as JSON Schema applies every member: their keywords are combined (for an annotation such as `description`, the last member's wins), and when two members set one constraint keyword differently the property is the `allOf` of the definitions. Members that carry only a `required` list (the base-`$ref` + required-tightening pattern) still contribute their required fields.
+
+A property marked `readOnly: true` is left out of the input, and so is a `readOnly` property at any depth below an input: OpenAPI says such a property is not sent in a request. In an output schema, `writeOnly` properties are left out the same way.
 
 ### Whole-body parameters
 
 Bodies that cannot be flattened into named properties become a single `body` input parameter whose mapper entry carries `wholeBody: true` — the input value **is** the entire request body (do not wrap it in `{ body: value }`):
 
 - Non-object bodies: arrays, primitives, raw binary (`format: binary`)
-- `oneOf` / `anyOf` union bodies — at the root **or inside any `allOf` member** (the composed schema is preserved intact rather than flattening the union away)
-- Free-form objects without declared properties
+- Bodies holding a constraint named properties cannot say — at the root **or inside any `allOf` member** (the composed schema is preserved intact rather than flattening the constraint away): a `oneOf` / `anyOf` union, `not`, `if`, `minProperties` / `maxProperties`, `dependentRequired` / `dependentSchemas`, `patternProperties`, `propertyNames`, `enum`, `const` (a boolean `false` member, which accepts nothing, is `not: {}`)
+- Objects that accept properties they do not name: `additionalProperties` or `unevaluatedProperties` set to anything but `false`
+- Objects without a property a request sends: free-form objects without declared properties, and objects whose properties are all `readOnly`
 
 ```typescript
 // POST with `schema: { type: 'array', items: { type: 'string' } }`:

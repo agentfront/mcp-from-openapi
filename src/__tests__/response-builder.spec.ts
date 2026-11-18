@@ -80,7 +80,7 @@ describe('ResponseBuilder', () => {
       });
 
       expect(result).toBeDefined();
-      expect(result?.oneOf).toHaveLength(2);
+      expect(result?.anyOf).toHaveLength(2);
       expect(result?.description).toBe('Response can be one of multiple status codes');
     });
 
@@ -778,8 +778,8 @@ describe('ResponseBuilder: boolean response schemas', () => {
       'x-status-code': 200,
     });
     const union = new ResponseBuilder().build(responses) as any;
-    expect(union.oneOf.map((variant: any) => variant['x-status-code'])).toEqual([200, 404]);
-    expect(union.oneOf[0].not).toEqual({});
+    expect(union.anyOf.map((variant: any) => variant['x-status-code'])).toEqual([200, 404]);
+    expect(union.anyOf[0].not).toEqual({});
   });
 });
 
@@ -796,16 +796,13 @@ describe('ResponseBuilder: response status ranges', () => {
       expect(status(new ResponseBuilder(), { [`${digit}XX`]: json('string') })).toBe(`${digit}XX`);
     }
     const union = new ResponseBuilder().build({ 200: json('object'), '4XX': json('string'), default: json('number') } as any) as any;
-    expect(union.oneOf.map((variant: any) => variant['x-status-code'])).toEqual([200, '4XX']);
+    expect(union.anyOf.map((variant: any) => variant['x-status-code'])).toEqual([200, '4XX']);
   });
 
-  it('reads any other key as it always has', () => {
-    // Not range keys: parseInt reads what it can, and a key without a number is skipped
-    expect(status(new ResponseBuilder(), { '6XX': json('string') })).toBe(6);
-    expect(status(new ResponseBuilder(), { '0XX': json('string') })).toBe(0);
-    expect(status(new ResponseBuilder(), { '20X': json('string') })).toBe(20);
-    expect(status(new ResponseBuilder(), { '2XXX': json('string') })).toBe(2);
-    expect(new ResponseBuilder().build({ XX: json('string') } as any)).toBeUndefined();
+  it('skips any other key: neither a code from 100 to 599 nor a range', () => {
+    for (const key of ['6XX', '0XX', '20X', '2XXX', 'XX', '600', '099']) {
+      expect(new ResponseBuilder().build({ [key]: json('string') } as any)).toBeUndefined();
+    }
   });
 
   it('prefers an explicit code over the range of its class', () => {

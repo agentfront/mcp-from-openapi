@@ -1,5 +1,6 @@
-import { SchemaError } from './errors';
+import { ParseError, SchemaError } from './errors';
 import { referenceAt } from './reference-sites';
+import { setOwnProperty } from './spec';
 
 /**
  * A node budget that every value copied for one schema, or one tool, counts
@@ -67,6 +68,60 @@ export interface CopyOptions {
  * call stack at a few thousand levels.
  */
 export const MAX_VALUE_DEPTH = 1000;
+
+/** Values a document may repeat through shared objects or YAML aliases, beyond the ones it holds */
+export const MAX_REPEATED_VALUES = 500_000;
+
+interface ExpansionFrame {
+  node: object;
+  children: unknown[];
+  next: number;
+  size: number;
+}
+
+/** Refuse a value whose shared objects a JSON copy would repeat more than `MAX_REPEATED_VALUES` times; cycles are left to the copy */
+export function assertBoundedExpansion(root: unknown): void {
+  if (root === null || typeof root !== 'object') return;
+  const sizes = new Map<object, number>();
+  const onPath = new Set<object>([root]);
+  const frameOf = (node: object): ExpansionFrame => {
+    const children = Object.values(node);
+    // An array hole, which a copy writes as `null`, is one value too: counted, never walked
+    const holes = Array.isArray(node) ? node.length - children.length : 0;
+    return { node, children, next: 0, size: 1 + holes };
+  };
+  const frames: ExpansionFrame[] = [frameOf(root)];
+  let repeated = 0;
+  while (frames.length > 0) {
+    const frame = frames[frames.length - 1];
+    if (frame.next < frame.children.length) {
+      const child = frame.children[frame.next++];
+      if (child === null || typeof child !== 'object') {
+        frame.size++;
+        continue;
+      }
+      const knownSize = sizes.get(child);
+      if (knownSize !== undefined) {
+        repeated += knownSize;
+        frame.size += knownSize;
+        if (repeated > MAX_REPEATED_VALUES) {
+          throw new ParseError(
+            `The document repeats shared values (YAML aliases or shared objects) that expand to more than ${MAX_REPEATED_VALUES} values when copied`,
+            { maxRepeatedValues: MAX_REPEATED_VALUES },
+          );
+        }
+      } else if (!onPath.has(child)) {
+        onPath.add(child);
+        frames.push(frameOf(child));
+      }
+      continue;
+    }
+    frames.pop();
+    onPath.delete(frame.node);
+    sizes.set(frame.node, frame.size);
+    if (frames.length > 0) frames[frames.length - 1].size += frame.size;
+  }
+}
 
 /** A container being copied: its keys (`null` for an array), their values, and the copy. */
 interface CopyFrame {
@@ -186,14 +241,7 @@ function copyTree(root: object, budget: CopyBudget, options: CopyOptions): unkno
       (frame.out as unknown[])[index] = value;
       return;
     }
-    const key = frame.keys[index];
-    if (key === '__proto__') {
-      // An own `__proto__` key (JSON.parse creates one); assigning it would
-      // set the copy's prototype instead
-      Object.defineProperty(frame.out, key, { value, enumerable: true, writable: true, configurable: true });
-    } else {
-      (frame.out as Record<string, unknown>)[key] = value;
-    }
+    setOwnProperty(frame.out, frame.keys[index], value);
   };
 
   push(root);

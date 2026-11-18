@@ -19,16 +19,18 @@ jobs:
     # - PR was merged (not just closed)
     # - PR is not from a fork (forked PRs have read-only GITHUB_TOKEN)
     # - Target branch is a release branch (not main)
+    # - PR is not a release pull request (prepare-release.yml): its version bump belongs to its branch
     if: >
       github.event.pull_request.merged == true &&
       github.event.pull_request.head.repo.fork == false &&
+      !startsWith(github.event.pull_request.head.ref, 'release-pr/') &&
       github.event.pull_request.base.ref != github.event.repository.default_branch &&
       (startsWith(github.event.pull_request.base.ref, 'release/') ||
        startsWith(github.event.pull_request.base.ref, 'next/'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -47,25 +49,31 @@ jobs:
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
+          AUTHOR_ID: ${{ github.event.pull_request.user.id }}
         run: |
           set -euo pipefail
 
           # Create cherry-pick branch name
-          # Sanitize branch name (remove invalid characters, truncate if needed)
+          # Sanitize branch name (remove invalid characters, truncate if needed). The PR number after the
+          # cut keeps a long name from equaling another branch, which an existing one would be deleted as
           CHERRY_BRANCH="${ORIGINAL_BRANCH}-cherry-pick-main"
-          CHERRY_BRANCH=$(echo "$CHERRY_BRANCH" | sed 's/[^a-zA-Z0-9._/-]/-/g' | head -c 100)
+          CHERRY_BRANCH="$(echo "$CHERRY_BRANCH" | sed 's/[^a-zA-Z0-9._/-]/-/g' | head -c 90)-pr-${PR_NUMBER}"
 
           # Validate branch name is valid for git
           if ! git check-ref-format --branch "$CHERRY_BRANCH" >/dev/null 2>&1; then
             echo "::error::Invalid branch name after sanitization: $CHERRY_BRANCH"
             exit 1
           fi
+          # An existing cherry-pick branch is deleted below, which must never be the PR's own branch
+          if [ "$CHERRY_BRANCH" = "$ORIGINAL_BRANCH" ]; then
+            echo "::error::The cherry-pick branch name equals the source branch: $CHERRY_BRANCH"
+            exit 1
+          fi
 
           echo "cherry_branch=$CHERRY_BRANCH" >> "$GITHUB_OUTPUT"
           echo "Cherry-pick branch: $CHERRY_BRANCH"
-
-          # Get default branch
-          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
 
           # Checkout default branch (main)
           git fetch origin "$DEFAULT_BRANCH"
@@ -106,7 +114,7 @@ jobs:
           Cherry-picked from #$PR_NUMBER (merged to $RELEASE_BRANCH)
           Original commit: $MERGE_SHA
 
-          Co-Authored-By: ${{ github.event.pull_request.user.login }} <${{ github.event.pull_request.user.id }}+${{ github.event.pull_request.user.login }}@users.noreply.github.com>
+          Co-Authored-By: ${AUTHOR_LOGIN} <${AUTHOR_ID}+${AUTHOR_LOGIN}@users.noreply.github.com>
           EOF
           )"
             echo "Cherry-pick successful"

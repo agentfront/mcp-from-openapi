@@ -8,6 +8,7 @@
  * parsed, never evaluated.
  */
 import { ArazzoError } from './errors';
+import { ownProperty } from './spec';
 import type { ExpressionValueIR, PayloadExpressionIR, RuntimeExpressionAST, RuntimeExpressionType } from './arazzo-types';
 
 const EXACT_ROOTS: Record<string, RuntimeExpressionType> = {
@@ -79,7 +80,8 @@ function parseSourceRef(
  * (with the document path in `context.path`) on any grammar violation.
  */
 export function parseRuntimeExpression(raw: string, docPath = ''): RuntimeExpressionAST {
-  const exact = EXACT_ROOTS[raw];
+  // Own keys only: `toString` or `__proto__` is no root
+  const exact = ownProperty(EXACT_ROOTS, raw) as RuntimeExpressionType | undefined;
   if (exact) {
     return { type: exact, raw, path: [] };
   }
@@ -97,7 +99,7 @@ export function parseRuntimeExpression(raw: string, docPath = ''): RuntimeExpres
 
   const dot = raw.indexOf('.');
   const rootToken = dot === -1 ? raw : raw.slice(0, dot);
-  const root = DOTTED_ROOTS[rootToken];
+  const root = ownProperty(DOTTED_ROOTS, rootToken) as RuntimeExpressionType | undefined;
   if (root) {
     const rest = dot === -1 ? '' : raw.slice(dot + 1);
     if (rest === '') {

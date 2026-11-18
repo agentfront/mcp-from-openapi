@@ -17,7 +17,15 @@ import type {
   SchemaConversionOptions,
 } from './types';
 import { toJsonSchema, isReferenceObject, isPresentSchema } from './types';
-import { diagnosticKey, isSpecObject, ownProperty } from './spec';
+import {
+  describeValue,
+  diagnosticKey,
+  isSpecObject,
+  ownProperty,
+  readParameterName,
+  setOwnProperty,
+  withTextName,
+} from './spec';
 import { GenerationError } from './errors';
 import { classifyMediaType } from './media-type';
 
@@ -117,9 +125,9 @@ export interface ParameterAnalysis {
  * The identity of a parameter (`name` and `in`), bounded in length;
  * `undefined` when it has none. A header name is compared without regard to
  * case, as HTTP header names are case-insensitive (RFC 9110 section 5.1):
- * `X-Id` and `x-id` are one header.
+ * `X-Id` and `x-id` are one header. Internal.
  */
-function parameterIdentity(parameter: unknown): string | undefined {
+export function parameterIdentity(parameter: unknown): string | undefined {
   if (!isSpecObject(parameter) || isReferenceObject(parameter)) return undefined;
   const name = parameter['name'];
   const location = parameter['in'];
@@ -323,10 +331,17 @@ export class ParameterResolver {
    *   string, serialized in its `content` media type); its input property is
    *   annotated `x-parameter-location: 'query'` and
    *   `x-parameter-whole-query: true`.
+   * - `securityAlternatives`, when given, are the Security Requirement
+   *   objects `securityRequirements` lists the schemes of. With more than
+   *   one, they are a choice: each credential entry names the alternatives
+   *   that need it (`security.alternatives`, `security.optional` when one
+   *   is empty) and is not required, nor is its input.
+   * - A number or boolean parameter `name` is read as its text.
    *
    * @throws GenerationError when the parameters break a querystring rule:
    *   more than one `in: querystring`, one together with `in: query`
-   *   parameters, or one without `content` (`OpenAPIToolGenerator` skips
+   *   parameters, or one without `content`, or when a parameter has no name
+   *   (absent, empty, an object or an array; `OpenAPIToolGenerator` skips
    *   such an operation with a diagnostic before calling this)
    */
   resolve(
@@ -334,11 +349,17 @@ export class ParameterResolver {
     pathParameters?: ParameterObject[],
     securityRequirements?: SecurityRequirement[],
     includeSecurityInInput?: boolean | string[],
+    securityAlternatives?: SecurityRequirement[][],
   ): {
     inputSchema: JsonSchema;
     mapper: ParameterMapper[];
+    /** Parameters left out of the tool, and why */
+    ignored: IgnoredParameter[];
   } {
-    const analysis = analyzeParameters(pathParameters ?? [], operation.parameters ?? []);
+    const analysis = analyzeParameters(
+      (pathParameters ?? []).map(withTextName),
+      (operation.parameters ?? []).map(withTextName),
+    );
     if (analysis.querystring) {
       const { code, querystrings } = analysis.querystring;
       throw new GenerationError(
@@ -350,12 +371,34 @@ export class ParameterResolver {
 
     const requestBody = operation.requestBody as RequestBodyObject | undefined;
 
+    const credentials = this.securityEntries(
+      securityRequirements ?? [],
+      includeSecurityInInput ?? false,
+      securityAlternatives ?? [],
+    );
+    const credentialWireNames = new Set(credentials.map(({ entry }) => wireName(entry.type, entry.key)));
+    const ignored: IgnoredParameter[] = [];
+
     // Collect all parameter names and detect conflicts
     const parametersByName = new Map<string, ParameterInfo[]>();
 
     // Process standard parameters
     for (const { parameter } of analysis.effective) {
       const param = parameter as ParameterObject;
+      if (!isReferenceObject(param) && readParameterName(param.name).kind === 'invalid') {
+        const found = describeValue(param.name);
+        throw new GenerationError(`A parameter's name must be a non-empty string, found ${found}`, {
+          code: 'INVALID_PARAMETER_NAME',
+        });
+      }
+      if (param.in === 'header' && isIgnoredHeaderParameter(param.name)) {
+        ignored.push({ name: param.name, in: param.in, reason: 'the HTTP client, a credential or a proxy sets this header' });
+        continue;
+      }
+      if (credentialWireNames.has(wireName(param.in, param.name))) {
+        ignored.push({ name: param.name, in: param.in, reason: 'a credential of the operation is sent there' });
+        continue;
+      }
       const info = this.parameterInfo(param);
 
       if (!parametersByName.has(param.name)) {
@@ -365,8 +408,10 @@ export class ParameterResolver {
     }
 
     // Process request body
-    if (requestBody?.content) {
-      const contentType = this.selectContentType(requestBody.content);
+    // A content map with no media type is no body
+    if (requestBody?.content && Object.keys(requestBody.content).length > 0) {
+      // `content` holds a media type (checked above), so one is selected
+      const contentType = selectRequestMediaType(requestBody.content) as string;
       // 3.2 also allows a Reference Object here; like the rest of generation, read it as resolved
       const mediaType = requestBody.content[contentType] as MediaTypeObject | undefined;
 
@@ -387,13 +432,16 @@ export class ParameterResolver {
     const required: string[] = [];
     const mapper: ParameterMapper[] = [];
 
+    // A name used once keeps it; one used in several locations is renamed, never onto another input's key
+    const taken = new Set([...parametersByName].filter(([, params]) => params.length === 1).map(([name]) => name));
     for (const [originalName, params] of parametersByName.entries()) {
-      // A name used once keeps it; one used in several locations is renamed
       params.forEach((param, index) => {
         const inputKey =
-          params.length === 1 ? originalName : this.namingStrategy.conflictResolver(originalName, param.location, index);
+          params.length === 1
+            ? originalName
+            : uniqueKey(this.namingStrategy.conflictResolver(originalName, param.location, index), taken);
 
-        properties[inputKey] = this.buildParameterSchema(param);
+        setOwnProperty(properties, inputKey, this.buildParameterSchema(param));
         if (param.required) {
           required.push(inputKey);
         }
@@ -402,15 +450,13 @@ export class ParameterResolver {
       });
     }
 
-    // Process security requirements
-    if (securityRequirements && securityRequirements.length > 0) {
-      this.processSecurityRequirements(
-        securityRequirements,
-        properties,
-        required,
-        mapper,
-        includeSecurityInInput ?? false,
-      );
+    for (const { entry, schema } of credentials) {
+      const inputKey = uniqueKey(entry.inputKey, taken);
+      mapper.push({ ...entry, inputKey });
+      if (schema) {
+        setOwnProperty(properties, inputKey, schema);
+        if (entry.required) required.push(inputKey);
+      }
     }
 
     const inputSchema: JsonSchema = {
@@ -420,7 +466,7 @@ export class ParameterResolver {
       additionalProperties: false,
     };
 
-    return { inputSchema, mapper };
+    return { inputSchema, mapper, ignored };
   }
 
   /**
@@ -441,13 +487,13 @@ export class ParameterResolver {
       return {
         name: param.name,
         location: param.in as ParameterLocation,
-        required: param.required ?? param.in === 'path',
-        schema: param.schema ?? { type: 'string' },
-        description: param.description,
+        required: isRequired(param),
+        schema: typeof param.schema === 'boolean' || isSpecObject(param.schema) ? param.schema : { type: 'string' },
+        description: textOf(param.description),
         style: param.style,
         explode: param.explode,
         allowReserved: param.allowReserved,
-        deprecated: param.deprecated,
+        deprecated: param.deprecated === true || undefined,
         examples: this.includeExamples ? collectExampleValues(param.example, param.examples) : undefined,
       };
     }
@@ -460,11 +506,11 @@ export class ParameterResolver {
       name: param.name,
       // The whole query string is a query entry (ParameterLocation is unchanged)
       location: wholeQuery ? 'query' : (param.in as ParameterLocation),
-      required: param.required ?? param.in === 'path',
+      required: isRequired(param),
       // No schema (or no Media Type Object): unconstrained for JSON, an object for a form, else a string
       schema: (mediaSchema ?? schemaWithoutMediaSchema(contentType)) as SchemaOrBoolean,
-      description: param.description,
-      deprecated: param.deprecated,
+      description: textOf(param.description),
+      deprecated: param.deprecated === true || undefined,
       // The parameter's own example(s) first, else the media type's
       examples: this.includeExamples
         ? (collectExampleValues(param.example, param.examples) ??
@@ -504,6 +550,10 @@ export class ParameterResolver {
 
     if (flattened) {
       const requiredFields = flattened.required;
+      // A required body with no required property to send is marked, so it is sent though the input gives none
+      const requiredBody =
+        required &&
+        !Object.entries(flattened.properties).some(([name, property]) => requiredFields.has(name) && !isReadOnly(property));
 
       for (const [propName, propSchema] of Object.entries(flattened.properties)) {
         /* c8 ignore next -- prefix is only used internally and defaults to '' */
@@ -513,15 +563,13 @@ export class ParameterResolver {
         // Always an object: conversion turns every subschema into one (a
         // boolean `false` property into `{ not: {} }`, which keeps it as an
         // input that accepts no value)
-        if (typeof propSchema === 'object') {
-          const propEncoding = encoding?.[propName];
+        if (typeof propSchema === 'object' && !isReadOnly(propSchema)) {
+          const propEncoding = ownProperty(encoding, propName) as Record<string, unknown> | undefined;
           // Distribute media-type-level whole-body examples onto the
           // flattened properties: { example: { name: 'Ada' } } -> name: ['Ada']
           const propExamples = mediaExamples
             ?.map((ex) =>
-              ex !== null && typeof ex === 'object' && !Array.isArray(ex)
-                ? (ex as Record<string, unknown>)[propName]
-                : undefined,
+              ex !== null && typeof ex === 'object' && !Array.isArray(ex) ? ownProperty(ex, propName) : undefined,
             )
             .filter((value) => value !== undefined);
           const info: ParameterInfo = {
@@ -535,6 +583,7 @@ export class ParameterResolver {
               contentType,
               ...(propEncoding && { encoding: { [propName]: propEncoding } }),
               ...(isBinarySchema(propSchema as JsonSchema) && { binary: true }),
+              ...(requiredBody && { requiredBody: true }),
             },
           };
 
@@ -574,6 +623,8 @@ export class ParameterResolver {
    */
   private buildParameterSchema(param: ParameterInfo): JsonSchema {
     const schema: JsonSchema = toJsonSchema(param.schema as any, this.schemaConversion);
+    // The library's own annotations say where the value goes: one the document wrote would contradict the mapper
+    for (const key of RESERVED_PARAMETER_ANNOTATIONS) delete (schema as Record<string, unknown>)[key];
 
     if (param.description) {
       schema.description = param.description;
@@ -616,35 +667,47 @@ export class ParameterResolver {
     return schema;
   }
 
-  /**
-   * Select the most appropriate content type
-   */
-  private selectContentType(content: Record<string, any>): string {
-    const contentType = selectRequestMediaType(content);
-    if (!contentType) {
-      throw new Error('No content type available in request body');
-    }
-    return contentType;
-  }
-
-  /**
-   * Process security requirements and add to mapper/inputSchema
-   */
-  private processSecurityRequirements(
+  /** The mapper entry of each scheme the requirements name, with its input schema when the scheme is an input */
+  private securityEntries(
     securityRequirements: SecurityRequirement[],
-    properties: Record<string, JsonSchema>,
-    required: string[],
-    mapper: ParameterMapper[],
     includeInInput: boolean | string[],
-  ): void {
+    alternatives: SecurityRequirement[][],
+  ): Array<{ entry: ParameterMapper; schema?: JsonSchema }> {
+    const entries: Array<{ entry: ParameterMapper; schema?: JsonSchema }> = [];
+    const seen = new Set<string>();
+    // A choice of requirement objects: no scheme is required on its own
+    const choice = alternatives.length > 1;
+    const optional = alternatives.some((alternative) => alternative.length === 0);
+    const certificateSchemes = new Set(
+      alternatives.flat().flatMap((requirement) => (requirement.type === 'mutualTLS' ? [requirement.scheme] : [])),
+    );
+    const clientCertificates = [...certificateSchemes].map((scheme) => ({
+      scheme,
+      alternatives: alternatives.flatMap((alternative, index) =>
+        alternative.some((requirement) => requirement.scheme === scheme) ? [index] : [],
+      ),
+    }));
     for (const secReq of securityRequirements) {
       const { scheme, type, name: apiKeyName, in: apiKeyIn, scopes } = secReq;
+      // A scheme named in several alternative requirements is one credential
+      if (seen.has(scheme)) continue;
+      seen.add(scheme);
 
-      // Build security parameter info
+      const naming = alternatives.flatMap((alternative, index) => {
+        const requirement = alternative.find((candidate) => candidate.scheme === scheme);
+        return requirement ? [{ index, scopes: requirement.scopes ?? [] }] : [];
+      });
+      const scopesDiffer = new Set(naming.map((named) => JSON.stringify(named.scopes))).size > 1;
       const securityInfo: SecurityParameterInfo = {
         scheme,
         type,
         scopes,
+        ...(choice && {
+          alternatives: naming.map((named) => named.index),
+          ...(scopesDiffer && { alternativeScopes: naming.map((named) => named.scopes) }),
+          ...(clientCertificates.length > 0 && { clientCertificates }),
+          ...(optional && { optional }),
+        }),
       };
 
       // Determine parameter details based on security type
@@ -703,31 +766,98 @@ export class ParameterResolver {
           description,
         };
       } else {
-        // Unknown type, skip
+        // mutualTLS: the HTTP client presents the certificate, there is nothing to map
         continue;
       }
 
-      // Add to mapper (always)
-      mapper.push({
-        inputKey,
-        type: paramLocation,
-        key: headerKey,
-        required: true,
-        security: securityInfo,
-      });
-
-      // Add to inputSchema: everything when `true`, per-scheme when an array
-      // (all schemes stay in the mapper either way)
+      // In the input schema: every scheme when `true`, the listed ones when an array; always in the mapper
       const schemeInInput = includeInInput === true || (Array.isArray(includeInInput) && includeInInput.includes(scheme));
-      if (schemeInInput) {
-        if (paramLocation === 'header') {
-          (schema as any)['x-mcp-header'] = headerKey;
-        }
-        properties[inputKey] = schema;
-        required.push(inputKey);
+      if (schemeInInput && paramLocation === 'header') {
+        (schema as any)['x-mcp-header'] = headerKey;
       }
+      entries.push({
+        entry: { inputKey, type: paramLocation, key: headerKey, required: !choice, security: securityInfo },
+        ...(schemeInInput && { schema }),
+      });
     }
+    return entries;
   }
+}
+
+/** A parameter `resolve` leaves out of the tool */
+export interface IgnoredParameter {
+  /** The parameter's `name` */
+  name: string;
+  /** The parameter's `in` */
+  in: string;
+  /** Why it is not an input */
+  reason: string;
+}
+
+/**
+ * Header parameters a tool never takes: those OpenAPI says to ignore (`Accept`, `Content-Type`, `Authorization`)
+ * and those that frame, route or forward a request, which the HTTP client, a credential or a proxy sets
+ */
+const IGNORED_HEADER_PARAMETERS: ReadonlySet<string> = new Set([
+  'accept',
+  'content-type',
+  'authorization',
+  'cookie',
+  'host',
+  'content-length',
+  'transfer-encoding',
+  'connection',
+  'keep-alive',
+  'upgrade',
+  'te',
+  'trailer',
+  'expect',
+  'proxy-authorization',
+  'proxy-authenticate',
+  'proxy-connection',
+  'forwarded',
+  'x-original-url',
+  'x-rewrite-url',
+  'x-http-method-override',
+  'x-http-method',
+  'x-method-override',
+]);
+
+function isIgnoredHeaderParameter(name: string): boolean {
+  const lowerCaseName = name.toLowerCase();
+  return IGNORED_HEADER_PARAMETERS.has(lowerCaseName) || lowerCaseName.startsWith('x-forwarded-');
+}
+
+/** The annotations `buildParameterSchema` writes, never taken from the document */
+const RESERVED_PARAMETER_ANNOTATIONS = [
+  'x-mcp-header',
+  'x-parameter-style',
+  'x-parameter-explode',
+  'x-parameter-content-type',
+  'x-parameter-whole-query',
+] as const;
+
+/** A path parameter is always required (a path has no place without it); another only when `required: true` */
+function isRequired(param: ParameterObject): boolean {
+  return param.in === 'path' || param.required === true;
+}
+
+/** `value` when it is a string: a description of another type is not one */
+function textOf(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+/** Where a value goes on the wire; header names compare in any case */
+function wireName(location: string, name: string): string {
+  return `${location}:${location === 'header' ? name.toLowerCase() : name}`;
+}
+
+/** `base`, or `base` with the first number from 2 that makes it a key not in `taken`; the key is then taken */
+function uniqueKey(base: string, taken: Set<string>): string {
+  let key = base;
+  for (let suffix = 2; taken.has(key); suffix++) key = `${base}${suffix}`;
+  taken.add(key);
+  return key;
 }
 
 /**
@@ -774,10 +904,101 @@ function mapperEntry(inputKey: string, originalName: string, param: ParameterInf
   return entry;
 }
 
+/** Keywords that describe a value without constraining it: of several definitions, the last one's is kept */
+const ANNOTATION_KEYWORDS: ReadonlySet<string> = new Set([
+  'description',
+  'title',
+  'examples',
+  'default',
+  'deprecated',
+  'readOnly',
+  'writeOnly',
+  '$comment',
+]);
+
+/** Keywords read together with their sibling keywords: joined with another definition's, they would read its too */
+const SIBLING_READ_KEYWORDS: ReadonlySet<string> = new Set([
+  'if',
+  'then',
+  'else',
+  'contains',
+  'minContains',
+  'maxContains',
+  'items',
+  'prefixItems',
+  'properties',
+  'additionalProperties',
+  'patternProperties',
+  'unevaluatedProperties',
+  'unevaluatedItems',
+]);
+
+const isAnnotationKeyword = (keyword: string): boolean => ANNOTATION_KEYWORDS.has(keyword) || keyword.startsWith('x-');
+
+/**
+ * The definitions of one property, in the order `allOf` members assign them,
+ * as one schema: each keyword of every definition, an annotation taken from
+ * the last that has it. When two set a constraint keyword differently, or
+ * several constrain and one holds a `SIBLING_READ_KEYWORDS` keyword, the
+ * `allOf` of all of them, which JSON Schema reads as every one applying. The
+ * definitions are `toJsonSchema` results, so objects (a boolean one included).
+ */
+function mergeDefinitions(definitions: unknown[]): unknown {
+  if (definitions.length === 1) return definitions[0];
+  const constraining = (definitions as Record<string, unknown>[])
+    .map((definition) => Object.keys(definition).filter((keyword) => !isAnnotationKeyword(keyword)))
+    .filter((keywords) => keywords.length > 0);
+  const readsSiblings = constraining.some((keywords) => keywords.some((keyword) => SIBLING_READ_KEYWORDS.has(keyword)));
+  if (constraining.length > 1 && readsSiblings) return allOfDefinitions(definitions);
+  const merged: Record<string, unknown> = {};
+  for (const definition of definitions as Record<string, unknown>[]) {
+    for (const [keyword, value] of Object.entries(definition)) {
+      if (!isAnnotationKeyword(keyword) && Object.hasOwn(merged, keyword) && merged[keyword] !== value) {
+        return allOfDefinitions(definitions);
+      }
+      setOwnProperty(merged, keyword, value);
+    }
+  }
+  return merged;
+}
+
+/** The `allOf` of `definitions`, with the annotations the last to have each sets beside it (a `readOnly` is read there) */
+function allOfDefinitions(definitions: unknown[]): Record<string, unknown> {
+  const schema: Record<string, unknown> = { allOf: definitions };
+  for (const definition of definitions as Record<string, unknown>[]) {
+    for (const [keyword, value] of Object.entries(definition)) {
+      if (isAnnotationKeyword(keyword)) setOwnProperty(schema, keyword, value);
+    }
+  }
+  return schema;
+}
+
+/** Keywords that, unless `false`, let a body (or `allOf` member) hold properties it does not name */
+const OPENING_KEYWORDS = ['additionalProperties', 'unevaluatedProperties'] as const;
+
+/**
+ * Keywords of an object body named properties cannot say: a body (or `allOf`
+ * member) holding one is kept whole, so the tool keeps the constraint
+ */
+const WHOLE_BODY_KEYWORDS = [
+  'oneOf',
+  'anyOf',
+  'not',
+  'if',
+  'minProperties',
+  'maxProperties',
+  'dependentRequired',
+  'dependentSchemas',
+  'patternProperties',
+  'propertyNames',
+  'enum',
+  'const',
+] as const;
+
 /**
  * A flattened view of an object request body: the combined property map and
- * required set, with `allOf` members merged in (later members win on property
- * collisions, required sets union).
+ * required set, with `allOf` members merged in (a property several members
+ * define is the `allOf` of their definitions, required sets union).
  */
 interface FlattenedObjectBody {
   properties: Record<string, JsonSchema>;
@@ -786,15 +1007,17 @@ interface FlattenedObjectBody {
 
 /**
  * Collect the property map and required set of an object schema, merging
- * `allOf` members (in order). Returns 'union' when the schema — or ANY allOf
- * member, at any depth — carries a root `oneOf`/`anyOf`: such bodies cannot
- * be flattened into named properties without deleting the union constraint,
- * so the caller must keep the body whole.
+ * `allOf` members (in order). Returns 'whole' when the schema — or ANY allOf
+ * member, at any depth — carries a keyword named properties cannot say
+ * (`WHOLE_BODY_KEYWORDS`: a `oneOf`/`anyOf` union, `not`, `if`, a property
+ * count, ...): flattening would delete that constraint, so the caller must
+ * keep the body whole.
  *
- * The merge is the one a recursive `Object.assign` of each member's merged
- * map, in order, followed by the schema's own `properties`, would produce: a
- * key sits where it first appears in that sequence of assignments and holds
- * the value it was last assigned. Building that map for every member would
+ * A key sits where it first appears in the sequence of assignments a
+ * recursive `Object.assign` of each member's merged map, in order, followed
+ * by the schema's own `properties`, would make; its value merges every
+ * definition, in that order (`mergeDefinitions`), since JSON Schema applies
+ * every member, where an assignment would keep only the last. Building that map for every member would
  * cost quadratic time and memory on a long `allOf` chain (each level copies
  * the whole map below it), so the two are found directly instead, by walks
  * that each visit a member once — every key of a repeated member has already
@@ -802,7 +1025,7 @@ interface FlattenedObjectBody {
  * walks keep their own stacks, so any `allOf` chain can be flattened (issue
  * #50). The schema is a `toJsonSchema` result, which is acyclic.
  */
-function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'union' {
+function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'whole' {
   // Forward, in assignment order (a member's members, then its own
   // properties): each key's first appearance, every required field, and
   // whether a union is reachable
@@ -811,22 +1034,24 @@ function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'union'
   const required = new Set<string>();
   const entered = new Set<object>();
   const frames: { schema: Record<string, unknown>; members: unknown[]; next: number }[] = [];
-  // False when `member` is a union
+  // False when `member` holds a constraint named properties cannot say
   const enter = (member: unknown): boolean => {
     /* c8 ignore next -- defensive: toJsonSchema always yields objects, so non-object members cannot reach here */
     if (!member || typeof member !== 'object') return true;
     if (entered.has(member)) return true;
     entered.add(member);
     const record = member as Record<string, unknown>;
-    if (Array.isArray(record['oneOf']) || Array.isArray(record['anyOf'])) return false;
+    if (WHOLE_BODY_KEYWORDS.some((keyword) => record[keyword] !== undefined)) return false;
+    // Other properties the body accepts could not be sent through a closed input
+    if (OPENING_KEYWORDS.some((keyword) => record[keyword] !== undefined && record[keyword] !== false)) return false;
     frames.push({ schema: record, members: Array.isArray(record['allOf']) ? record['allOf'] : [], next: 0 });
     return true;
   };
-  if (!enter(schema)) return 'union';
+  if (!enter(schema)) return 'whole';
   while (frames.length > 0) {
     const frame = frames[frames.length - 1];
     if (frame.next < frame.members.length) {
-      if (!enter(frame.members[frame.next++])) return 'union';
+      if (!enter(frame.members[frame.next++])) return 'whole';
       continue;
     }
     frames.pop();
@@ -844,9 +1069,9 @@ function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'union'
     }
   }
 
-  // Backward — own properties, then members from last to first: the first
-  // value seen for a key is the one it was last assigned
-  const values = new Map<string, unknown>();
+  // Backward — own properties, then members from last to first: each key's
+  // definitions, last assigned first
+  const values = new Map<string, unknown[]>();
   const assigned = new Set<object>();
   const pending: unknown[] = [schema];
   while (pending.length > 0) {
@@ -857,7 +1082,9 @@ function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'union'
     if (record['properties'] && typeof record['properties'] === 'object') {
       const own = record['properties'] as Record<string, unknown>;
       for (const key of Object.keys(own)) {
-        if (!values.has(key)) values.set(key, own[key]);
+        const definitions = values.get(key) ?? [];
+        if (!definitions.includes(own[key])) definitions.push(own[key]);
+        values.set(key, definitions);
       }
     }
     // Pushed in order, so the last member is assigned first
@@ -867,21 +1094,28 @@ function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'union'
   }
 
   const properties: Record<string, JsonSchema> = {};
-  for (const key of keys) properties[key] = values.get(key) as JsonSchema;
+  for (const key of keys) setOwnProperty(properties, key, mergeDefinitions(values.get(key)!.reverse()));
   return { properties, required };
 }
 
 /**
  * Flatten an object body schema — including `allOf` compositions — into a
  * single property map. Returns undefined when the body cannot be represented
- * as named properties: `oneOf`/`anyOf` unions at the root OR inside any allOf
- * member (flattening would delete the union constraint), non-object schemas
- * (arrays, primitives, binary), and free-form objects without properties.
+ * as named properties: a `WHOLE_BODY_KEYWORDS` constraint or an open
+ * `OPENING_KEYWORDS` keyword at the root OR inside any allOf member
+ * (flattening would delete it), non-object schemas
+ * (arrays, primitives, binary), and objects without a property a request
+ * sends (free-form, or every property `readOnly`).
  */
 function flattenObjectBody(schema: JsonSchema): FlattenedObjectBody | undefined {
   const collected = collectObjectMembers(schema);
-  if (collected === 'union') return undefined;
-  return Object.keys(collected.properties).length > 0 ? collected : undefined;
+  if (collected === 'whole') return undefined;
+  return Object.values(collected.properties).some((property) => !isReadOnly(property)) ? collected : undefined;
+}
+
+/** A readOnly property is never sent in a request (OpenAPI Schema Object `readOnly`) */
+function isReadOnly(schema: unknown): boolean {
+  return isSpecObject(schema) && schema['readOnly'] === true;
 }
 
 /**

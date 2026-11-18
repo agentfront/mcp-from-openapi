@@ -2,6 +2,7 @@ import type { JsonSchema } from './types';
 import { isNeverSchema } from './types';
 import { SchemaError } from './errors';
 import { chargeBudget, copyJsonValue, mapSlots, MAX_VALUE_DEPTH, type CopyBudget } from './json-copy';
+import { setOwnProperty } from './spec';
 
 /**
  * Client dialect targets. Every MCP client accepts a different JSON Schema
@@ -80,7 +81,7 @@ function walkSchema(node: JsonSchema, visit: (node: SchemaRecord) => SchemaRecor
     if (isSchemaObject(value)) {
       const mapped: SchemaRecord = {};
       for (const [name, sub] of Object.entries(value)) {
-        mapped[name] = walkSchema(sub as JsonSchema, visit);
+        setOwnProperty(mapped, name, walkSchema(sub as JsonSchema, visit));
       }
       visited[key] = mapped;
     }
@@ -238,7 +239,7 @@ export function inlineLocalRefs(schema: JsonSchema, options: ClientTargetOptions
         chargeBudget(budget);
         const mapped: SchemaRecord = {};
         for (const [name, sub] of Object.entries(value)) {
-          mapped[name] = inline(sub as JsonSchema, seenPointers, depth + 1);
+          setOwnProperty(mapped, name, inline(sub as JsonSchema, seenPointers, depth + 1));
         }
         copy[key] = mapped;
       } else if (kind === 'schema' && isSchemaObject(value)) {
@@ -268,6 +269,11 @@ export function ensureArrayItems(schema: JsonSchema): JsonSchema {
   });
 }
 
+/** `Object.assign` that defines a key `__proto__` instead of setting the target's prototype */
+function assignOwn(target: SchemaRecord, source: SchemaRecord): void {
+  for (const [key, value] of Object.entries(source)) setOwnProperty(target, key, value);
+}
+
 /**
  * Merge `allOf` members into one node (properties/required union, later
  * scalar keywords win). Members carrying their own `allOf` are merged
@@ -285,14 +291,14 @@ function mergeAllOf(node: SchemaRecord): SchemaRecord {
     if (!isSchemaObject(rawMember)) continue;
     const member = Array.isArray(rawMember['allOf']) ? mergeAllOf(rawMember) : rawMember;
     const { properties: memberProps, required: memberRequired, ...scalars } = member;
-    Object.assign(merged, scalars);
-    if (isSchemaObject(memberProps)) Object.assign(properties, memberProps);
+    assignOwn(merged, scalars);
+    if (isSchemaObject(memberProps)) assignOwn(properties, memberProps);
     if (Array.isArray(memberRequired)) memberRequired.forEach((field) => required.add(String(field)));
   }
 
   const { allOf: _allOf, properties: ownProps, required: ownRequired, ...rest } = node;
-  Object.assign(merged, rest);
-  if (isSchemaObject(ownProps)) Object.assign(properties, ownProps);
+  assignOwn(merged, rest);
+  if (isSchemaObject(ownProps)) assignOwn(properties, ownProps);
   if (Array.isArray(ownRequired)) ownRequired.forEach((field) => required.add(String(field)));
 
   if (Object.keys(properties).length > 0) merged['properties'] = properties;
@@ -523,7 +529,7 @@ export function requireAllProperties(schema: JsonSchema): JsonSchema {
     for (const [name, propSchema] of Object.entries(properties)) {
       if (!originallyRequired.has(name) && isNeverSchema(propSchema)) {
         if (!closed) {
-          rewritten[name] = propSchema;
+          setOwnProperty(rewritten, name, propSchema);
           optional.add(name);
         }
         continue;
@@ -531,7 +537,7 @@ export function requireAllProperties(schema: JsonSchema): JsonSchema {
       // const-constrained properties are left untouched: adding null would
       // contradict the const, and const already admits exactly one value.
       if (originallyRequired.has(name) || !isSchemaObject(propSchema) || (propSchema as SchemaRecord)['const'] !== undefined) {
-        rewritten[name] = propSchema;
+        setOwnProperty(rewritten, name, propSchema);
         continue;
       }
       const prop = propSchema as SchemaRecord;
@@ -546,13 +552,13 @@ export function requireAllProperties(schema: JsonSchema): JsonSchema {
       };
       const type = prop['type'];
       if (typeof type === 'string' && type !== 'null') {
-        rewritten[name] = withNullEnum({ ...prop, type: [type, 'null'] });
+        setOwnProperty(rewritten, name, withNullEnum({ ...prop, type: [type, 'null'] }));
       } else if (Array.isArray(type) && !type.includes('null')) {
-        rewritten[name] = withNullEnum({ ...prop, type: [...type, 'null'] });
+        setOwnProperty(rewritten, name, withNullEnum({ ...prop, type: [...type, 'null'] }));
       } else {
         // no declared type (or already nullable): null validates the widened
         // type, but an enum still needs the null member
-        rewritten[name] = withNullEnum(prop);
+        setOwnProperty(rewritten, name, withNullEnum(prop));
       }
     }
 

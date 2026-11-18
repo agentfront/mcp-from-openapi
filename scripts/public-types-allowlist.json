@@ -218,6 +218,24 @@
       "differences": [
         { "kind": "property-added-required", "leaf": "ResponseBuilder.buildStream", "exports": ["ResponseBuilder", "typeof ResponseBuilder"] }
       ]
+    },
+    {
+      "reason": "`resolve()` also returns the parameters it leaves out of the tool (a header the HTTP client or a credential sets, or where a credential of the operation is sent), so the generator can report each with a `PARAMETER_IGNORED` diagnostic. An added property of a returned object: code reading the result is unaffected.",
+      "differences": [
+        { "kind": "property-added-required", "leaf": "ParameterResolver.resolve().ignored", "exports": ["ParameterResolver", "typeof ParameterResolver"] }
+      ]
+    },
+    {
+      "reason": "`ResponseBuilder.statuses()` returns the status of each response `build()` reads, so the generator takes `metadata.responseStatusCodes` / `responseStatusRanges` from the responses instead of reading them back from the output schema, which the document can write itself. An added method: code using the class is unaffected.",
+      "differences": [
+        { "kind": "property-added-required", "leaf": "ResponseBuilder.statuses", "exports": ["ResponseBuilder", "typeof ResponseBuilder"] }
+      ]
+    },
+    {
+      "reason": "`SchemaBuilder.omitMarkedProperties(schema, keyword)` leaves out the properties a schema marks `readOnly` or `writeOnly`, which the generator applies to input and output schemas as OpenAPI says those properties are not sent or not returned. An added static method: code using the class is unaffected.",
+      "differences": [
+        { "kind": "property-added-required", "leaf": "typeof SchemaBuilder.omitMarkedProperties", "exports": ["typeof SchemaBuilder"] }
+      ]
     }
   ]
 }
