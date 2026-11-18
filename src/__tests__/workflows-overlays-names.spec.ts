@@ -50,6 +50,20 @@ const arazzo = (workflows: unknown[], extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 
+/** Whether `root` reaches one object twice, which a JSON copy would write twice */
+function sharesAnObject(root: unknown): boolean {
+  const seen = new Set<object>();
+  const stack = [root];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (typeof value !== 'object' || value === null) continue;
+    if (seen.has(value)) return true;
+    seen.add(value);
+    stack.push(...Object.values(value));
+  }
+  return false;
+}
+
 describe('fromArazzo stays bounded', () => {
   it('resolves a chain of inputs that each reference the previous one twice, once per input', async () => {
     const inputs: Record<string, unknown> = { i0: { type: 'string' } };
@@ -64,6 +78,7 @@ describe('fromArazzo stays bounded', () => {
     const [tool] = await fromArazzo(document, { sources: { pets: petsSource() } });
     expect(Date.now() - started).toBeLessThan(500);
     expect(tool.inputSchema).toMatchObject({ type: 'object', properties: { a: { type: 'object' } } });
+    expect(sharesAnObject(tool.metadata.workflow?.inputSchema)).toBe(false);
   });
 
   it('still refuses a cycle of inputs', async () => {
@@ -135,6 +150,14 @@ describe('overlay targets with recursive descent', () => {
     }
     expect(outcome instanceof RangeError).toBe(false);
     if (outcome instanceof Error) expect(outcome).toBeInstanceOf(OverlayError);
+  });
+
+  it('refuses a document that is not plain JSON without quoting it', () => {
+    const document: Record<string, unknown> = { openapi: '3.0.3' };
+    document['\u202Eloop'] = document;
+    expect(() => applyOverlay(document, overlay('$.openapi'))).toThrow(
+      new OverlayError('The document cannot be copied to apply the overlay: it holds a cycle, a value JSON cannot hold, or nesting too deep', {}),
+    );
   });
 });
 

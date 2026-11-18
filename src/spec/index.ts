@@ -91,5 +91,5 @@ export {
 } from './upgrade-v2';
 export type { Swagger2BasePath, UpgradeSwagger2Options, UpgradeSwagger2Result } from './upgrade-v2';
 
-export { parameterNameNotStringDiagnostic, readParameterName } from './parameters';
+export { parameterNameNotStringDiagnostic, readParameterName, withTextName } from './parameters';
 export type { ParameterName } from './parameters';

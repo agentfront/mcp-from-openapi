@@ -1,4 +1,6 @@
+import { GenerationError } from '../errors';
 import { OpenAPIToolGenerator } from '../generator';
+import { ParameterResolver } from '../parameter-resolver';
 import { buildHttpRequest } from '../request-builder';
 
 const ok = { 200: { description: 'ok' } };
@@ -165,6 +167,33 @@ describe('a parameter cannot stand in for a credential or for a header the clien
   });
 });
 
+describe('ParameterResolver reads parameter names as generation does', () => {
+  const resolver = new ParameterResolver();
+
+  it('reads a number or boolean name as its text', () => {
+    const { mapper } = resolver.resolve(
+      { parameters: [{ name: 2024, in: 'header', schema: {} }, { name: true, in: 'query', schema: {} }] },
+      [{ name: 2024, in: 'header', schema: { type: 'string' } }],
+    );
+    expect(mapper.map((entry) => [entry.key, entry.inputKey])).toEqual([
+      ['2024', '2024'],
+      ['true', 'true'],
+    ]);
+  });
+
+  it.each([{}, [], '', null])('refuses a parameter named %p', (name) => {
+    const failure = (() => {
+      try {
+        return resolver.resolve({ parameters: [{ name, in: 'header', schema: {} }] });
+      } catch (error) {
+        return error;
+      }
+    })();
+    expect(failure).toBeInstanceOf(GenerationError);
+    expect((failure as GenerationError).context).toEqual({ code: 'INVALID_PARAMETER_NAME' });
+  });
+});
+
 describe('path filters compare the path a client sends', () => {
   const document = {
     paths: {
@@ -180,6 +209,21 @@ describe('path filters compare the path a client sends', () => {
     );
     const tools = await generator.generateTools({ excludePaths: ['/admin/**'] });
     expect(tools.map((tool) => tool.name)).toEqual(['status']);
+  });
+
+  it.each([['/%61dmin/**'], ['/files/a%2fb'], ['/files/a%2Fb']])('a glob written %s is read the same way', async (glob) => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      {
+        openapi: '3.0.3',
+        info: { title: 't', version: '1' },
+        paths: { ...document.paths, '/files/a%2fb': { get: { operationId: 'file', responses: ok } } },
+      },
+      { validate: false },
+    );
+    const kept = await generator.generateTools({ includePaths: [glob] });
+    const left = await generator.generateTools({ excludePaths: [glob] });
+    expect(kept).toHaveLength(1);
+    expect(left).toHaveLength(2);
   });
 });
 

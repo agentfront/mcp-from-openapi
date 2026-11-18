@@ -2,7 +2,7 @@ import { ParseError, SsrfError } from '../errors';
 import { OpenAPIToolGenerator } from '../generator';
 import {
   assertUrlSafe,
-  hostListIncludes,
+  blockListIncludes,
   isBlockedHostname,
   type ResolvedAddress,
   type ResolvedSsrfOptions,
@@ -123,8 +123,8 @@ describe('blockedHosts compares addresses, not spellings', () => {
   });
 
   it('compares an entry no URL can hold as written', () => {
-    expect(hostListIncludes(['bad host'], 'bad host')).toBe(true);
-    expect(hostListIncludes(['bad host'], 'bad')).toBe(false);
+    expect(blockListIncludes(['bad host'], 'bad host')).toBe(true);
+    expect(blockListIncludes(['bad host'], 'bad')).toBe(false);
   });
 
   it('resolves no name when blockedHosts holds only names and internal addresses are allowed', async () => {
@@ -137,6 +137,25 @@ describe('blockedHosts compares addresses, not spellings', () => {
       ),
     ).resolves.toEqual([]);
     expect(lookup).not.toHaveBeenCalled();
+  });
+});
+
+describe('allowedHosts admits exactly the hosts it lists', () => {
+  it.each([
+    ['2002:808:808:1::1', 'http://[2002:808:808:2::2]/x'],
+    ['8.8.8.8', 'http://[::ffff:8.8.8.8]/x'],
+    ['8.8.8.8', 'http://[2002:808:808::1]/x'],
+  ])('an entry %s does not admit %s, which embeds the same IPv4 address', async (entry, url) => {
+    const refusal = await refusalOf(url, ssrfOptions({ allowedHosts: [entry] }));
+    expect(refusal?.context).toMatchObject({ reason: 'host-not-allowed' });
+  });
+
+  it.each([
+    ['2002:808:808:1::1', 'http://[2002:0808:0808:0001:0:0:0:1]/x'],
+    ['bücher.example', 'http://xn--bcher-kva.example/x'],
+    ['API.example.test.', 'http://api.example.test/x'],
+  ])('an entry %s admits %s, the same host spelled otherwise', async (entry, url) => {
+    expect(await refusalOf(url, ssrfOptions({ allowedHosts: [entry] }))).toBeUndefined();
   });
 });
 

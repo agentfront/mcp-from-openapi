@@ -1129,6 +1129,15 @@ export interface SecurityParameterInfo {
    */
   alternatives?: number[];
 
+  /**
+   * With `alternatives`, the scopes each of them asks of this scheme, in the same order; present only when they
+   * differ (`scopes` holds those of the first)
+   */
+  alternativeScopes?: string[][];
+
+  /** With a choice, the alternatives that also need a client certificate (a `mutualTLS` scheme, not in the mapper) */
+  certificateAlternatives?: number[];
+
   /** With a choice, whether one alternative is empty (`{}`): the operation also accepts a call without credentials */
   optional?: boolean;
 }
@@ -2228,6 +2237,8 @@ export const DIAGNOSTIC_CODES = Object.freeze({
    * streamed upload), which is not supported: the tool takes no body input.
    */
   UNSUPPORTED_STREAMING_REQUEST_BODY: 'UNSUPPORTED_STREAMING_REQUEST_BODY',
+  /** A request body's `content` lists no media type: the tool takes no body input. */
+  REQUEST_BODY_WITHOUT_MEDIA_TYPE: 'REQUEST_BODY_WITHOUT_MEDIA_TYPE',
   /** The list reached `MAX_DIAGNOSTICS`; later findings are not recorded. */
   DIAGNOSTICS_TRUNCATED: 'DIAGNOSTICS_TRUNCATED',
 } as const);

@@ -9,7 +9,13 @@
  * schemas and mapper so an executor needs no second spec pass. This library
  * never fetches source URLs, performs HTTP, or evaluates expressions.
  */
-import { MAX_NAME_DEDUP_ATTEMPTS, OpenAPIToolGenerator, dedupedToolName, normalizeToolName } from './generator';
+import {
+  MAX_NAME_DEDUP_ATTEMPTS,
+  OpenAPIToolGenerator,
+  dedupedToolName,
+  maxToolNameLength,
+  normalizeToolName,
+} from './generator';
 import { ArazzoError, SchemaError } from './errors';
 import { collectPayloadExpressions, parseExpressionValue, parseRuntimeExpression } from './arazzo-expressions';
 import { inferAnnotationsFromMethod } from './annotations';
@@ -1199,9 +1205,13 @@ function buildWorkflowTool(
   let inputSchema: JsonSchema;
   let rawInputSchema: JsonSchema | undefined;
   if (resolvedInputs !== undefined) {
+    // The IR keeps the inputs before formats, as a tree within the budget too: a conversion shares nodes
     const input = fit('input schema', `${wPath}/inputs`, (depth) => {
       const raw = convertInputs(depth);
-      return { raw, truncated: SchemaBuilder.truncateDepth(resolveFormats(raw, options), depth, { maxNodes }) };
+      return {
+        raw: SchemaBuilder.truncateDepth(raw, depth, { maxNodes }),
+        truncated: SchemaBuilder.truncateDepth(resolveFormats(raw, options), depth, { maxNodes }),
+      };
     });
     rawInputSchema = input.raw;
     inputSchema = shapeSchema(input.truncated, options, true);
@@ -1220,7 +1230,8 @@ function buildWorkflowTool(
   });
   const outputSchema = output && shapeSchema(output, options, false);
 
-  const name = normalizeToolName(workflow.workflowId, options.maxToolNameLength ?? 64, workflow.workflowId);
+  const maxLength = maxToolNameLength(options.maxToolNameLength);
+  const name = normalizeToolName(workflow.workflowId, maxLength, workflow.workflowId);
   const description =
     workflow.summary && workflow.description
       ? `${workflow.summary}\n\n${workflow.description}`
@@ -1389,7 +1400,7 @@ export async function fromArazzo(document: ArazzoDocument | string, options: Fro
     // Distinct workflowIds can still normalize to the same name (`_flow` and
     // `flow` both become `flow`) — dedupe with the generator's hash pattern.
     if (usedNames.has(tool.name)) {
-      const maxLength = ctx.generateOptions.maxToolNameLength ?? 64;
+      const maxLength = maxToolNameLength(ctx.generateOptions.maxToolNameLength);
       const deduped = dedupedToolName(tool.name, workflow.workflowId, maxLength, usedNames);
       if (deduped === undefined) {
         err(

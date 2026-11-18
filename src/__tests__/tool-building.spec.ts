@@ -61,11 +61,12 @@ describe('loading', () => {
 
 describe('tools carry what the request can send', () => {
   it('makes a tool of an operation whose request body has no media type', async () => {
-    const { tools } = await generate(
+    const { tools, codes } = await generate(
       documentWith({ '/p': { post: { operationId: 'p', requestBody: { content: {} }, responses: ok } } }),
     );
     expect(tools).toHaveLength(1);
     expect(tools[0].mapper).toEqual([]);
+    expect(codes).toEqual(['REQUEST_BODY_WITHOUT_MEDIA_TYPE']);
   });
 
   it('sends to the servers of the path item before the document servers', async () => {
@@ -81,6 +82,20 @@ describe('tools carry what the request can send', () => {
     expect(tools.map((tool) => tool.metadata.servers?.map((server) => server.url))).toEqual([
       ['https://path.example.test'],
       ['https://op.example.test'],
+    ]);
+  });
+
+  it('passes over a server list that holds no server, to the next or to baseUrl', async () => {
+    const paths = {
+      '/p': { servers: [], get: { operationId: 'p', servers: [null], responses: ok } },
+      '/q': { servers: [], get: { operationId: 'q', responses: ok } },
+    };
+    const urls = async (options: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+      (await generate(documentWith(paths, extra), options)).tools.map((tool) => tool.metadata.servers?.map((s) => s.url));
+    expect(await urls({})).toEqual([['https://api.example.test'], ['https://api.example.test']]);
+    expect(await urls({ baseUrl: 'https://base.example.test' }, { servers: [] })).toEqual([
+      ['https://base.example.test'],
+      ['https://base.example.test'],
     ]);
   });
 
@@ -174,6 +189,19 @@ describe('an operation security that is not a list', () => {
 });
 
 describe('lint reads parameters as generation does', () => {
+  it.each([undefined, null, '', {}, []])('skips a parameter named %p instead of throwing', async (name) => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      documentWith({
+        '/p': {
+          parameters: [{ name, in: 'query', schema: {} }],
+          get: { operationId: 'p', parameters: [{ name, in: 'header', schema: {} }], responses: ok },
+        },
+      }),
+      { validate: false },
+    );
+    await expect(generator.lint()).resolves.toMatchObject({ findings: expect.any(Array) });
+  });
+
   it('reads a number name as its text, so an operation overrides the path-level parameter', async () => {
     const generator = await OpenAPIToolGenerator.fromJSON(
       documentWith({

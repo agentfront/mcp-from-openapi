@@ -64,6 +64,11 @@ jobs:
             echo "::error::Invalid branch name after sanitization: $CHERRY_BRANCH"
             exit 1
           fi
+          # An existing cherry-pick branch is deleted below, which must never be the PR's own branch
+          if [ "$CHERRY_BRANCH" = "$ORIGINAL_BRANCH" ]; then
+            echo "::error::The cherry-pick branch name equals the source branch: $CHERRY_BRANCH"
+            exit 1
+          fi
 
           echo "cherry_branch=$CHERRY_BRANCH" >> "$GITHUB_OUTPUT"
           echo "Cherry-pick branch: $CHERRY_BRANCH"

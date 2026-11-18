@@ -200,12 +200,15 @@ describe('a reference left unresolved makes no broken tool', () => {
     expect(codes(generator)).toContain('UNRESOLVED_REFERENCE');
   });
 
-  it('a security scheme that is a reference cannot satisfy a requirement', async () => {
-    const generator = await load(
-      { security: [{ refd: [] }] },
-      { components: { securitySchemes: { refd: { $ref: `${external}#/S` } } } },
-    );
-    await expect(generator.generateTools()).resolves.toEqual([]);
-    expect(codes(generator)).toEqual(expect.arrayContaining(['UNRESOLVED_SECURITY_SCHEME', 'UNSATISFIABLE_SECURITY']));
-  });
+  it.each(['refd', '#/components/securitySchemes/refd'])(
+    'a security scheme that is a reference cannot satisfy a requirement naming it as %s',
+    async (key) => {
+      const generator = await load(
+        { security: [{ [key]: [] }] },
+        { openapi: '3.2.0', components: { securitySchemes: { refd: { $ref: `${external}#/S` } } } },
+      );
+      await expect(generator.generateTools()).resolves.toEqual([]);
+      expect(codes(generator)).toEqual(expect.arrayContaining(['UNRESOLVED_SECURITY_SCHEME', 'UNSATISFIABLE_SECURITY']));
+    },
+  );
 });

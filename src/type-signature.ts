@@ -449,8 +449,9 @@ export function emitToolTypeScript(
 
   blocks.push(namedRoot(inputName, inputSchema, pretty));
 
+  // An output that accepts nothing is `never`, whatever variants it lists
   const outputUnion =
-    isSchemaRecord(outputSchema) && Array.isArray(outputSchema['anyOf'])
+    isSchemaRecord(outputSchema) && Array.isArray(outputSchema['anyOf']) && !isNeverSchema(outputSchema)
       ? (outputSchema['anyOf'] as unknown[])
       : undefined;
   if (outputSchema === undefined) {

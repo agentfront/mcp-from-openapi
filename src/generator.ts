@@ -63,6 +63,7 @@ import {
   type WithExtensions,
 } from './spec';
 import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
+import type { FileHandle } from 'node:fs/promises';
 import { isNeverSchema, isPresentSchema, isReferenceObject } from './types';
 import {
   ParameterResolver,
@@ -107,7 +108,8 @@ import { GenerationError, LoadError, OverlayError, ParseError, SchemaError, Ssrf
 import { BUILTIN_FORMAT_RESOLVERS, resolveSchemaFormats } from './format-resolver';
 import { emitToolTypeScript } from './type-signature';
 import {
-  hostListIncludes,
+  allowListIncludes,
+  blockListIncludes,
   isBlockedHostname,
   normalizeSsrfOptions,
   safeFetch,
@@ -382,14 +384,14 @@ function explainUnreadableRef(url: string, policy: RefPolicy): RefRefusal {
   const parsed = parseUrl(url);
   if (parsed === undefined) return { rule: 'unreadable', reason: 'it is not a valid URL' };
   const host = describeValue(parsed.hostname, REF_TEXT_MAX_LENGTH);
-  if (policy.allowedHosts.length > 0 && !hostListIncludes(policy.allowedHosts, parsed.hostname)) {
+  if (policy.allowedHosts.length > 0 && !allowListIncludes(policy.allowedHosts, parsed.hostname)) {
     return {
       rule: 'host-not-allowed',
       reason: `its host ${host} is not in refResolution.allowedHosts`,
       allow: 'add the host to refResolution.allowedHosts to read it',
     };
   }
-  if (hostListIncludes(policy.blockedHosts, parsed.hostname)) {
+  if (blockListIncludes(policy.blockedHosts, parsed.hostname)) {
     return { rule: 'host-blocked', reason: `its host ${host} is in refResolution.blockedHosts` };
   }
   // The http resolver's canRead refuses an allowed protocol for no other reason
@@ -451,6 +453,21 @@ function withoutQuery(url: string): string {
 /** Escapes `$RefParser` decodes in a file path before `decodeURI`, which keeps them */
 const RESERVED_PATH_ESCAPES = /%(?:23|24|26|2C|3F|40)/gi;
 
+const FILE_READ_CHUNK_BYTES = 64 * 1024;
+
+/** The bytes of `handle` to its end, or `undefined` past `limit`: a size can be wrong (procfs says 0, a file grows) */
+async function readUpTo(handle: FileHandle, limit: number): Promise<Buffer | undefined> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const { bytesRead, buffer } = await handle.read({ buffer: Buffer.alloc(FILE_READ_CHUNK_BYTES) });
+    if (bytesRead === 0) return Buffer.concat(chunks, total);
+    total += bytesRead;
+    if (total > limit) return undefined;
+    chunks.push(buffer.subarray(0, bytesRead));
+  }
+}
+
 /**
  * The local file a reference names, found as `$RefParser`'s file resolver finds it, read only when it is a
  * regular file of at most `DEFAULT_MAX_RESPONSE_BYTES`: a device never ends, and opening a pipe waits for a writer
@@ -473,10 +490,12 @@ async function readLocalFile(reference: string): Promise<Buffer | RefRefusal> {
     try {
       const stats = await handle.stat();
       if (!stats.isFile()) return { rule: 'file-error', reason: 'it is not a regular file' };
-      if (stats.size > DEFAULT_MAX_RESPONSE_BYTES) {
-        return { rule: 'too-large', reason: `the file exceeds ${DEFAULT_MAX_RESPONSE_BYTES} bytes` };
-      }
-      return await handle.readFile();
+      const tooLarge: RefRefusal = {
+        rule: 'too-large',
+        reason: `the file exceeds ${DEFAULT_MAX_RESPONSE_BYTES} bytes`,
+      };
+      if (stats.size > DEFAULT_MAX_RESPONSE_BYTES) return tooLarge;
+      return (await readUpTo(handle, DEFAULT_MAX_RESPONSE_BYTES)) ?? tooLarge;
     } finally {
       await handle.close();
     }
@@ -687,6 +706,14 @@ function orderedReads(limits: ReadLimits): OrderedReads {
   let documents = 0;
   let bytes = 0;
   const deadline = Date.now() + limits.timeoutMs * DEREFERENCE_TIMEOUT_FACTOR;
+  const pastDeadline = (): RefRefusal | undefined => {
+    if (Date.now() <= deadline) return undefined;
+    failed = true;
+    return {
+      rule: 'timeout',
+      reason: `reading the referenced documents takes longer than ${limits.timeoutMs * DEREFERENCE_TIMEOUT_FACTOR} ms (ten times LoadOptions.timeout)`,
+    };
+  };
   const waiting: Array<() => void> = [];
   const started: Array<Promise<void>> = [];
   const startWaiting = (): void => {
@@ -735,23 +762,19 @@ function orderedReads(limits: ReadLimits): OrderedReads {
           allow: 'raise refResolution.maxDocuments to read them',
         };
       }
-      if (Date.now() > deadline) {
+      return pastDeadline();
+    },
+    // Checked when a read completes too: one that ends past the deadline fails the dereference
+    account: (size) => {
+      if ((bytes += size) > limits.maxTotalBytes) {
         failed = true;
         return {
-          rule: 'timeout',
-          reason: `reading the referenced documents takes longer than ${limits.timeoutMs * DEREFERENCE_TIMEOUT_FACTOR} ms (ten times LoadOptions.timeout)`,
+          rule: 'too-large',
+          reason: `the referenced documents read hold more than ${limits.maxTotalBytes} bytes (refResolution.maxTotalBytes)`,
+          allow: 'raise refResolution.maxTotalBytes to read them',
         };
       }
-      return undefined;
-    },
-    account: (size) => {
-      if ((bytes += size) <= limits.maxTotalBytes) return undefined;
-      failed = true;
-      return {
-        rule: 'too-large',
-        reason: `the referenced documents read hold more than ${limits.maxTotalBytes} bytes (refResolution.maxTotalBytes)`,
-        allow: 'raise refResolution.maxTotalBytes to read them',
-      };
+      return pastDeadline();
     },
   };
 }
@@ -961,10 +984,10 @@ function matchesGlob(glob: string, path: string): boolean {
   return positions.has(tokens.length);
 }
 
-/** A path key is matched as a client sends it: `%61` is `a`, and an escape of another character upper-cased */
+/** A path key and each glob are matched as a client sends them: `%61` is `a`, any other escape upper-cased */
 function matchesAnyGlob(path: string, globs: string[]): boolean {
   const canonicalPath = normalizeEscapes(path);
-  return globs.some((glob) => matchesGlob(glob, canonicalPath));
+  return globs.some((glob) => matchesGlob(normalizeEscapes(glob), canonicalPath));
 }
 
 /**
@@ -1016,6 +1039,11 @@ export function fnv1aHex(input: string): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/** `GenerateOptions.maxToolNameLength`: the default unless it is a number of at least 1 */
+export function maxToolNameLength(value: unknown): number {
+  return typeof value === 'number' && value >= 1 ? value : DEFAULT_MAX_TOOL_NAME_LENGTH;
 }
 
 /**
@@ -1631,7 +1659,7 @@ export class OpenAPIToolGenerator {
         }
 
         // Check host allowlist (if configured), case- and trailing-dot-insensitively
-        if (hasHostAllowlist && !hostListIncludes(refOpts.allowedHosts, parsed.hostname)) {
+        if (hasHostAllowlist && !allowListIncludes(refOpts.allowedHosts, parsed.hostname)) {
           return false;
         }
 
@@ -1664,7 +1692,12 @@ export class OpenAPIToolGenerator {
       const refusal = reads.admit();
       if (refusal) refuse(file, refs, refusal);
       const content = await read();
-      const overLimit = reads.account((content as { length: number }).length);
+      // A file is read as bytes; a fetched document as text, counted in the UTF-8 bytes it was sent as
+      const size =
+        typeof content === 'string'
+          ? new TextEncoder().encode(content).byteLength
+          : (content as { length: number }).length;
+      const overLimit = reads.account(size);
       return overLimit ? refuse(file, refs, overLimit) : content;
     };
 
@@ -2187,7 +2220,7 @@ export class OpenAPIToolGenerator {
           // stable, content-derived suffix — the (method, path) pair is unique
           // per operation, so the suffixed name is deterministic across runs.
           if (usedNames.has(tool.name)) {
-            const maxLength = positiveOr(options.maxToolNameLength, DEFAULT_MAX_TOOL_NAME_LENGTH);
+            const maxLength = maxToolNameLength(options.maxToolNameLength);
             // The suffixed name can itself be taken (an operationId mimicking one, hash-only names under a tiny cap)
             const deduped = dedupedToolName(tool.name, `${method} ${pathStr}`, maxLength, usedNames);
             if (deduped === undefined) {
@@ -2671,16 +2704,28 @@ export class OpenAPIToolGenerator {
   }
 
   /**
-   * `UNSUPPORTED_STREAMING_REQUEST_BODY` when the media type a request body
-   * is read in declares `itemSchema` (OpenAPI 3.2, a streamed upload) and no
-   * `schema`: the body is left out of the tool's input.
+   * Why a request body is left out of the tool's input: its `content` lists no
+   * media type (`REQUEST_BODY_WITHOUT_MEDIA_TYPE`), or the media type it is
+   * read in declares `itemSchema` (OpenAPI 3.2, a streamed upload) and no
+   * `schema` (`UNSUPPORTED_STREAMING_REQUEST_BODY`).
    */
-  private streamingRequestBodyDiagnostic(pathStr: string, entry: OperationEntry): SpecDiagnostic | undefined {
+  private ignoredRequestBodyDiagnostic(pathStr: string, entry: OperationEntry): SpecDiagnostic | undefined {
     const content = ownProperty(ownProperty(entry.operation, 'requestBody'), 'content');
     if (!isSpecObject(content)) return undefined;
     const mediaType = selectRequestMediaType(content);
+    // A Swagger 2.0 body always converts with a media type, so this is a 3.x document's
+    if (mediaType === undefined) {
+      return {
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.REQUEST_BODY_WITHOUT_MEDIA_TYPE,
+        message:
+          `${operationLabel(entry.method, pathStr)}: the request body lists no media type; ` +
+          'the tool takes no body input',
+        path: appendPointer(operationPointer(pathStr, entry), 'requestBody', 'content'),
+      };
+    }
     // The resolver reads the body when its media type has a schema (`false` included)
-    const media = mediaType === undefined ? undefined : ownProperty(content, mediaType);
+    const media = ownProperty(content, mediaType);
     if (!isSpecObject(media) || isPresentSchema(media['schema'])) return undefined;
     const itemSchema = ownProperty(media, 'itemSchema');
     if (itemSchema === undefined || itemSchema === null) return undefined;
@@ -2690,7 +2735,7 @@ export class OpenAPIToolGenerator {
       message:
         `${operationLabel(entry.method, pathStr)}: the request body's media type ${describeValue(mediaType)} ` +
         `declares only itemSchema (a streamed body), which is not supported; the tool takes no body input`,
-      path: appendPointer(operationPointer(pathStr, entry), 'requestBody', 'content', mediaType!, 'itemSchema'),
+      path: appendPointer(operationPointer(pathStr, entry), 'requestBody', 'content', mediaType, 'itemSchema'),
       // A Swagger 2.0 document has no request body: it is one of the conversion's, which never
       // declares itemSchema, so this is defensive
       /* c8 ignore next */
@@ -2719,8 +2764,8 @@ export class OpenAPIToolGenerator {
     }
     // After dereferencing, a reference left is an external one that was not read (secureDefaults)
     if (this.options.dereference) this.checkUnresolvedReferences(pathStr, entry);
-    const streamingBody = this.streamingRequestBodyDiagnostic(pathStr, entry);
-    if (streamingBody !== undefined) this.addDiagnostic(streamingBody);
+    const ignoredBody = this.ignoredRequestBodyDiagnostic(pathStr, entry);
+    if (ignoredBody !== undefined) this.addDiagnostic(ignoredBody);
 
     // Extract security requirements, once: both the mapper and the metadata
     // read them (an operation's own `security` list replaces the document's)
@@ -2899,6 +2944,8 @@ export class OpenAPIToolGenerator {
       (responseStream) => responseStream?.itemSchema,
     );
     const responseStream = stream.converted;
+    // Read now: the naming callback below receives `operation` and may change it
+    const responseStatuses = new ResponseBuilder(options).statuses(operation.responses);
     // A schema cut shallower than maxSchemaDepth is reported once the tool is made (see the end)
     const reducedDepths = (
       [
@@ -2937,7 +2984,7 @@ export class OpenAPIToolGenerator {
       operation,
       document,
       ownProperty(pathItem, 'servers'),
-      new ResponseBuilder(options).statuses(operation.responses),
+      responseStatuses,
       securityRequirements,
     );
     if (securityAlternatives) metadata.securityAlternatives = securityAlternatives;
@@ -3234,7 +3281,7 @@ export class OpenAPIToolGenerator {
     // source — operationIds and custom toolNameGenerator output included.
     return normalizeToolName(
       rawName,
-      positiveOr(options.maxToolNameLength, DEFAULT_MAX_TOOL_NAME_LENGTH),
+      maxToolNameLength(options.maxToolNameLength),
       `${method} ${path}`,
     );
   }
@@ -3266,10 +3313,12 @@ export class OpenAPIToolGenerator {
       metadata.security = securityRequirements;
     }
 
-    // The servers of the operation, else of its path item, else of the document: the first list (a server is an object)
-    const servers = [operation.servers, pathItemServers, document.servers].find(Array.isArray) as unknown[] | undefined;
+    // The servers of the operation, else of its path item, else of the document: the first list holding a server
+    const servers = [operation.servers, pathItemServers, document.servers]
+      .map((list) => (Array.isArray(list) ? list.filter(isSpecObject) : []))
+      .find((list) => list.length > 0);
     if (servers) {
-      metadata.servers = servers.filter(isSpecObject).map((server) => {
+      metadata.servers = servers.map((server) => {
         // OpenAPI 3.2 `name`, when the document gives a string
         const name = ownProperty(server, 'name');
         return {
@@ -3427,9 +3476,15 @@ export class OpenAPIToolGenerator {
     schemes: unknown,
   ): FoundSecurityScheme {
     // Own properties only: a scheme named `constructor` is not Object's
-    const found = ownProperty(schemes, key);
-    if (this.options.dereference && isReferenceObject(found)) return { problem: 'is a reference that was not resolved' };
-    if (isSpecObject(found)) return sendableScheme(key, found);
+    const schemeNamed = (name: string): FoundSecurityScheme | undefined => {
+      const value = ownProperty(schemes, name);
+      if (this.options.dereference && isReferenceObject(value)) {
+        return { problem: 'is a reference that was not resolved' };
+      }
+      return isSpecObject(value) ? sendableScheme(name, value) : undefined;
+    };
+    const byName = schemeNamed(key);
+    if (byName) return byName;
     const notDefined = 'components.securitySchemes does not define';
     if (!/[:#/]/.test(key)) return { problem: notDefined };
     const family = this.specVersion.family;
@@ -3438,8 +3493,8 @@ export class OpenAPIToolGenerator {
     }
     const target = resolveSecuritySchemeUri(key, this.documentBase);
     if ('problem' in target) return { problem: `${notDefined}, and read as a URI it ${target.problem}` };
-    const byUri = ownProperty(schemes, target.name);
-    if (isSpecObject(byUri)) return sendableScheme(target.name, byUri);
+    const byUri = schemeNamed(target.name);
+    if (byUri) return byUri;
     return {
       problem: `names the scheme ${describeValue(target.name)} of this document by URI, but ${notDefined} it`,
     };
@@ -3453,7 +3508,6 @@ export class OpenAPIToolGenerator {
     if (isReferenceObject(securityScheme)) {
       return { scheme, type: 'http', scopes };
     }
-
 
     // Typed as a plain string so the equality checks below narrow it to the known locations
     const apiKeyIn: string | undefined = 'in' in securityScheme ? securityScheme.in : undefined;

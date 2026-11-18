@@ -120,6 +120,30 @@ describe('external $ref fetching is bounded', () => {
     expect(result.errors?.[0]?.code).toBe('UNREADABLE_REFERENCE');
   });
 
+  it('fails a dereference whose last read completes past the deadline', async () => {
+    const realNow = Date.now.bind(Date);
+    let late = false;
+    const now = jest.spyOn(Date, 'now').mockImplementation(() => realNow() + (late ? 60_000 : 0));
+    try {
+      handler = (_req, res) => {
+        late = true;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ type: 'string' }));
+      };
+      const failure = await failureOf(documentReferencing([`${baseUrl}/slow.json`]), {}, 1000);
+      expect(failure).toBeInstanceOf(ParseError);
+      expect((failure as ParseError).context).toMatchObject({ rule: 'timeout' });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('counts a fetched document in the bytes it was sent as', async () => {
+    handler = answerJson({ type: 'string', description: '€'.repeat(400) });
+    const failure = await failureOf(documentReferencing([`${baseUrl}/euro.json`]), { maxTotalBytes: 1000 });
+    expect((failure as ParseError).context).toMatchObject({ rule: 'too-large' });
+  });
+
   it('has generous defaults', () => {
     expect(DEFAULT_MAX_REFERENCED_DOCUMENTS).toBe(10_000);
     expect(DEFAULT_MAX_REFERENCED_BYTES).toBe(100 * 1024 * 1024);

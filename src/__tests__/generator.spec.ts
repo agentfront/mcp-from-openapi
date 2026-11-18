@@ -7083,14 +7083,20 @@ describe('OpenAPI 3.2 parameters and responses (issue #55)', () => {
       expect(generator.getDiagnostics().filter((d) => d.code === 'UNSUPPORTED_STREAMING_REQUEST_BODY')).toEqual([]);
     });
 
-    it('reads a request body with an empty content map as no body', async () => {
+    it('reads a request body with an empty content map as no body, with a diagnostic', async () => {
       const generator = await OpenAPIToolGenerator.fromJSON(
         clean('3.2.0', { '/a': { post: op({ operationId: 'a', requestBody: { content: {} } }) } }),
         { validate: false },
       );
       const [tool] = await generator.generateTools();
       expect(tool.mapper).toEqual([]);
-      expect(generator.getDiagnostics()).toEqual([]);
+      expect(generator.getDiagnostics()).toEqual([
+        expect.objectContaining({
+          severity: 'warning',
+          code: 'REQUEST_BODY_WITHOUT_MEDIA_TYPE',
+          path: '/paths/~1a/post/requestBody/content',
+        }),
+      ]);
     });
   });
 

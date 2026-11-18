@@ -79,6 +79,24 @@ describe('assertBoundedExpansion', () => {
     cyclic['self'] = cyclic;
     expect(() => assertBoundedExpansion(cyclic)).not.toThrow();
   });
+
+  it('counts the holes of a sparse array, which a copy writes as null', () => {
+    let shared: unknown = new Array(10_000);
+    for (let level = 0; level < 17; level++) shared = [shared, shared];
+    expect(() => assertBoundedExpansion(shared)).toThrow(ParseError);
+  });
+});
+
+describe('YAML 1.1 merge keys', () => {
+  it('refuses a merge-key graph that doubles at each level, quickly', () => {
+    let text = `%YAML 1.1\n---\n${header}x-l0: &a0 {k: v}\n`;
+    for (let level = 1; level <= 30; level++) {
+      text += `x-l${level}: &a${level} {x: {<<: *a${level - 1}}, y: {<<: *a${level - 1}}}\n`;
+    }
+    const started = Date.now();
+    expect(() => parseYamlText(text)).toThrow(/Excessive alias count/);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
 });
 
 describe('loaders refuse values that expand without bound', () => {

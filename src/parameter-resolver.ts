@@ -17,7 +17,15 @@ import type {
   SchemaConversionOptions,
 } from './types';
 import { toJsonSchema, isReferenceObject, isPresentSchema } from './types';
-import { diagnosticKey, isSpecObject, ownProperty, setOwnProperty } from './spec';
+import {
+  describeValue,
+  diagnosticKey,
+  isSpecObject,
+  ownProperty,
+  readParameterName,
+  setOwnProperty,
+  withTextName,
+} from './spec';
 import { GenerationError } from './errors';
 import { classifyMediaType } from './media-type';
 
@@ -328,10 +336,12 @@ export class ParameterResolver {
    *   one, they are a choice: each credential entry names the alternatives
    *   that need it (`security.alternatives`, `security.optional` when one
    *   is empty) and is not required, nor is its input.
+   * - A number or boolean parameter `name` is read as its text.
    *
    * @throws GenerationError when the parameters break a querystring rule:
    *   more than one `in: querystring`, one together with `in: query`
-   *   parameters, or one without `content` (`OpenAPIToolGenerator` skips
+   *   parameters, or one without `content`, or when a parameter has no name
+   *   (absent, empty, an object or an array; `OpenAPIToolGenerator` skips
    *   such an operation with a diagnostic before calling this)
    */
   resolve(
@@ -346,7 +356,10 @@ export class ParameterResolver {
     /** Parameters left out of the tool, and why */
     ignored: IgnoredParameter[];
   } {
-    const analysis = analyzeParameters(pathParameters ?? [], operation.parameters ?? []);
+    const analysis = analyzeParameters(
+      (pathParameters ?? []).map(withTextName),
+      (operation.parameters ?? []).map(withTextName),
+    );
     if (analysis.querystring) {
       const { code, querystrings } = analysis.querystring;
       throw new GenerationError(
@@ -372,6 +385,12 @@ export class ParameterResolver {
     // Process standard parameters
     for (const { parameter } of analysis.effective) {
       const param = parameter as ParameterObject;
+      if (!isReferenceObject(param) && readParameterName(param.name).kind === 'invalid') {
+        const found = describeValue(param.name);
+        throw new GenerationError(`A parameter's name must be a non-empty string, found ${found}`, {
+          code: 'INVALID_PARAMETER_NAME',
+        });
+      }
       if (param.in === 'header' && isIgnoredHeaderParameter(param.name)) {
         ignored.push({ name: param.name, in: param.in, reason: 'the HTTP client, a credential or a proxy sets this header' });
         continue;
@@ -540,8 +559,7 @@ export class ParameterResolver {
         // Always an object: conversion turns every subschema into one (a
         // boolean `false` property into `{ not: {} }`, which keeps it as an
         // input that accepts no value)
-        // A readOnly property is never sent in a request (OpenAPI Schema Object `readOnly`)
-        if (typeof propSchema === 'object' && (propSchema as Record<string, unknown>)['readOnly'] !== true) {
+        if (typeof propSchema === 'object' && !isReadOnly(propSchema)) {
           const propEncoding = ownProperty(encoding, propName) as Record<string, unknown> | undefined;
           // Distribute media-type-level whole-body examples onto the
           // flattened properties: { example: { name: 'Ada' } } -> name: ['Ada']
@@ -655,21 +673,28 @@ export class ParameterResolver {
     // A choice of requirement objects: no scheme is required on its own
     const choice = alternatives.length > 1;
     const optional = alternatives.some((alternative) => alternative.length === 0);
+    const certificateAlternatives = alternatives.flatMap((alternative, index) =>
+      alternative.some((requirement) => requirement.type === 'mutualTLS') ? [index] : [],
+    );
     for (const secReq of securityRequirements) {
       const { scheme, type, name: apiKeyName, in: apiKeyIn, scopes } = secReq;
       // A scheme named in several alternative requirements is one credential
       if (seen.has(scheme)) continue;
       seen.add(scheme);
 
-      // Build security parameter info
+      const naming = alternatives.flatMap((alternative, index) => {
+        const requirement = alternative.find((candidate) => candidate.scheme === scheme);
+        return requirement ? [{ index, scopes: requirement.scopes ?? [] }] : [];
+      });
+      const scopesDiffer = new Set(naming.map((named) => JSON.stringify(named.scopes))).size > 1;
       const securityInfo: SecurityParameterInfo = {
         scheme,
         type,
         scopes,
         ...(choice && {
-          alternatives: alternatives.flatMap((alternative, index) =>
-            alternative.some((requirement) => requirement.scheme === scheme) ? [index] : [],
-          ),
+          alternatives: naming.map((named) => named.index),
+          ...(scopesDiffer && { alternativeScopes: naming.map((named) => named.scopes) }),
+          ...(certificateAlternatives.length > 0 && { certificateAlternatives }),
           ...(optional && { optional }),
         }),
       };
@@ -880,20 +905,46 @@ const ANNOTATION_KEYWORDS: ReadonlySet<string> = new Set([
   '$comment',
 ]);
 
+/** Keywords read together with their sibling keywords: joined with another definition's, they would read its too */
+const SIBLING_READ_KEYWORDS: ReadonlySet<string> = new Set([
+  'if',
+  'then',
+  'else',
+  'contains',
+  'minContains',
+  'maxContains',
+  'items',
+  'prefixItems',
+  'properties',
+  'additionalProperties',
+  'patternProperties',
+  'unevaluatedProperties',
+  'unevaluatedItems',
+]);
+
+const isAnnotationKeyword = (keyword: string): boolean => ANNOTATION_KEYWORDS.has(keyword) || keyword.startsWith('x-');
+
 /**
  * The definitions of one property, in the order `allOf` members assign them,
  * as one schema: each keyword of every definition, an annotation taken from
- * the last that has it. When two set a constraint keyword differently, the
+ * the last that has it. When two set a constraint keyword differently, or
+ * several constrain and one holds a `SIBLING_READ_KEYWORDS` keyword, the
  * `allOf` of all of them, which JSON Schema reads as every one applying. The
  * definitions are `toJsonSchema` results, so objects (a boolean one included).
  */
 function mergeDefinitions(definitions: unknown[]): unknown {
   if (definitions.length === 1) return definitions[0];
+  const constraining = (definitions as Record<string, unknown>[])
+    .map((definition) => Object.keys(definition).filter((keyword) => !isAnnotationKeyword(keyword)))
+    .filter((keywords) => keywords.length > 0);
+  const readsSiblings = constraining.some((keywords) => keywords.some((keyword) => SIBLING_READ_KEYWORDS.has(keyword)));
+  if (constraining.length > 1 && readsSiblings) return { allOf: definitions };
   const merged: Record<string, unknown> = {};
   for (const definition of definitions as Record<string, unknown>[]) {
     for (const [keyword, value] of Object.entries(definition)) {
-      const annotation = ANNOTATION_KEYWORDS.has(keyword) || keyword.startsWith('x-');
-      if (!annotation && Object.hasOwn(merged, keyword) && merged[keyword] !== value) return { allOf: definitions };
+      if (!isAnnotationKeyword(keyword) && Object.hasOwn(merged, keyword) && merged[keyword] !== value) {
+        return { allOf: definitions };
+      }
       setOwnProperty(merged, keyword, value);
     }
   }
@@ -1025,12 +1076,18 @@ function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'whole'
  * single property map. Returns undefined when the body cannot be represented
  * as named properties: a `WHOLE_BODY_KEYWORDS` constraint at the root OR inside
  * any allOf member (flattening would delete it), non-object schemas
- * (arrays, primitives, binary), and free-form objects without properties.
+ * (arrays, primitives, binary), and objects without a property a request
+ * sends (free-form, or every property `readOnly`).
  */
 function flattenObjectBody(schema: JsonSchema): FlattenedObjectBody | undefined {
   const collected = collectObjectMembers(schema);
   if (collected === 'whole') return undefined;
-  return Object.keys(collected.properties).length > 0 ? collected : undefined;
+  return Object.values(collected.properties).some((property) => !isReadOnly(property)) ? collected : undefined;
+}
+
+/** A readOnly property is never sent in a request (OpenAPI Schema Object `readOnly`) */
+function isReadOnly(schema: unknown): boolean {
+  return isSpecObject(schema) && schema['readOnly'] === true;
 }
 
 /**

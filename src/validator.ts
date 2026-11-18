@@ -35,6 +35,7 @@ import {
   UNSAFE_CHARACTER_CLASS,
   swagger2SkippedOperations,
   wireMethod,
+  withTextName,
   type OperationEntry,
   type OperationLayout,
   type SpecDiagnostic,
@@ -246,17 +247,6 @@ export function skippedOperationDiagnostics(
     });
   }
   return found;
-}
-
-/**
- * `parameter` with a number or boolean `name` replaced by its text (see
- * `readParameterName`), so it is merged and compared as generation reads
- * it; any other value is returned as it is.
- */
-export function withTextName(parameter: unknown): unknown {
-  if (!isSpecObject(parameter)) return parameter;
-  const name = readParameterName(parameter['name']);
-  return name.kind === 'coerced' ? { ...parameter, name: name.name } : parameter;
 }
 
 /** `"limit" (in: "query")`: a parameter in a message, its name and location bounded and escaped. */

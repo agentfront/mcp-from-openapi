@@ -62,7 +62,9 @@ Requirements listed as alternatives (`security: [{ a: [] }, { b: [] }]`) mean `a
 
 - `metadata.securityAlternatives` lists each requirement object that can be satisfied, in document order (`[]` for `{}`, no authentication); `metadata.security` still lists all their schemes. It is absent for a single requirement object (schemes required together).
 - Each credential mapper entry has `required: false`, `security.alternatives` (the indexes of the alternatives that need it) and `security.optional: true` when one alternative is empty. With `includeSecurityInInput`, the inputs of a choice are not required.
-- `SecurityResolver.resolve` applies only the first alternative whose credentials the context holds, and none when it holds none completely, so a host that holds both `a` and `b` sends one. `checkMissingSecurity` reports nothing while one alternative can be applied or one is empty, and otherwise the schemes it could not fill.
+- A scheme stays one entry when several alternatives name it. When they ask it for different scopes (`[{ oauth: ['admin'] }, { oauth: ['read'] }]`), `security.alternativeScopes` lists the scopes of each alternative in `security.alternatives`, in the same order; `security.scopes` holds those of the first.
+- `security.certificateAlternatives` lists the alternatives that also need a client certificate (a `mutualTLS` scheme, which has no mapper entry).
+- `SecurityResolver.resolve` applies only the first alternative whose credentials the context holds, and none when it holds none completely, so a host that holds both `a` and `b` sends one. It asks `customResolver` for each alternative's own scopes, and takes an alternative in `certificateAlternatives` only when the context has a `clientCertificate`. `checkMissingSecurity` reports nothing while one alternative can be applied or one is empty, and otherwise the schemes it could not fill.
 
 ### Schemes named by URI (OpenAPI 3.2)
 

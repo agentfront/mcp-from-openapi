@@ -51,6 +51,19 @@ describe('response keys are status codes or ranges', () => {
     ]);
   });
 
+  it('reads the statuses of the responses the output schema was built from, whatever the naming callback does', async () => {
+    const toolNameGenerator = (_path: string, _method: string, _id: string, operation: Record<string, any>) => {
+      operation.responses['404'] = { description: 'added later' };
+      operation.responses['5XX'] = { description: 'added later' };
+      return 'named';
+    };
+    const { tool } = await generate({ 200: { description: 'ok', ...json({ type: 'string' }) } }, {
+      namingStrategy: { conflictResolver: (name: string) => name, toolNameGenerator },
+    });
+    expect(tool.metadata.responseStatusCodes).toEqual([200]);
+    expect(tool.metadata.responseStatusRanges).toBeUndefined();
+  });
+
   it('reads extensions and default without a diagnostic', async () => {
     const { diagnostics } = await generate({ 200: { description: 'ok' }, default: { description: 'e' }, 'x-note': 1 });
     expect(diagnostics).toEqual([]);
@@ -121,6 +134,24 @@ describe('schema trimming never refuses what the document accepts', () => {
     const closed = { type: 'object', additionalProperties: false };
     const cut = SchemaBuilder.truncateDepth({ type: 'object', properties: { empty: closed } } as never, 1);
     expect((cut.properties as Record<string, unknown>)['empty']).toMatchObject({ additionalProperties: false });
+  });
+
+  it.each([
+    ['an empty properties map', { properties: {} }],
+    ['definitions', { $defs: { a: { type: 'string' } }, definitions: { b: {} } }],
+  ])('keeps a closing keyword when a cut removes only %s', (_label, children) => {
+    const closed = { type: 'object', ...children, additionalProperties: false, unevaluatedProperties: false };
+    const cut = SchemaBuilder.truncateDepth({ type: 'object', properties: { c: closed } } as never, 1);
+    expect((cut.properties as Record<string, unknown>)['c']).toMatchObject({
+      additionalProperties: false,
+      unevaluatedProperties: false,
+    });
+  });
+
+  it('opens a node whose cut removed a schema that marks items evaluated', () => {
+    const closed = { type: 'array', contains: {}, unevaluatedItems: false };
+    const cut = SchemaBuilder.truncateDepth({ type: 'object', properties: { c: closed } } as never, 1);
+    expect((cut.properties as Record<string, unknown>)['c']).not.toHaveProperty('unevaluatedItems');
   });
 
   it('opens an object whose properties maxProperties removed', () => {

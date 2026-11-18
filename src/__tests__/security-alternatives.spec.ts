@@ -1,17 +1,23 @@
 import { OpenAPIToolGenerator } from '../generator';
+import { ParameterResolver } from '../parameter-resolver';
 import { SecurityResolver } from '../security-resolver';
-import type { McpOpenAPITool } from '../types';
+import type { McpOpenAPITool, SecurityRequirement } from '../types';
 
 const ok = { 200: { description: 'ok' } };
 const info = { title: 't', version: '1' };
 const schemes = {
   partnerKey: { type: 'apiKey', in: 'header', name: 'X-Partner-Key' },
   userToken: { type: 'http', scheme: 'bearer' },
+  oauth: {
+    type: 'oauth2',
+    flows: { clientCredentials: { tokenUrl: 'https://auth.example.test/token', scopes: { read: 'r', admin: 'a' } } },
+  },
+  certificate: { type: 'mutualTLS' },
 };
 
 async function toolFor(security: unknown[], options: Record<string, unknown> = {}): Promise<McpOpenAPITool> {
   const generator = await OpenAPIToolGenerator.fromJSON({
-    openapi: '3.0.3',
+    openapi: '3.1.0',
     info,
     servers: [{ url: 'https://api.example.test' }],
     components: { securitySchemes: schemes },
@@ -106,6 +112,59 @@ describe('SecurityResolver applies one alternative', () => {
       { userToken: [], partnerKey: [] },
     ]);
     expect((await resolver.resolve(tool.mapper, { jwt: 'SYNTH-USER' })).headers).toEqual({});
+  });
+});
+
+describe('each alternative asks for what it needs', () => {
+  const resolver = new SecurityResolver();
+  const clientCertificate = { cert: 'SYNTH-CERT', key: 'SYNTH-KEY' };
+  const held = { apiKeys: { 'X-Partner-Key': 'SYNTH-PARTNER' }, jwt: 'SYNTH-USER' };
+
+  it('asks a scheme for the scopes of each alternative naming it', async () => {
+    const tool = await toolFor([{ oauth: ['admin'] }, { oauth: ['read'] }]);
+    expect(tool.mapper).toHaveLength(1);
+    expect(tool.mapper[0].security).toMatchObject({
+      scopes: ['admin'],
+      alternatives: [0, 1],
+      alternativeScopes: [['admin'], ['read']],
+    });
+    const asked: unknown[] = [];
+    const resolved = await resolver.resolve(tool.mapper, {
+      customResolver: (security) => {
+        asked.push(security.scopes);
+        return security.scopes?.includes('read') ? 'Bearer SYNTH-READ' : undefined;
+      },
+    });
+    expect(asked).toEqual([['admin'], ['read']]);
+    expect(resolved.headers).toEqual({ Authorization: 'Bearer SYNTH-READ' });
+  });
+
+  it('reads a requirement without scopes as asking none', () => {
+    const plain: SecurityRequirement = { scheme: 'oauth', type: 'oauth2' };
+    const scoped: SecurityRequirement = { ...plain, scopes: ['read'] };
+    const { mapper } = new ParameterResolver().resolve({}, [], [plain, scoped], false, [[plain], [scoped]]);
+    expect(mapper[0].security?.alternativeScopes).toEqual([[], ['read']]);
+  });
+
+  it('keeps one scope list when every alternative asks the same', async () => {
+    const tool = await toolFor([{ oauth: ['read'] }, { oauth: ['read'], partnerKey: [] }]);
+    expect(tool.mapper[0].security).not.toHaveProperty('alternativeScopes');
+  });
+
+  it('applies an alternative that needs a client certificate only with one', async () => {
+    const tool = await toolFor([{ certificate: [], partnerKey: [] }, { userToken: [] }]);
+    expect(tool.mapper.map((entry) => entry.security?.certificateAlternatives)).toEqual([[0], [0]]);
+    expect((await resolver.resolve(tool.mapper, held)).headers).toEqual({ Authorization: 'Bearer SYNTH-USER' });
+    expect((await resolver.resolve(tool.mapper, { ...held, clientCertificate })).headers).toEqual({
+      'X-Partner-Key': 'SYNTH-PARTNER',
+    });
+  });
+
+  it('is satisfied by a client certificate alone when an alternative needs nothing else', async () => {
+    const tool = await toolFor([{ certificate: [] }, { userToken: [] }]);
+    expect(await resolver.checkMissingSecurity(tool.mapper, { clientCertificate })).toEqual([]);
+    expect((await resolver.resolve(tool.mapper, { ...held, clientCertificate })).headers).toEqual({});
+    expect(await resolver.checkMissingSecurity(tool.mapper, {})).toEqual(['userToken']);
   });
 });
 

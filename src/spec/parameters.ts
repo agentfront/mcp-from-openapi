@@ -10,6 +10,7 @@
  */
 
 import { SPEC_DIAGNOSTIC_CODES, appendPointer, describeValue, type SpecDiagnostic } from './diagnostics';
+import { isSpecObject } from './operations';
 
 /** What `readParameterName` found. */
 export type ParameterName =
@@ -25,6 +26,17 @@ export function readParameterName(value: unknown): ParameterName {
   if (typeof value === 'string') return value === '' ? { kind: 'invalid' } : { kind: 'string', name: value };
   if (typeof value === 'number' || typeof value === 'boolean') return { kind: 'coerced', name: String(value) };
   return { kind: 'invalid' };
+}
+
+/**
+ * `parameter` with a number or boolean `name` replaced by its text (see
+ * `readParameterName`), so it is merged and compared as generation reads
+ * it; any other value is returned as it is.
+ */
+export function withTextName(parameter: unknown): unknown {
+  if (!isSpecObject(parameter)) return parameter;
+  const name = readParameterName(parameter['name']);
+  return name.kind === 'coerced' ? { ...parameter, name: name.name } : parameter;
 }
 
 /**

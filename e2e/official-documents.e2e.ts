@@ -619,6 +619,7 @@ const UNPROCESSED_CODES: ReadonlySet<string> = new Set([
   'INVALID_PARAMETER_CONTENT',
   // a request body that declares only `itemSchema`: the tool takes no body input
   'UNSUPPORTED_STREAMING_REQUEST_BODY',
+  'REQUEST_BODY_WITHOUT_MEDIA_TYPE',
   // a parameter `name` that is not a string: a number or boolean is read as its text (a note that the document is
   // off, since the official schemas say `string`), anything else cannot be sent and the operation makes no tool
   'PARAMETER_NAME_NOT_STRING',
@@ -647,8 +648,8 @@ const UNPROCESSED_CODES: ReadonlySet<string> = new Set([
   // (a Swagger 2.0 document: `trace`, `query` and `additionalOperations` are not part of it either)
   'FEATURE_NEWER_THAN_DECLARED_VERSION',
   // a Swagger 2.0 document is converted to OpenAPI 3.0 first (src/spec/upgrade-v2.ts); each of these says the conversion
-  // could not carry something over exactly, or had to assume something. A `SWAGGER_*` diagnostic of severity `info` is a
-  // note that changes nothing a tool does (see `isInformational`)
+  // could not carry something over exactly, or had to assume something. A diagnostic of severity `info` is a note that
+  // changes nothing a tool does (see `isInformational`)
   'SWAGGER_VERSION_NOT_2_0',
   'SWAGGER_INVALID_VALUE',
   'SWAGGER_NOT_CONVERTED',
@@ -696,13 +697,14 @@ const INFORMATIONAL_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Whether a diagnostic only notes something. A Swagger 2.0 conversion diagnostic of severity `info` is one (the
- * generator documents them as notes "that change nothing a tool does"): `SWAGGER_NOT_CONVERTED` is `info` for an
- * `in: formData` parameter defined in the global `parameters`, which cannot be a 3.0 component but still reaches
- * every operation that uses it.
+ * Whether a diagnostic only notes something. Any diagnostic of severity `info` is one, whatever its code: it notes
+ * something processed anyway. `SWAGGER_NOT_CONVERTED` is `info` for an `in: formData` parameter defined in the global
+ * `parameters`, which cannot be a 3.0 component but still reaches every operation that uses it, and
+ * `UNSUPPORTED_SECURITY_SCHEME` is `info` for a `mutualTLS` scheme, which keeps its tool (a scheme that is dropped
+ * is a `warning`).
  */
 const isInformational = ({ code, severity }: { code: string; severity?: string }): boolean =>
-  INFORMATIONAL_CODES.has(code) || (code.startsWith('SWAGGER_') && severity === 'info');
+  INFORMATIONAL_CODES.has(code) || severity === 'info';
 
 // ---------------------------------------------------------------------------
 // Known gaps

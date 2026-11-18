@@ -1,5 +1,6 @@
 import { OpenAPIToolGenerator } from '../generator';
 import { buildHttpRequest } from '../request-builder';
+import { SchemaBuilder } from '../schema-builder';
 
 const ok = { 200: { description: 'ok' } };
 const info = { title: 't', version: '1' };
@@ -60,6 +61,14 @@ describe('readOnly and writeOnly properties', () => {
     expect(profile['required']).toEqual(['bio']);
   });
 
+  it('keeps a body whole when every property is readOnly, so a required body is still sent', async () => {
+    const schema = { type: 'object', required: ['id'], properties: { id: { type: 'string', readOnly: true } } };
+    const tool = await toolFor(jsonBody(schema));
+    expect(tool.mapper).toEqual([expect.objectContaining({ key: 'body', wholeBody: true, required: true })]);
+    expect(tool.inputSchema.properties?.['body']).toMatchObject({ type: 'object', properties: {} });
+    expect(buildHttpRequest(tool, { body: {} }).body).toBe('{}');
+  });
+
   it('leaves writeOnly properties out of the output, at every depth, and from required', async () => {
     const tool = await toolFor({
       responses: { 200: { description: 'ok', content: { 'application/json': { schema: user } } } },
@@ -68,6 +77,24 @@ describe('readOnly and writeOnly properties', () => {
     expect(tool.outputSchema?.required).toEqual(['id', 'name']);
     const profile = tool.outputSchema?.properties?.['profile'] as Record<string, unknown>;
     expect(Object.keys(profile['properties'] as object)).toEqual(['createdAt', 'bio']);
+  });
+});
+
+describe('marked properties are left out only where a value must match', () => {
+  it('leaves a negated or conditional subschema as it is', () => {
+    const marked = { properties: { secret: { type: 'string', writeOnly: true } }, required: ['secret'] };
+    const schema = {
+      type: 'object',
+      properties: { open: { type: 'string' }, secret: { type: 'string', writeOnly: true } },
+      not: marked,
+      if: marked,
+      then: marked,
+    };
+    const omitted = SchemaBuilder.omitMarkedProperties(schema as never, 'writeOnly') as Record<string, unknown>;
+    expect(Object.keys(omitted['properties'] as object)).toEqual(['open']);
+    expect(omitted['not']).toEqual(marked);
+    expect(omitted['if']).toEqual(marked);
+    expect(omitted['then']).toEqual({ properties: {} });
   });
 });
 
@@ -100,6 +127,33 @@ describe('a flattened body keeps every constraint of its allOf members', () => {
     expect(tool.inputSchema.properties?.['n']).toMatchObject({
       allOf: [{ type: 'string', maxLength: 10 }, { maxLength: 4 }],
     });
+  });
+
+  it.each([
+    ['if and then', { if: { type: 'string' } }, { then: { maxLength: 2 } }],
+    ['additionalProperties and properties', { type: 'object', properties: { a: {} } }, { additionalProperties: false }],
+    ['items and prefixItems', { prefixItems: [{ type: 'string' }] }, { items: { type: 'number' } }],
+  ])('keeps two definitions whose %s would read each other as one schema', async (_label, first, second) => {
+    const schema = {
+      allOf: [
+        { type: 'object', properties: { n: first } },
+        { type: 'object', properties: { n: second } },
+      ],
+    };
+    const tool = await toolFor(jsonBody(schema));
+    expect(tool.inputSchema.properties?.['n']).toMatchObject({ allOf: [first, second] });
+  });
+
+  it('merges a definition that only adds annotations to one read with its siblings', async () => {
+    const nested = { type: 'object', properties: { a: { type: 'string' } }, additionalProperties: false };
+    const schema = {
+      allOf: [
+        { type: 'object', properties: { n: nested } },
+        { type: 'object', properties: { n: { description: 'override' } } },
+      ],
+    };
+    const tool = await toolFor(jsonBody(schema));
+    expect(tool.inputSchema.properties?.['n']).toMatchObject({ ...nested, description: 'override' });
   });
 
   it.each([

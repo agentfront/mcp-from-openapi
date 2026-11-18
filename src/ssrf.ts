@@ -127,14 +127,17 @@ export function normalizeHostname(hostname: string): string {
 }
 
 /**
- * One spelling per host: an IPv6 address that embeds an IPv4 one (mapped, NAT64, 6to4, ...) is that dotted quad,
- * another IPv6 address its eight groups, a name or IPv4 address what a URL makes of it (`bücher.example` is
+ * One spelling per host: an IPv6 address its eight groups, or with `embeddedAsIpv4` the dotted quad it embeds
+ * (mapped, NAT64, 6to4, ...); a name or IPv4 address what a URL makes of it (`bücher.example` is
  * `xn--bcher-kva.example`, `2130706433` is `127.0.0.1`), each in {@link normalizeHostname} form.
  */
-function canonicalHost(hostname: string): string {
+function canonicalHost(hostname: string, embeddedAsIpv4: boolean): string {
   const host = normalizeHostname(hostname);
   const groups = host.includes(':') ? parseIpv6(host) : null;
-  if (groups) return embeddedIpv4(groups)?.join('.') ?? groups.map((group) => group.toString(16)).join(':');
+  if (groups) {
+    const embedded = embeddedAsIpv4 ? embeddedIpv4(groups) : null;
+    return embedded?.join('.') ?? groups.map((group) => group.toString(16)).join(':');
+  }
   try {
     return normalizeHostname(new URL(`http://${host}`).hostname);
   } catch {
@@ -142,15 +145,27 @@ function canonicalHost(hostname: string): string {
   }
 }
 
-/** Does `list` contain `hostname`, a name or an address? Both sides are compared in one spelling per host. */
-export function hostListIncludes(list: readonly string[], hostname: string): boolean {
-  const host = canonicalHost(hostname);
-  return list.some((entry) => canonicalHost(entry) === host);
+/**
+ * Does the block list `list` contain `hostname`, in any spelling? An IPv6 address embedding an IPv4 one is that
+ * IPv4 address, so `127.0.0.1` also blocks `::ffff:127.0.0.1` and `2002:7f00:1::1`.
+ */
+export function blockListIncludes(list: readonly string[], hostname: string): boolean {
+  const host = canonicalHost(hostname, true);
+  return list.some((entry) => canonicalHost(entry, true) === host);
+}
+
+/**
+ * Does the allow list `list` contain `hostname`, in any spelling? Only that host: an IPv6 address is never read
+ * as the IPv4 address it embeds, which many addresses (every 6to4 one of a network) share.
+ */
+export function allowListIncludes(list: readonly string[], hostname: string): boolean {
+  const host = canonicalHost(hostname, false);
+  return list.some((entry) => canonicalHost(entry, false) === host);
 }
 
 /** Whether a host list entry is an IP address, which a name can resolve to. */
 function isAddressEntry(entry: string): boolean {
-  const host = canonicalHost(entry);
+  const host = canonicalHost(entry, false);
   return host.includes(':') || parseIpv4(host) !== null;
 }
 
@@ -309,7 +324,7 @@ function isIpLiteral(hostname: string): boolean {
  * internal addresses are caught later, asynchronously, in {@link safeFetch}.
  */
 export function isBlockedHostname(hostname: string, ssrf: ResolvedSsrfOptions): boolean {
-  if (hostListIncludes(ssrf.blockedHosts, hostname)) return true;
+  if (blockListIncludes(ssrf.blockedHosts, hostname)) return true;
   if (ssrf.allowInternalIPs) return false;
 
   const host = normalizeHostname(hostname);
@@ -376,11 +391,11 @@ export async function assertUrlSafe(
   }
 
   const hostname = parsed.hostname;
-  if (ssrf.allowedHosts.length > 0 && !hostListIncludes(ssrf.allowedHosts, hostname)) {
+  if (ssrf.allowedHosts.length > 0 && !allowListIncludes(ssrf.allowedHosts, hostname)) {
     throw new SsrfError(`Host "${hostname}" is not in the allowed-hosts list`, { url, reason: 'host-not-allowed' });
   }
 
-  if (hostListIncludes(ssrf.blockedHosts, hostname)) {
+  if (blockListIncludes(ssrf.blockedHosts, hostname)) {
     throw new SsrfError(`Host "${hostname}" is blocked`, { url, reason: 'host-blocked' });
   }
   if (!ssrf.allowInternalIPs && isBlockedHostname(hostname, ssrf)) {
@@ -415,7 +430,7 @@ export async function assertUrlSafe(
   }
 
   for (const { address } of addresses) {
-    if (hostListIncludes(ssrf.blockedHosts, address)) {
+    if (blockListIncludes(ssrf.blockedHosts, address)) {
       throw new SsrfError(`Host "${hostname}" resolves to a blocked address`, { url, reason: 'host-blocked' });
     }
     if (!ssrf.allowInternalIPs && isBlockedAddress(address)) {

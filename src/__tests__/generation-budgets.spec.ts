@@ -157,7 +157,8 @@ describe('limit options of the wrong type fall back to the default', () => {
     expect(resolveSchemaLimits({ maxSchemaNodes: value as number }).maxNodes).toBe(DEFAULT_MAX_SCHEMA_NODES);
   });
 
-  it.each([Number.NaN, 'abc', {}, null])('maxToolNameLength %p keeps names within 64 characters', async (value) => {
+  const unusableLengths = [Number.NaN, 'abc', {}, null, 0, 0.5, -3];
+  it.each(unusableLengths)('maxToolNameLength %p keeps names within 64 characters', async (value) => {
     const generator = await OpenAPIToolGenerator.fromJSON({
       openapi: '3.0.3',
       info: { title: 't', version: '1' },

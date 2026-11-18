@@ -301,6 +301,19 @@ describe('emitToolTypeScript assembly', () => {
     expect(declaration).toContain('  | unknown');
   });
 
+  it('declares never for an output that accepts nothing, whatever its status variants', () => {
+    const output = {
+      not: {},
+      anyOf: [
+        { type: 'string', 'x-status-code': 200 },
+        { type: 'number', 'x-status-code': 404 },
+      ],
+    } as JsonSchema;
+    const { signature, declaration } = emitToolTypeScript('t', undefined, { type: 'object', properties: {} } as JsonSchema, output);
+    expect(signature).toContain('Promise<never>');
+    expect(declaration).toContain('type TOutput = never;');
+  });
+
   it('falls back to a plain union for root oneOf without status codes', () => {
     const { declaration } = emitToolTypeScript('t', undefined, { type: 'object', properties: {} } as JsonSchema, {
       oneOf: [{ type: 'string' }, { type: 'number' }],

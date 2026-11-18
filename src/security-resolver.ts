@@ -201,16 +201,35 @@ function ownValue(record: Record<string, string> | undefined, key: string | unde
 
 /**
  * The credential entries a call applies: every entry, or with a choice of Security Requirement objects
- * (`security.alternatives`) those of the first alternative whose entries are all filled, and none when none is.
+ * (`security.alternatives`) those of the first alternative whose entries are all filled and whose client
+ * certificate (`security.certificateAlternatives`) the context holds; `undefined` when no alternative is.
  */
-function appliedEntries(entries: ParameterMapper[], filled: (entry: ParameterMapper) => boolean): ParameterMapper[] {
+function appliedEntries(
+  entries: ParameterMapper[],
+  filled: (entry: ParameterMapper) => boolean,
+  hasCertificate: boolean,
+): ParameterMapper[] | undefined {
   const alternatives = new Map<number, ParameterMapper[]>();
+  const needCertificate = new Set<number>();
   for (const entry of entries) {
     for (const index of entry.security?.alternatives ?? []) alternatives.set(index, [...(alternatives.get(index) ?? []), entry]);
+    for (const index of entry.security?.certificateAlternatives ?? []) needCertificate.add(index);
   }
   if (alternatives.size === 0) return entries;
-  const first = [...alternatives.keys()].sort((a, b) => a - b).find((index) => alternatives.get(index)!.every(filled));
-  return first === undefined ? [] : alternatives.get(first)!;
+  const first = [...new Set([...alternatives.keys(), ...needCertificate])]
+    .sort((a, b) => a - b)
+    .find((index) => (hasCertificate || !needCertificate.has(index)) && (alternatives.get(index) ?? []).every(filled));
+  return first === undefined ? undefined : (alternatives.get(first) ?? []);
+}
+
+/** `entry`, or one entry per alternative when the alternatives ask it for different scopes (`alternativeScopes`) */
+function perAlternative(entry: ParameterMapper): ParameterMapper[] {
+  const { alternatives, alternativeScopes, ...security } = entry.security!;
+  if (alternatives === undefined || alternativeScopes === undefined) return [entry];
+  return alternatives.map((alternative, position) => ({
+    ...entry,
+    security: { ...security, alternatives: [alternative], scopes: alternativeScopes[position] },
+  }));
 }
 
 /** Whether the mapper has exactly one apiKey scheme, the only case `SecurityContext.apiKey` is used for */
@@ -230,19 +249,21 @@ function singleApiKeyScheme(mappers: ParameterMapper[]): boolean {
  * ```typescript
  * // In FrontMCP
  * const resolver = new SecurityResolver();
- * const resolved = resolver.resolve(tool.mapper, {
+ * const resolved = await resolver.resolve(tool.mapper, {
  *   jwt: context.authInfo.jwt,
  *   apiKey: process.env.API_KEY
  * });
  *
- * // Use resolved.headers in HTTP request, after any other headers so none replaces a credential
- * fetch(url, { headers: { ...otherHeaders, ...resolved.headers } });
+ * // Set resolved.headers last, through Headers, so a credential replaces another header in any case
+ * const headers = new Headers(otherHeaders);
+ * for (const [name, value] of Object.entries(resolved.headers)) headers.set(name, value);
+ * fetch(url, { headers });
  * ```
  *
  * @example
  * ```typescript
  * // Custom resolver for framework-specific auth
- * const resolved = resolver.resolve(tool.mapper, {
+ * const resolved = await resolver.resolve(tool.mapper, {
  *   customResolver: (security) => {
  *     if (security.type === 'http' && security.httpScheme === 'bearer') {
  *       return myFramework.getAuthToken();
@@ -277,7 +298,7 @@ export class SecurityResolver {
     let signatureScheme: string | undefined;
     const { applied, values } = await this.credentials(mappers, context);
 
-    for (const mapper of applied) {
+    for (const mapper of applied ?? []) {
       // Check for signature-based auth
       if (this.isSignatureBasedAuth(mapper.security!)) {
         requiresSignature = true;
@@ -327,11 +348,11 @@ export class SecurityResolver {
   }
 
   /**
-   * The credential entries of `mappers`, the value the context gives each (none for a signature entry, which
-   * `signRequest` signs), whether each is filled, and the entries a call applies (`appliedEntries`).
+   * The credential entries of `mappers` (`perAlternative`), the value the context gives each (none for a signature
+   * entry, which `signRequest` signs), whether each is filled, and the entries a call applies (`appliedEntries`).
    */
   private async credentials(mappers: ParameterMapper[], context: SecurityContext) {
-    const entries = mappers.filter((mapper) => mapper.security !== undefined);
+    const entries = mappers.filter((mapper) => mapper.security !== undefined).flatMap(perAlternative);
     const fallbackApiKey = singleApiKeyScheme(mappers);
     const values = new Map<ParameterMapper, string | undefined>();
     for (const entry of entries) {
@@ -342,7 +363,8 @@ export class SecurityResolver {
     // A signature entry is filled by signRequest, which needs a signatureGenerator
     const filled = (entry: ParameterMapper): boolean =>
       this.isSignatureBasedAuth(entry.security!) ? context.signatureGenerator !== undefined : Boolean(values.get(entry));
-    return { entries, values, filled, applied: appliedEntries(entries, filled) };
+    const applied = appliedEntries(entries, filled, context.clientCertificate !== undefined);
+    return { entries, values, filled, applied };
   }
 
   /**
@@ -522,8 +544,8 @@ export class SecurityResolver {
     const { entries, applied, filled } = await this.credentials(mappers, context);
     // A choice is satisfied by one alternative, or by none when one is empty
     const choice = entries.some((entry) => entry.security!.alternatives !== undefined);
-    if (choice && (applied.length > 0 || entries.some((entry) => entry.security!.optional))) return [];
-    return entries.filter((entry) => !filled(entry)).map((entry) => entry.security!.scheme);
+    if (choice && (applied !== undefined || entries.some((entry) => entry.security!.optional))) return [];
+    return [...new Set(entries.filter((entry) => !filled(entry)).map((entry) => entry.security!.scheme))];
   }
 
   /**
@@ -539,7 +561,7 @@ export class SecurityResolver {
    *
    * @example
    * ```typescript
-   * const resolved = resolver.resolve(tool.mapper, context);
+   * const resolved = await resolver.resolve(tool.mapper, context);
    * if (resolved.requiresSignature) {
    *   const signedHeaders = await resolver.signRequest(
    *     tool.mapper,

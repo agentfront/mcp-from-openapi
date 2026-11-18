@@ -1387,6 +1387,12 @@ function assertPathNamesTemplateResource(template: string, path: string): void {
       path: describeValue(path),
     });
   }
+  // A URL parser reads a backslash in an http(s) path as `/`; only a template can hold one raw (values are encoded)
+  if (path.includes('\\')) {
+    throw new RequestBuildError(`The request path ${describeValue(path)} holds a backslash, which a URL reads as '/'`, {
+      path: describeValue(path),
+    });
+  }
   const templateSegments = template.split('/');
   const pathSegments = path.split('/');
   pathSegments.forEach((segment, index) => {

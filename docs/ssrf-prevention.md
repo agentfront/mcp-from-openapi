@@ -66,7 +66,7 @@ IPv6 addresses that embed an IPv4 address are checked against the IPv4 ranges ab
 
 Hostnames are compared in a normalized form: lowercase, with trailing root dots and IPv6 brackets removed. This applies to the built-in names above and to every `allowedHosts` / `blockedHosts` entry, on both sides of the comparison. `localhost.`, `LOCALHOST`, and `localhost` are the same host, so a `blockedHosts: ['internal.corp']` entry also blocks `http://internal.corp./`.
 
-`allowedHosts` and `blockedHosts` entries are also compared as hosts, not spellings. An IPv6 address that embeds an IPv4 address (mapped, NAT64, 6to4, ...) is that IPv4 address, so `blockedHosts: ['169.254.169.254']` also blocks `http://[::ffff:a9fe:a9fe]/`. A Unicode name is its ASCII form (`bücher.example` is `xn--bcher-kva.example`).
+`allowedHosts` and `blockedHosts` entries are also compared as hosts, not spellings. A Unicode name is its ASCII form (`bücher.example` is `xn--bcher-kva.example`), and an IPv6 address matches however its groups are written. In `blockedHosts` only, an IPv6 address that embeds an IPv4 address (mapped, NAT64, 6to4, ...) is that IPv4 address, so `blockedHosts: ['169.254.169.254']` also blocks `http://[::ffff:a9fe:a9fe]/`. An `allowedHosts` entry admits exactly its own host: `8.8.8.8` does not admit `[::ffff:8.8.8.8]`, and one 6to4 address does not admit another of the same network.
 
 `blockedHosts` also applies to the addresses a name resolves to: an address entry blocks every name that resolves to it. With `allowInternalIPs: true`, a name is resolved, and the connection pinned to what was checked, only when `blockedHosts` holds an address; a name that cannot be resolved is then refused (`dns-failed`).
 

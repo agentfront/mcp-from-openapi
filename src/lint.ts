@@ -2,7 +2,7 @@ import type { ParameterObject } from './types';
 import { isReferenceObject } from './types';
 import { analyzeParameters } from './parameter-resolver';
 import { readStatusKey } from './response-builder';
-import { messageText, operationLabel, withTextName } from './validator';
+import { messageText, operationLabel } from './validator';
 import {
   MAX_CONVERSION_ENTRIES,
   detectSpecVersion,
@@ -10,9 +10,11 @@ import {
   isSwagger2,
   listOperations,
   ownProperty,
+  readParameterName,
   resolveOperationLayout,
   upgradeSwagger2,
   wireMethod,
+  withTextName,
 } from './spec';
 
 export type LintSeverity = 'error' | 'warning' | 'info';
@@ -192,13 +194,14 @@ function listNames(names: string[]): string {
 /**
  * The Parameter Objects of a `parameters` value. A document being linted may
  * be imperfect, so anything that is not an array of objects is skipped, as is
- * each entry that is not an object or is a Reference Object. A number or
- * boolean name is read as its text, as generation reads it.
+ * each entry that is not an object, is a Reference Object or has no name. A
+ * number or boolean name is read as its text, as generation reads it.
  */
 function readParameters(value: unknown): ParameterObject[] {
   return Array.isArray(value)
     ? value
         .filter((param): param is ParameterObject => isSpecObject(param) && !isReferenceObject(param))
+        .filter((param) => readParameterName(param.name).kind !== 'invalid')
         .map((param) => withTextName(param) as ParameterObject)
     : [];
 }

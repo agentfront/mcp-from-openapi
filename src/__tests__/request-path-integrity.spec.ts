@@ -81,6 +81,13 @@ describe('the request path always starts with exactly one slash', () => {
   it('keeps the root path', () => {
     expect(buildHttpRequest(toolFor('/', []), {}).url).toBe('https://api.example.com/');
   });
+
+  it('refuses a literal backslash a template holds, which a URL reads as a separator', () => {
+    expect(() => buildHttpRequest(toolFor('/public\\..\\admin', []), {})).toThrow(/holds a backslash/);
+    // A value's backslash is encoded, so it stays in its segment
+    const tool = toolFor('/files/{name}', [pathParameter('name')]);
+    expect(buildHttpRequest(tool, { name: 'a\\b' }).url).toBe('https://api.example.com/files/a%5Cb');
+  });
 });
 
 describe('the validator refuses path keys that are not path templates', () => {

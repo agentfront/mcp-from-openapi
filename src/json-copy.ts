@@ -84,7 +84,13 @@ export function assertBoundedExpansion(root: unknown): void {
   if (root === null || typeof root !== 'object') return;
   const sizes = new Map<object, number>();
   const onPath = new Set<object>([root]);
-  const frames: ExpansionFrame[] = [{ node: root, children: Object.values(root), next: 0, size: 1 }];
+  const frameOf = (node: object): ExpansionFrame => {
+    const children = Object.values(node);
+    // An array hole, which a copy writes as `null`, is one value too: counted, never walked
+    const holes = Array.isArray(node) ? node.length - children.length : 0;
+    return { node, children, next: 0, size: 1 + holes };
+  };
+  const frames: ExpansionFrame[] = [frameOf(root)];
   let repeated = 0;
   while (frames.length > 0) {
     const frame = frames[frames.length - 1];
@@ -106,7 +112,7 @@ export function assertBoundedExpansion(root: unknown): void {
         }
       } else if (!onPath.has(child)) {
         onPath.add(child);
-        frames.push({ node: child, children: Object.values(child), next: 0, size: 1 });
+        frames.push(frameOf(child));
       }
       continue;
     }

@@ -61,6 +61,23 @@ posixOnly('a file reference reads only a regular file of bounded size', () => {
     expect((await failureOf(large)).context).toMatchObject({ rule: 'too-large' });
   });
 
+  it('stops reading a file that holds more than its size said', async () => {
+    const large = path.join(directory, 'grown.json');
+    fs.writeFileSync(large, '');
+    fs.truncateSync(large, 11 * 1024 * 1024);
+    const open = fs.promises.open;
+    const opened = jest.spyOn(fs.promises, 'open').mockImplementation(async (...args) => {
+      const handle = await open(...args);
+      const stat = handle.stat.bind(handle);
+      return Object.assign(handle, { stat: async () => Object.assign(await stat(), { size: 0 }) });
+    });
+    try {
+      expect((await failureOf(large)).context).toMatchObject({ rule: 'too-large' });
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
   it('refuses a file URL that names a host', async () => {
     expect((await failureOf('file://server.example/share/a.json')).context).toMatchObject({ rule: 'file-error' });
   });

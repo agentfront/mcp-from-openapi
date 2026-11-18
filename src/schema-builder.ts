@@ -136,6 +136,12 @@ function holdsNode(root: unknown, test: (node: Record<string, unknown>) => boole
 /** Keywords that refuse what a removed `properties` or `prefixItems` allowed, when `false` */
 const CLOSING_KEYWORDS = ['additionalProperties', 'unevaluatedProperties', 'items', 'unevaluatedItems'] as const;
 
+/** Keywords whose subschema a value must not match (`not`) or only selects a branch (`if`) */
+const NEGATED_OR_CONDITIONAL_KEYWORDS: ReadonlySet<string> = new Set(['not', 'if']);
+
+/** Keywords that only hold definitions: removing them allows nothing more */
+const DEFINITION_KEYWORDS: ReadonlySet<string> = new Set(['$defs', 'definitions']);
+
 /**
  * Helper class for building and manipulating JSON schemas
  */
@@ -561,16 +567,19 @@ export class SchemaBuilder {
 
     if (depth >= maxDepth) {
       let stripped = false;
+      // Whether a removed keyword allowed something a closing keyword would then refuse: not an empty map or list
+      let opened = false;
       for (const key of Object.keys(copyRecord)) {
-        if (kinds.has(key) && isObject(copyRecord[key])) {
-          delete copyRecord[key];
-          stripped = true;
-        }
+        const value = copyRecord[key];
+        if (!kinds.has(key) || !isObject(value)) continue;
+        delete copyRecord[key];
+        stripped = true;
+        opened ||= !DEFINITION_KEYWORDS.has(key) && (kinds.get(key) === 'schema' || Object.keys(value).length > 0);
       }
       if (stripped) {
         // `required` refers to stripped properties, and a closing keyword would refuse what they allowed
         delete copyRecord['required'];
-        for (const key of CLOSING_KEYWORDS) if (copyRecord[key] === false) delete copyRecord[key];
+        if (opened) for (const key of CLOSING_KEYWORDS) if (copyRecord[key] === false) delete copyRecord[key];
         const note = '[Truncated: nested schema exceeds maxSchemaDepth]';
         copy.description = copy.description ? `${copy.description} ${note}` : note;
       }
@@ -626,10 +635,12 @@ export class SchemaBuilder {
 
   // Copy-on-walk over every structural keyword (same key groups as
   // truncateDepth): `visit` transforms each node top-down and must return a
-  // new node when it changes anything.
+  // new node when it changes anything. The subschema of a `kept` keyword (of
+  // TRUNCATE_SCHEMA_KEYS) is left as it is.
   private static walkCopy(
     node: JsonSchema,
     visit: (node: JsonSchema) => JsonSchema,
+    kept: ReadonlySet<string> = new Set(),
     seen = new Map<JsonSchema, JsonSchema>(),
   ): JsonSchema {
     /* c8 ignore next -- guard for boolean/degenerate schemas in recursive traversal */
@@ -647,23 +658,24 @@ export class SchemaBuilder {
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
         const mapped: Record<string, JsonSchema> = {};
         for (const [name, sub] of Object.entries(value as Record<string, JsonSchema>)) {
-          setOwnProperty(mapped, name, this.walkCopy(sub, visit, seen));
+          setOwnProperty(mapped, name, this.walkCopy(sub, visit, kept, seen));
         }
         copy[key] = mapped;
       }
     }
     for (const key of this.TRUNCATE_SCHEMA_KEYS) {
+      if (kept.has(key)) continue;
       const value = copy[key];
       if (Array.isArray(value)) {
-        copy[key] = value.map((item) => this.walkCopy(item as JsonSchema, visit, seen));
+        copy[key] = value.map((item) => this.walkCopy(item as JsonSchema, visit, kept, seen));
       } else if (value !== null && typeof value === 'object') {
-        copy[key] = this.walkCopy(value as JsonSchema, visit, seen);
+        copy[key] = this.walkCopy(value as JsonSchema, visit, kept, seen);
       }
     }
     for (const key of this.TRUNCATE_LIST_KEYS) {
       const value = copy[key];
       if (Array.isArray(value)) {
-        copy[key] = value.map((member) => this.walkCopy(member as JsonSchema, visit, seen));
+        copy[key] = value.map((member) => this.walkCopy(member as JsonSchema, visit, kept, seen));
       }
     }
 
@@ -709,14 +721,16 @@ export class SchemaBuilder {
    * `schema` without the properties whose own schema says `keyword: true`, at
    * every depth, and without their `required` entries: `readOnly` ones in a
    * request, `writeOnly` ones in a response (OpenAPI Schema Object). Comes
-   * back unchanged, not copied, when no property is marked.
+   * back unchanged, not copied, when no property is marked. A `not` or `if`
+   * subschema is left as it is: leaving a property out of it would change
+   * which values the schema accepts the other way.
    */
   static omitMarkedProperties(schema: JsonSchema, keyword: 'readOnly' | 'writeOnly'): JsonSchema {
     const isMarked = (property: unknown): boolean => isObject(property) && (property as Record<string, unknown>)[keyword] === true;
     if (!holdsNode(schema, (node) => isObject(node['properties']) && Object.values(node['properties']).some(isMarked))) {
       return schema;
     }
-    return this.walkCopy(schema, (node) => {
+    const omitMarked = (node: JsonSchema): JsonSchema => {
       const properties = node.properties;
       if (!isObject(properties) || !Object.values(properties).some(isMarked)) return node;
       const omitted = new Set(Object.keys(properties).filter((name) => isMarked((properties as Record<string, unknown>)[name])));
@@ -728,7 +742,8 @@ export class SchemaBuilder {
       if (required.length > 0) next.required = required;
       else delete next.required;
       return next;
-    });
+    };
+    return this.walkCopy(schema, omitMarked, NEGATED_OR_CONDITIONAL_KEYWORDS);
   }
 
   /**
