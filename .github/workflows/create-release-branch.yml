@@ -23,7 +23,8 @@ permissions:
 jobs:
   create:
     runs-on: ubuntu-latest
-    environment: release
+    # Its own environment: `release` deploys only from release/X.Y.x branches, and this job runs from main
+    environment: release-branch
     # Inputs reach the shell as variables, never as script text; the first step validates them
     env:
       MAJOR: ${{ inputs.major_version }}

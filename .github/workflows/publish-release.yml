@@ -4,6 +4,9 @@ name: Publish Release
 # release/X.Y.x branch runs `detect`; only the merge of the open release-pr/v<package.json version>
 # pull request goes further. npm is reached through OIDC trusted publishing: no npm token exists.
 # The file name and the `release` environment are part of the npm trusted publisher configuration.
+# No concurrency group: GitHub keeps one pending run per group and cancels it for the next push, which
+# would drop a release waiting behind another run. Every job is safe to run twice (npm, tag and release
+# are checked first), so runs are never cancelled.
 
 on:
   push:
@@ -12,10 +15,6 @@ on:
 
 permissions:
   contents: read
-
-concurrency:
-  group: publish-release-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   detect:
