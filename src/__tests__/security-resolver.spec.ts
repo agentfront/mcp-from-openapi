@@ -354,6 +354,7 @@ describe('SecurityResolver', () => {
       expect(result.requiresSignature).toBe(true);
       expect(result.signatureInfo).toEqual({
         scheme: 'aws4-hmac-sha256',
+        schemes: ['aws4-hmac-sha256'],
       });
     });
 

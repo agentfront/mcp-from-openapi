@@ -11,8 +11,8 @@
 
 import { ownProperty } from './operations';
 
-/** Where a value sits in a document: a Schema Object, a map or list of them, or another part */
-type Position = 'root' | 'components' | 'other' | 'schema' | 'schemas';
+/** Where a value sits in a document: a Schema Object, a map or list of them, a map of other objects, or another part */
+type Position = 'root' | 'components' | 'names' | 'other' | 'schema' | 'schemas';
 
 /** Schema Object keywords holding a map or a list of schemas */
 const SCHEMA_COLLECTION_KEYWORDS: ReadonlySet<string> = new Set([
@@ -42,6 +42,18 @@ const SCHEMA_KEYWORDS: ReadonlySet<string> = new Set([
   'unevaluatedProperties',
 ]);
 
+/** Fields holding a map of other objects by name (with the maps of `components`, but `schemas`) */
+const NAMED_MAP_FIELDS: ReadonlySet<string> = new Set([
+  'paths',
+  'webhooks',
+  'responses',
+  'content',
+  'headers',
+  'callbacks',
+  'encoding',
+  'additionalOperations',
+]);
+
 /** Fields of the other objects (Parameter, Header, Media Type) that hold a schema */
 const SCHEMA_FIELDS: ReadonlySet<string> = new Set(['schema', 'itemSchema']);
 
@@ -53,26 +65,32 @@ const DESCRIPTIVE_SIBLINGS: ReadonlySet<string> = new Set(['$ref', 'summary', 'd
 
 /** The position of the value under `key` of a value at `position`; `undefined` for data */
 function childPosition(position: Position, key: string): Position | undefined {
-  // A map of schemas is keyed by names, which can be any text
+  // A map is keyed by names, which can be any text: a response `default`, a schema `example`
   if (position === 'schemas') return 'schema';
-  if (key.startsWith('x-') || DATA_FIELDS.has(key)) return undefined;
+  if (key.startsWith('x-')) return undefined;
+  if (position === 'names') return 'other';
+  if (DATA_FIELDS.has(key)) return undefined;
   if (position === 'schema') {
     if (SCHEMA_COLLECTION_KEYWORDS.has(key)) return 'schemas';
     return SCHEMA_KEYWORDS.has(key) ? 'schema' : 'other';
   }
-  if (position === 'root') return key === 'components' ? 'components' : 'other';
-  if (position === 'components' && key === 'schemas') return 'schemas';
+  if (position === 'components') return key === 'schemas' ? 'schemas' : 'names';
+  if (position === 'root' && key === 'components') return 'components';
+  if (NAMED_MAP_FIELDS.has(key)) return 'names';
   return SCHEMA_FIELDS.has(key) ? 'schema' : 'other';
 }
 
-/** `schema` with a `$ref` that has a keyword beside it other than a description: the reference goes first in `allOf` */
+/**
+ * `schema` with a `$ref` that has a keyword beside it other than a description: the reference goes last in `allOf`,
+ * so a pointer to a member already there still names it
+ */
 function wrapReference(schema: Record<string, unknown>): void {
   const ref = ownProperty(schema, '$ref');
   const allOf = ownProperty(schema, 'allOf');
   if (typeof ref !== 'string' || (allOf !== undefined && !Array.isArray(allOf))) return;
   if (Object.keys(schema).every((key) => DESCRIPTIVE_SIBLINGS.has(key) || key.startsWith('x-'))) return;
   delete schema['$ref'];
-  schema['allOf'] = [{ $ref: ref }, ...((allOf as unknown[] | undefined) ?? [])];
+  schema['allOf'] = [...((allOf as unknown[] | undefined) ?? []), { $ref: ref }];
 }
 
 /**

@@ -78,7 +78,7 @@ import { SecurityResolver } from "mcp-from-openapi";
 ```typescript
 async resolve(mappers: ParameterMapper[], context: SecurityContext): Promise<ResolvedSecurity>
 async checkMissingSecurity(mappers: ParameterMapper[], context: SecurityContext): Promise<string[]>
-async signRequest(mappers: ParameterMapper[], signatureData: SignatureData, context: SecurityContext): Promise<Record<string, string>>
+async signRequest(mappers: ParameterMapper[], signatureData: SignatureData, context: SecurityContext, resolved?: ResolvedSecurity): Promise<Record<string, string>>
 ```
 
 See [Security](./security.md) for detailed usage.
@@ -849,7 +849,8 @@ interface ResolvedSecurity {
   clientCertificate?: ClientCertificate;
   requiresSignature?: boolean;
   signatureInfo?: {
-    scheme: string;
+    scheme: string; // The last signature scheme applied
+    schemes?: string[]; // Every signature scheme applied: what signRequest signs when given this result
     algorithm?: string;
   };
 }

@@ -202,6 +202,11 @@ describe('schema trimming never refuses what the document accepts', () => {
     expect(SchemaBuilder.truncateDepth(schema as never, 1)).toEqual(expected);
   });
 
+  it('leaves out a not over a cut that removed required', () => {
+    const schema = { not: { type: 'object', required: ['x'], $defs: { a: { type: 'string' } } } };
+    expect(SchemaBuilder.truncateDepth(schema as never, 1)).toEqual({});
+  });
+
   it('keeps a oneOf whose member a cut takes only definitions from', () => {
     const schema = { oneOf: [{ type: 'string', $defs: { a: { type: 'string' } } }, { type: 'number' }] };
     expect(SchemaBuilder.truncateDepth(schema as never, 1)).toEqual({

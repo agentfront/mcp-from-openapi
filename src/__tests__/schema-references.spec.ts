@@ -32,10 +32,22 @@ describe('wrapReferenceSiblings', () => {
     };
     wrapReferenceSiblings(document);
     const wrapped = { allOf: [{ $ref: '#/components/schemas/Code' }], maxLength: 5 };
-    expect(document.components.schemas).toEqual({ A: wrapped, B: { allOf: [{ $ref: '#/x' }, { minLength: 2 }] } });
+    // After the members already there, so a pointer to one of them still names it
+    expect(document.components.schemas).toEqual({ A: wrapped, B: { allOf: [{ minLength: 2 }, { $ref: '#/x' }] } });
     expect(document.paths['/p'].parameters[0].schema).toEqual(wrapped);
     const schema = document.paths['/p'].get.responses[200].content['application/json'].schema;
     expect(schema).toEqual({ properties: { schema: wrapped, list: { items: [wrapped] } }, oneOf: [wrapped] });
+  });
+
+  it('walks the entries of a map of objects whatever their names, a response named default included', () => {
+    const document = {
+      paths: { '/p': { get: { responses: { default: { content: { 'application/json': { schema: { ...code } } } } } } } },
+      components: { responses: { example: { content: { 'text/plain': { schema: { ...code } } } } } },
+    };
+    wrapReferenceSiblings(document);
+    const wrapped = { allOf: [{ $ref: '#/components/schemas/Code' }], maxLength: 5 };
+    expect(document.paths['/p'].get.responses.default.content['application/json'].schema).toEqual(wrapped);
+    expect(document.components.responses.example.content['text/plain'].schema).toEqual(wrapped);
   });
 
   it('leaves a $ref with only annotations beside it, a reference that is no schema, and data alone', () => {
@@ -106,6 +118,33 @@ describe('a $ref beside other keywords in a schema', () => {
       pattern: '^[A-Z]+$',
       'x-parameter-location': 'body',
     });
+  });
+
+  it('keeps a pointer to an existing allOf member naming that member', async () => {
+    const generator = await OpenAPIToolGenerator.fromJSON(
+      {
+        openapi: '3.1.0',
+        info,
+        components: {
+          schemas: {
+            Code: { type: 'integer' },
+            A: { $ref: '#/components/schemas/Code', allOf: [{ type: 'string' }], maxLength: 5 },
+          },
+        },
+        paths: {
+          '/p': {
+            get: {
+              operationId: 'p',
+              parameters: [{ name: 'q', in: 'query', schema: { $ref: '#/components/schemas/A/allOf/0' } }],
+              responses: ok,
+            },
+          },
+        },
+      },
+      { validate: false },
+    );
+    const [tool] = await generator.generateTools();
+    expect(tool.inputSchema.properties?.['q']).toMatchObject({ type: 'string' });
   });
 
   it('marks a property readOnly through the keyword beside it', async () => {

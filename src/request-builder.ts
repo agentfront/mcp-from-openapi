@@ -293,9 +293,15 @@ export function entriesByAlternative(entries: readonly ParameterMapper[]): Map<n
   return alternatives;
 }
 
+/** The `mutualTLS` schemes of a choice (`security.clientCertificates`), with the alternatives that need each. Internal. */
+export function clientCertificatesOf(entries: readonly ParameterMapper[]): Array<{ scheme: string; alternatives: number[] }> {
+  return entries.flatMap((entry) => entry.security?.clientCertificates ?? []);
+}
+
 /**
  * The credential entries the input gives that are not needed by the first alternative it gives completely: one
- * alternative of a choice is sent. None when the input gives no alternative completely.
+ * alternative of a choice is sent. None when the input gives no alternative completely. An alternative that also
+ * needs a client certificate is never the one: whether there is a certificate is not known here.
  */
 function unchosenCredentials(mapper: readonly ParameterMapper[], input: object | undefined): Set<ParameterMapper> {
   const given = (entry: ParameterMapper): boolean => {
@@ -303,7 +309,9 @@ function unchosenCredentials(mapper: readonly ParameterMapper[], input: object |
     return value !== undefined && value !== null;
   };
   const alternatives = entriesByAlternative(mapper);
+  const needCertificate = new Set(clientCertificatesOf(mapper).flatMap((certificate) => certificate.alternatives));
   const chosen = [...alternatives.keys()]
+    .filter((index) => !needCertificate.has(index))
     .sort((a, b) => a - b)
     .map((index) => alternatives.get(index)!)
     .find((entries) => entries.every(given));

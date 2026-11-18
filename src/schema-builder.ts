@@ -568,6 +568,8 @@ export class SchemaBuilder {
 
     // Whether a removed keyword allowed something a closing keyword would then refuse: not an empty map or list
     let opened = false;
+    // Whether the cut removed `required`, which accepts more too
+    let requiredRemoved = false;
     if (depth >= maxDepth) {
       let stripped = false;
       for (const key of Object.keys(copyRecord)) {
@@ -579,6 +581,7 @@ export class SchemaBuilder {
       }
       if (stripped) {
         // `required` refers to stripped properties, and a closing keyword would refuse what they allowed
+        requiredRemoved = copyRecord['required'] !== undefined;
         delete copyRecord['required'];
         if (opened) for (const key of CLOSING_KEYWORDS) if (copyRecord[key] === false) delete copyRecord[key];
         const note = '[Truncated: nested schema exceeds maxSchemaDepth]';
@@ -631,7 +634,8 @@ export class SchemaBuilder {
         });
       }
     }
-    if (opened || keepAccepting(copyRecord, (value) => loosened.has(value as object))) loosened.add(copy);
+    const isLoosened = (value: unknown): boolean => loosened.has(value as object);
+    if (opened || requiredRemoved || keepAccepting(copyRecord, isLoosened)) loosened.add(copy);
     return copy;
   }
 

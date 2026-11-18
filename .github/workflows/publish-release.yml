@@ -155,6 +155,32 @@ jobs:
         run: npm install -g npm@12.2.3
 
       - name: Publish
+        env:
+          # Exits 0 when the first version is not older than the second, by semver precedence
+          NOT_OLDER: |
+            const parse = (version) => {
+              const text = version.split('+')[0];
+              const dash = text.indexOf('-');
+              const core = (dash === -1 ? text : text.slice(0, dash)).split('.').map(Number);
+              return { core, pre: dash === -1 ? [] : text.slice(dash + 1).split('.') };
+            };
+            const numeric = (id) => /^\d+$/.test(id);
+            const compareIds = (a, b) => {
+              if (numeric(a) && numeric(b)) return Number(a) - Number(b);
+              if (numeric(a) !== numeric(b)) return numeric(a) ? -1 : 1;
+              return a < b ? -1 : a > b ? 1 : 0;
+            };
+            const compare = (a, b) => {
+              for (let i = 0; i < 3; i++) if (a.core[i] !== b.core[i]) return a.core[i] - b.core[i];
+              if (a.pre.length === 0 || b.pre.length === 0) return b.pre.length - a.pre.length;
+              for (let i = 0; i < Math.min(a.pre.length, b.pre.length); i++) {
+                const order = compareIds(a.pre[i], b.pre[i]);
+                if (order !== 0) return order;
+              }
+              return a.pre.length - b.pre.length;
+            };
+            const [candidate, current] = process.argv.slice(1).map(parse);
+            process.exit(compare(candidate, current) >= 0 ? 0 : 1);
         run: |
           set -euo pipefail
           # A rerun after a later job failed finds the version published already
@@ -162,8 +188,15 @@ jobs:
             echo "::notice::mcp-from-openapi@$VERSION is on npm already"
             exit 0
           fi
-          npm publish "$RUNNER_TEMP"/package/*.tgz --access public --tag "$NPM_TAG" --provenance --ignore-scripts
-          echo "Published mcp-from-openapi@$VERSION with tag $NPM_TAG"
+          # The tag never moves back: an older release line, or a run approved after a later one, gets its line's tag
+          TAG="$NPM_TAG"
+          CURRENT=$(npm view mcp-from-openapi "dist-tags.$NPM_TAG" 2>/dev/null || true)
+          if [ -n "$CURRENT" ] && ! node -e "$NOT_OLDER" "$VERSION" "$CURRENT"; then
+            TAG="$NPM_TAG-$(echo "$VERSION" | cut -d. -f1,2)"
+            echo "::notice::$NPM_TAG names $CURRENT, newer than $VERSION: published with the tag $TAG"
+          fi
+          npm publish "$RUNNER_TEMP"/package/*.tgz --access public --tag "$TAG" --provenance --ignore-scripts
+          echo "Published mcp-from-openapi@$VERSION with tag $TAG"
 
   release:
     name: Tag and create the GitHub release

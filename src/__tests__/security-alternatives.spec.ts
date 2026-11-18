@@ -198,6 +198,27 @@ describe('each alternative asks for what it needs', () => {
     expect(headers).toEqual({ Authorization: 'SYNTH-SIG-hmacPrimary' });
   });
 
+  it('never drops a credential for an alternative that also needs a client certificate', async () => {
+    const tool = await toolFor([{ certificate: [], partnerKey: [] }, { userToken: [] }], { includeSecurityInInput: true });
+    const both = buildHttpRequest(tool, { partnerKey: 'SYNTH-PARTNER', userToken: 'SYNTH-USER' });
+    expect(both.headers).toEqual({ Authorization: 'Bearer SYNTH-USER' });
+    expect(buildHttpRequest(tool, { partnerKey: 'SYNTH-PARTNER' }).headers).toEqual({ 'X-Partner-Key': 'SYNTH-PARTNER' });
+  });
+
+  it('signs the alternative resolve applied, without asking for credentials again', async () => {
+    const tool = await toolFor([{ hmacPrimary: [], partnerKey: [] }, { hmacBackup: [] }]);
+    let partnerKeyCalls = 0;
+    const customResolver = (security: { scheme: string }) =>
+      security.scheme === 'partnerKey' && partnerKeyCalls++ === 0 ? 'SYNTH-PARTNER' : undefined;
+    const signatureGenerator = jest.fn(async (_data: unknown, security: { scheme: string }) => `SYNTH-SIG-${security.scheme}`);
+    const context = { customResolver, signatureGenerator };
+    const resolved = await resolver.resolve(tool.mapper, context);
+    expect(resolved.signatureInfo).toEqual({ scheme: 'hmacPrimary', schemes: ['hmacPrimary'] });
+    const data = { method: 'GET', url: 'https://api.example.test/p', headers: {} };
+    expect(await resolver.signRequest(tool.mapper, data, context, resolved)).toEqual({ Authorization: 'SYNTH-SIG-hmacPrimary' });
+    expect(partnerKeyCalls).toBe(1);
+  });
+
   it('sends the credentials of one alternative when the input gives several', async () => {
     const tool = await toolFor([{ partnerKey: [] }, { userToken: [] }], { includeSecurityInInput: true });
     const both = buildHttpRequest(tool, { partnerKey: 'SYNTH-PARTNER', userToken: 'SYNTH-USER' });

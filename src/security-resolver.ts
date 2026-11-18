@@ -1,5 +1,11 @@
 import type { ParameterMapper, SecurityParameterInfo } from './types';
-import { assertCookieName, assertCookieValue, assertHeaderSafe, entriesByAlternative } from './request-builder';
+import {
+  assertCookieName,
+  assertCookieValue,
+  assertHeaderSafe,
+  clientCertificatesOf,
+  entriesByAlternative,
+} from './request-builder';
 
 /**
  * Context for resolving security parameters
@@ -188,7 +194,10 @@ export interface ResolvedSecurity {
    * Signature metadata (if signature-based auth is used)
    */
   signatureInfo?: {
+    /** The last signature scheme applied */
     scheme: string;
+    /** Every signature scheme applied, the ones `signRequest` signs when given this result */
+    schemes?: string[];
     algorithm?: string;
   };
 }
@@ -197,11 +206,6 @@ export interface ResolvedSecurity {
 function ownValue(record: Record<string, string> | undefined, key: string | undefined): string | undefined {
   if (record === undefined || key === undefined || !Object.hasOwn(record, key)) return undefined;
   return record[key] || undefined;
-}
-
-/** The `mutualTLS` schemes a choice names (`security.clientCertificates`), with the alternatives that need each */
-function clientCertificatesOf(entries: ParameterMapper[]): Array<{ scheme: string; alternatives: number[] }> {
-  return entries.flatMap((entry) => entry.security?.clientCertificates ?? []);
 }
 
 /**
@@ -294,17 +298,13 @@ export class SecurityResolver {
       resolved.clientCertificate = context.clientCertificate;
     }
 
-    // Check if signature-based auth is needed
-    let requiresSignature = false;
-    let signatureScheme: string | undefined;
+    // The signature schemes applied, which signRequest() signs later
+    const signatureSchemes: string[] = [];
     const { applied, values } = await this.credentials(mappers, context);
 
     for (const mapper of applied ?? []) {
-      // Check for signature-based auth
       if (this.isSignatureBasedAuth(mapper.security!)) {
-        requiresSignature = true;
-        signatureScheme = mapper.security!.scheme;
-        // Signature will be added later by signRequest()
+        signatureSchemes.push(mapper.security!.scheme);
         continue;
       }
 
@@ -337,12 +337,9 @@ export class SecurityResolver {
     }
 
     // Add signature metadata if needed
-    if (requiresSignature) {
+    if (signatureSchemes.length > 0) {
       resolved.requiresSignature = true;
-      resolved.signatureInfo = {
-        /* c8 ignore next -- signatureScheme is always set from security.scheme */
-        scheme: signatureScheme || 'unknown',
-      };
+      resolved.signatureInfo = { scheme: signatureSchemes[signatureSchemes.length - 1], schemes: signatureSchemes };
     }
 
     return resolved;
@@ -556,12 +553,13 @@ export class SecurityResolver {
    *
    * Use this when resolved.requiresSignature is true.
    * This method will call the signatureGenerator from context to sign the request. With a choice of Security
-   * Requirements it signs the entries of the alternative `resolve` applies, reading the context's credentials
-   * again to find it.
+   * Requirements it signs the entries of the alternative `resolve` applied: those `resolved` names when given,
+   * else the alternative found again from the context's credentials.
    *
    * @param mappers - Parameter mappers from the tool definition
    * @param signatureData - Request data to sign
    * @param context - Security context with signature generator
+   * @param resolved - What `resolve` returned, whose `signatureInfo.schemes` are the entries to sign
    * @returns Headers with signature added
    *
    * @example
@@ -571,7 +569,8 @@ export class SecurityResolver {
    *   const signedHeaders = await resolver.signRequest(
    *     tool.mapper,
    *     { method: 'GET', url: 'https://api.example.com/data', headers: resolved.headers },
-   *     context
+   *     context,
+   *     resolved
    *   );
    *   // Use signedHeaders in request
    * }
@@ -580,7 +579,8 @@ export class SecurityResolver {
   async signRequest(
     mappers: ParameterMapper[],
     signatureData: SignatureData,
-    context: SecurityContext
+    context: SecurityContext,
+    resolved?: ResolvedSecurity,
   ): Promise<Record<string, string>> {
     const headers: Record<string, string> = { ...signatureData.headers };
 
@@ -588,9 +588,12 @@ export class SecurityResolver {
       throw new Error('Signature-based auth required but no signatureGenerator provided');
     }
 
-    // The signature entries of the alternative `resolve` applies: the same choice, made again
-    const { applied } = await this.credentials(mappers, context);
-    for (const mapper of applied ?? []) {
+    // The signature entries of the alternative `resolve` applied: as `resolved` names them, else found again
+    const schemes = resolved?.signatureInfo?.schemes;
+    const selected = schemes
+      ? mappers.filter((mapper) => mapper.security !== undefined && schemes.includes(mapper.security.scheme))
+      : ((await this.credentials(mappers, context)).applied ?? []);
+    for (const mapper of selected) {
       if (!this.isSignatureBasedAuth(mapper.security!)) {
         continue;
       }
