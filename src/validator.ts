@@ -30,6 +30,7 @@ import {
   readParameterName,
   readSwagger2BasePath,
   resolveOperationLayout,
+  securitySchemeProblem,
   swagger2SkippedOperations,
   wireMethod,
   type OperationEntry,
@@ -533,12 +534,33 @@ export class Validator {
         code: 'NO_SECURITY_SCHEMES',
       });
     }
+    if (isSpecObject(schemes)) {
+      this.validateSecuritySchemes(schemes, swagger ? '/securityDefinitions' : '/components/securitySchemes', context);
+    }
 
     return {
       valid: errors.items.length === 0,
       errors: errors.items.length > 0 ? errors.items : undefined,
       warnings: warnings.items.length > 0 ? warnings.items : undefined,
     };
+  }
+
+  /**
+   * `INVALID_SECURITY_SCHEME` for a scheme whose `type`, or an `apiKey` scheme whose `in` or `name`, the declared
+   * version does not define (`SpecProfile.securitySchemeTypes`, `apiKeyLocations`), compared exactly: the
+   * generator cannot send such a scheme and drops the requirements naming it.
+   */
+  private validateSecuritySchemes(schemes: Record<string, unknown>, pointer: string, context: ValidationContext): void {
+    for (const [name, scheme] of Object.entries(schemes)) {
+      if (!isSpecObject(scheme) || isReferenceObject(scheme)) continue;
+      const found = securitySchemeProblem(scheme, context.profile);
+      if (found === undefined) continue;
+      context.errors.push({
+        message: `Security scheme ${describeValue(name)} ${found.problem}`,
+        path: appendPointer(pointer, name, found.field),
+        code: 'INVALID_SECURITY_SCHEME',
+      });
+    }
   }
 
   /**

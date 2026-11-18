@@ -374,6 +374,8 @@ describe('profiles', () => {
       componentsPathItems: false,
       componentsMediaTypes: false,
       self: false,
+      securitySchemeTypes: ['basic', 'apiKey', 'oauth2'],
+      apiKeyLocations: ['header', 'query'],
     },
     '3.0': {
       fixedMethods: ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'],
@@ -388,6 +390,8 @@ describe('profiles', () => {
       componentsPathItems: false,
       componentsMediaTypes: false,
       self: false,
+      securitySchemeTypes: ['apiKey', 'http', 'oauth2', 'openIdConnect'],
+      apiKeyLocations: ['header', 'query', 'cookie'],
     },
     '3.1': {
       fixedMethods: ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'],
@@ -402,6 +406,8 @@ describe('profiles', () => {
       componentsPathItems: true,
       componentsMediaTypes: false,
       self: false,
+      securitySchemeTypes: ['apiKey', 'http', 'mutualTLS', 'oauth2', 'openIdConnect'],
+      apiKeyLocations: ['query', 'header', 'cookie'],
     },
     '3.2': {
       fixedMethods: ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace', 'query'],
@@ -416,6 +422,8 @@ describe('profiles', () => {
       componentsPathItems: true,
       componentsMediaTypes: true,
       self: true,
+      securitySchemeTypes: ['apiKey', 'http', 'mutualTLS', 'oauth2', 'openIdConnect'],
+      apiKeyLocations: ['query', 'header', 'cookie'],
     },
   };
 
@@ -969,6 +977,7 @@ describe('the spec barrel', () => {
       'isSwagger2',
       'listSkippedNewerOperations',
       'resolveOperationLayout',
+      'securitySchemeProblem',
     ],
     upgrade: [
       'MAX_CONVERSION_ENTRIES',

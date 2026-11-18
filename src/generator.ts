@@ -40,7 +40,9 @@ import {
   describeValue,
   detectSpecVersion,
   getOperation,
+  getSpecProfile,
   isFeatureAvailable,
+  LATEST_SPEC_FAMILY,
   isSpecObject,
   jsonPointer,
   listOperations,
@@ -48,6 +50,7 @@ import {
   parameterNameNotStringDiagnostic,
   readParameterName,
   resolveOperationLayout,
+  securitySchemeProblem,
   toStandardMethod,
   MAX_CONVERSION_ENTRIES,
   upgradeSwagger2,
@@ -153,6 +156,24 @@ export const MAX_NAME_DEDUP_ATTEMPTS = 256;
  * `UNSUPPORTED_PARAMETER_LOCATION` diagnostic instead.
  */
 const MAPPED_PARAMETER_LOCATIONS: readonly string[] = Object.freeze(['path', 'query', 'querystring', 'header', 'cookie']);
+
+/** A Security Scheme Object a requirement names, or why it names none (`code`: `UNRESOLVED_SECURITY_SCHEME` if absent) */
+type FoundSecurityScheme =
+  | { name: string; scheme: Record<string, unknown> }
+  | { problem: string; code?: typeof DIAGNOSTIC_CODES.UNSUPPORTED_SECURITY_SCHEME };
+
+/**
+ * `scheme` as found, or why it cannot be sent: generation sends every version's scheme types. A Reference Object
+ * left by `dereference: false` is read as before (`toSecurityRequirement`).
+ */
+function sendableScheme(name: string, scheme: Record<string, unknown>): FoundSecurityScheme {
+  const found = isReferenceObject(scheme)
+    ? undefined
+    : securitySchemeProblem(scheme, getSpecProfile(LATEST_SPEC_FAMILY));
+  return found === undefined
+    ? { name, scheme }
+    : { problem: found.problem, code: DIAGNOSTIC_CODES.UNSUPPORTED_SECURITY_SCHEME };
+}
 
 /**
  * Whether a method filter names `method` (an operation's method as
@@ -3312,6 +3333,16 @@ export class OpenAPIToolGenerator {
         const found = this.findSecurityScheme(scheme, schemes);
         if ('scheme' in found) {
           const seen = byComponent.get(found.name);
+          if (seen === undefined && found.scheme['type'] === 'mutualTLS') {
+            this.addDiagnostic({
+              severity: 'info',
+              code: DIAGNOSTIC_CODES.UNSUPPORTED_SECURITY_SCHEME,
+              message:
+                `Security scheme ${describeValue(found.name)} is mutualTLS: the HTTP client presents the client ` +
+                `certificate (SecurityContext.clientCertificate), so the tool has no input for it`,
+              path: appendPointer(pointer, index, scheme),
+            });
+          }
           if (seen === undefined) {
             const entry = this.toSecurityRequirement(found.name, scopes as string[], found.scheme);
             byComponent.set(found.name, entry);
@@ -3327,7 +3358,7 @@ export class OpenAPIToolGenerator {
         satisfiable = false;
         this.addDiagnostic({
           severity: 'warning',
-          code: DIAGNOSTIC_CODES.UNRESOLVED_SECURITY_SCHEME,
+          code: found.code ?? DIAGNOSTIC_CODES.UNRESOLVED_SECURITY_SCHEME,
           message:
             `Security Requirement names scheme ${describeValue(scheme)}, which ${found.problem}; the requirement ` +
             `cannot be satisfied and is dropped with every scheme it combines`,
@@ -3359,11 +3390,11 @@ export class OpenAPIToolGenerator {
   private findSecurityScheme(
     key: string,
     schemes: unknown,
-  ): { name: string; scheme: Record<string, unknown> } | { problem: string } {
+  ): FoundSecurityScheme {
     // Own properties only: a scheme named `constructor` is not Object's
     const found = ownProperty(schemes, key);
     if (this.options.dereference && isReferenceObject(found)) return { problem: 'is a reference that was not resolved' };
-    if (isSpecObject(found)) return { name: key, scheme: found };
+    if (isSpecObject(found)) return sendableScheme(key, found);
     const notDefined = 'components.securitySchemes does not define';
     if (!/[:#/]/.test(key)) return { problem: notDefined };
     const family = this.specVersion.family;
@@ -3373,7 +3404,7 @@ export class OpenAPIToolGenerator {
     const target = resolveSecuritySchemeUri(key, this.documentBase);
     if ('problem' in target) return { problem: `${notDefined}, and read as a URI it ${target.problem}` };
     const byUri = ownProperty(schemes, target.name);
-    if (isSpecObject(byUri)) return { name: target.name, scheme: byUri };
+    if (isSpecObject(byUri)) return sendableScheme(target.name, byUri);
     return {
       problem: `names the scheme ${describeValue(target.name)} of this document by URI, but ${notDefined} it`,
     };

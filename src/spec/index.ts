@@ -63,6 +63,7 @@ export {
   isSwagger2,
   listSkippedNewerOperations,
   resolveOperationLayout,
+  securitySchemeProblem,
 } from './versions';
 export type {
   ListSkippedNewerOperationsOptions,

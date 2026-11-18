@@ -586,6 +586,7 @@ const UNPROCESSED_CODES: ReadonlySet<string> = new Set([
   // generator
   'UNSUPPORTED_PARAMETER_LOCATION',
   'UNRESOLVED_SECURITY_SCHEME',
+  'UNSUPPORTED_SECURITY_SCHEME',
   'INVALID_SECURITY_REQUIREMENT',
   'UNSATISFIABLE_SECURITY',
   // an operation that fails to build, and a parameter, request body or response left as a reference not read

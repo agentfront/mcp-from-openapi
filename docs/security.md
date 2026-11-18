@@ -52,6 +52,8 @@ security:
 
 If every requirement of an operation is dropped, no way to authenticate is known, so the operation makes **no tool**: `generateTools()` leaves it out and records `UNSATISFIABLE_SECURITY`, and `generateTool()` throws a `GenerationError` (context `path`, `method`, `pointer`). A document-level `security` that cannot be satisfied therefore drops every operation that inherits it. The exception is a document that has `security` requirements but defines no schemes at all (no `components.securitySchemes`; for Swagger 2.0, no `securityDefinitions`): its tools are still generated, with empty security, and the validator's `NO_SECURITY_SCHEMES` warning applies. A defined map counts as schemes even when it is empty, or when none of its entries could be converted: a Swagger 2.0 document with `securityDefinitions` always converts to a `components.securitySchemes` (`{}` when nothing converted), so an operation that requires a scheme the conversion could not make (an unknown `type`, or an `oauth2` with an unknown `flow`: `SWAGGER_UNSUPPORTED_SECURITY_SCHEME`) is skipped with `UNSATISFIABLE_SECURITY`, whether or not other schemes exist. An operation that lists another requirement naming a scheme that did convert (`security: [{ weird: [] }, { key: [] }]`) is still generated, with that requirement alone.
 
+A scheme the library cannot send drops the requirements that name it the same way, with an `UNSUPPORTED_SECURITY_SCHEME` diagnostic: a `type` that is none of `apiKey`, `http`, `oauth2`, `openIdConnect`, `mutualTLS` (compared exactly: `HTTP` is not `http`), or an `apiKey` scheme whose `in` is none of `query`, `header`, `cookie` or that has no `name`. Its key is never sent in a place the scheme does not name. `validate()` reports such a scheme as an `INVALID_SECURITY_SCHEME` error, with the values of the declared version (Swagger 2.0: `basic`, `apiKey`, `oauth2`, an `apiKey` in `header` or `query`; `mutualTLS` from OpenAPI 3.1). A `mutualTLS` scheme keeps its tool: the HTTP client presents the certificate (`clientCertificate`), so the tool has no input for it, and an `info` diagnostic says so.
+
 Requirements listed as alternatives (`security: [{ a: [] }, { b: [] }]`) are not kept as a choice: every scheme of every requirement object that can be satisfied becomes a requirement of the tool. See [OpenAPI Versions](./openapi-versions.md#diagnostics).
 
 ### Schemes named by URI (OpenAPI 3.2)
@@ -125,6 +127,8 @@ const context = createSecurityContext({
 ```
 
 ### API Key (Single)
+
+The single `apiKey` is used only for a tool with one `apiKey` scheme. With several, each needs its own entry in `apiKeys` (below): one key is never sent in another scheme's place, such as a header key in a URL.
 
 ```typescript
 const context = createSecurityContext({
@@ -241,7 +245,9 @@ if (resolved.requiresSignature) {
 }
 ```
 
-Schemes with names containing `aws4`, `hmac`, `signature`, `hawk`, or `custom-signature` are automatically detected as signature-based.
+An `http` scheme whose name contains `aws4`, `hmac`, `signature`, `hawk`, or `custom-signature` is detected as signature-based. Another type is not, whatever its name: an `apiKey` scheme named `TomahawkKey` is filled like any API key. `checkMissingSecurity` reports a signature-based scheme as missing when the context has no `signatureGenerator`.
+
+`apiKeys` and `customHeaders` are read by own keys only (a scheme named `constructor` finds nothing), and `resolve()` throws a `RequestBuildError` for a header or cookie value that cannot be sent, as `buildHttpRequest` does (a token holding a line break). Spread `resolved.headers` after your other headers, so none of them replaces a credential.
 
 ---
 

@@ -2378,7 +2378,7 @@ describe('SSRF Prevention - $ref resolution security', () => {
     expect(tool.metadata.security).toEqual([]);
   });
 
-  it('should handle apiKey securityScheme with invalid in value', async () => {
+  it('refuses an apiKey securityScheme with an invalid in value instead of sending the key elsewhere', async () => {
     const openapi = {
       openapi: '3.0.0',
       info: { title: 'Test', version: '1.0.0' },
@@ -2403,9 +2403,11 @@ describe('SSRF Prevention - $ref resolution security', () => {
     };
 
     const generator = await OpenAPIToolGenerator.fromJSON(openapi, { dereference: false });
-    const tool = await generator.generateTool('/test', 'get');
-
-    expect(tool.metadata.security![0].in).toBeUndefined();
+    await expect(generator.generateTool('/test', 'get')).rejects.toThrow(
+      'is an apiKey scheme sent in "invalid-location", which is none of header, query, cookie',
+    );
+    const lenient = await OpenAPIToolGenerator.fromJSON(openapi, { dereference: false, validate: false });
+    await expect(lenient.generateTool('/test', 'get')).rejects.toThrow(GenerationError);
   });
 
   it('should handle http securityScheme without scheme property', async () => {
@@ -10052,9 +10054,14 @@ describe('Swagger 2.0 documents', () => {
         '/locked': { get: { operationId: 'locked', security: [{ mtls: [] }], responses: ok } },
         '/open': { get: { operationId: 'open', responses: ok } },
       };
-      const only = await OpenAPIToolGenerator.fromJSON(minimal(operations, { securityDefinitions: { mtls: { type: 'mutualTLS' } } }));
+      // mutualTLS is no Swagger 2.0 type, which validation refuses (INVALID_SECURITY_SCHEME)
+      const only = await OpenAPIToolGenerator.fromJSON(
+        minimal(operations, { securityDefinitions: { mtls: { type: 'mutualTLS' } } }),
+        { validate: false },
+      );
       const withOthers = await OpenAPIToolGenerator.fromJSON(
         minimal(operations, { securityDefinitions: { mtls: { type: 'mutualTLS' }, key: { type: 'apiKey', name: 'K', in: 'header' } } }),
+        { validate: false },
       );
       for (const generator of [only, withOthers]) {
         expect((await generator.generateTools()).map((t) => t.name)).toEqual(['open']);

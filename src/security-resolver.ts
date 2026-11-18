@@ -1,4 +1,5 @@
 import type { ParameterMapper, SecurityParameterInfo } from './types';
+import { assertCookieName, assertCookieValue, assertHeaderSafe } from './request-builder';
 
 /**
  * Context for resolving security parameters
@@ -192,6 +193,18 @@ export interface ResolvedSecurity {
   };
 }
 
+/** `record[key]` when it is an own, non-empty value: a key such as `constructor` is never read from the prototype */
+function ownValue(record: Record<string, string> | undefined, key: string | undefined): string | undefined {
+  if (record === undefined || key === undefined || !Object.hasOwn(record, key)) return undefined;
+  return record[key] || undefined;
+}
+
+/** Whether the mapper has exactly one apiKey scheme, the only case `SecurityContext.apiKey` is used for */
+function singleApiKeyScheme(mappers: ParameterMapper[]): boolean {
+  const apiKeySchemes = mappers.filter((mapper) => mapper.security?.type === 'apiKey').map((mapper) => mapper.security!.scheme);
+  return new Set(apiKeySchemes).size === 1;
+}
+
 /**
  * Security resolver that maps OpenAPI security requirements to actual auth values
  *
@@ -208,8 +221,8 @@ export interface ResolvedSecurity {
  *   apiKey: process.env.API_KEY
  * });
  *
- * // Use resolved.headers in HTTP request
- * fetch(url, { headers: { ...resolved.headers, ...otherHeaders } });
+ * // Use resolved.headers in HTTP request, after any other headers so none replaces a credential
+ * fetch(url, { headers: { ...otherHeaders, ...resolved.headers } });
  * ```
  *
  * @example
@@ -248,6 +261,7 @@ export class SecurityResolver {
     // Check if signature-based auth is needed
     let requiresSignature = false;
     let signatureScheme: string | undefined;
+    const fallbackApiKey = singleApiKeyScheme(mappers);
 
     for (const mapper of mappers) {
       // Skip non-security parameters
@@ -264,7 +278,7 @@ export class SecurityResolver {
       }
 
       // Try to resolve the auth value
-      const authValue = await this.resolveAuthValue(mapper.security, context);
+      const authValue = await this.resolveAuthValue(mapper.security, context, fallbackApiKey);
       if (!authValue) {
         // Auth value not available - skip this security requirement
         // Framework may want to throw an error or log a warning
@@ -274,11 +288,15 @@ export class SecurityResolver {
       // Apply to the correct location
       const headerName = mapper.key;
 
+      // A value that cannot be sent there is refused, as buildHttpRequest refuses it
       if (mapper.type === 'header') {
+        assertHeaderSafe(headerName, authValue);
         resolved.headers[headerName] = authValue;
       } else if (mapper.type === 'query') {
         resolved.query[headerName] = authValue;
       } else if (mapper.type === 'cookie') {
+        assertCookieName(headerName);
+        assertCookieValue(headerName, authValue);
         resolved.cookies[headerName] = authValue;
       }
     }
@@ -301,14 +319,13 @@ export class SecurityResolver {
   }
 
   /**
-   * Check if security scheme requires request signing
+   * Whether an HTTP authentication scheme requires request signing, by the
+   * names of schemes that do (`aws4`, `hmac`, `signature`, `hawk`). Only an
+   * `http` scheme: an API key named `TomahawkKey` is an API key.
    */
   private isSignatureBasedAuth(security: SecurityParameterInfo): boolean {
-    // Check for schemes that typically require signing
     const signatureSchemes = ['aws4', 'hmac', 'signature', 'hawk', 'custom-signature'];
-    return signatureSchemes.some(scheme =>
-      security.scheme.toLowerCase().includes(scheme)
-    );
+    return security.type === 'http' && signatureSchemes.some((scheme) => security.scheme.toLowerCase().includes(scheme));
   }
 
   /**
@@ -316,7 +333,8 @@ export class SecurityResolver {
    */
   private async resolveAuthValue(
     security: SecurityParameterInfo,
-    context: SecurityContext
+    context: SecurityContext,
+    fallbackApiKey: boolean,
   ): Promise<string | undefined> {
     // Try custom resolver first
     if (context.customResolver) {
@@ -330,7 +348,7 @@ export class SecurityResolver {
     if (security.type === 'http') {
       return this.resolveHttpAuth(security, context);
     } else if (security.type === 'apiKey') {
-      return this.resolveApiKey(security, context);
+      return this.resolveApiKey(security, context, fallbackApiKey);
     } else if (security.type === 'oauth2' || security.type === 'openIdConnect') {
       return this.resolveOAuth2(security, context);
     }
@@ -432,14 +450,7 @@ export class SecurityResolver {
     security: SecurityParameterInfo,
     context: SecurityContext
   ): string | undefined {
-    // Try custom headers first
-    const headerKey = security.apiKeyName || `X-${scheme.toUpperCase()}`;
-    if (context.customHeaders?.[headerKey]) {
-      return context.customHeaders[headerKey];
-    }
-
-    // Unknown scheme
-    return undefined;
+    return ownValue(context.customHeaders, security.apiKeyName || `X-${scheme.toUpperCase()}`);
   }
 
   /**
@@ -447,22 +458,13 @@ export class SecurityResolver {
    */
   private resolveApiKey(
     security: SecurityParameterInfo,
-    context: SecurityContext
+    context: SecurityContext,
+    fallbackApiKey: boolean,
   ): string | undefined {
-    // Try named API keys first (for multiple keys)
-    if (context.apiKeys && security.apiKeyName) {
-      const key = context.apiKeys[security.apiKeyName];
-      if (key) return key;
-    }
-
-    // Try custom headers (for proprietary auth headers like X-Custom-Auth)
-    if (context.customHeaders && security.apiKeyName) {
-      const header = context.customHeaders[security.apiKeyName];
-      if (header) return header;
-    }
-
-    // Fall back to single apiKey (backward compatibility)
-    return context.apiKey;
+    // Named API keys first (for multiple keys), then custom headers (proprietary auth headers like X-Custom-Auth)
+    const named = ownValue(context.apiKeys, security.apiKeyName) ?? ownValue(context.customHeaders, security.apiKeyName);
+    // The single apiKey only for a tool with one apiKey scheme: it is never sent in another scheme's place
+    return named ?? (fallbackApiKey ? context.apiKey : undefined);
   }
 
   /**
@@ -491,12 +493,16 @@ export class SecurityResolver {
     context: SecurityContext
   ): Promise<string[]> {
     const missing: string[] = [];
+    const fallbackApiKey = singleApiKeyScheme(mappers);
 
     for (const mapper of mappers) {
       if (!mapper.security) continue;
 
-      const authValue = await this.resolveAuthValue(mapper.security, context);
-      if (!authValue) {
+      // A signature scheme is filled by signRequest, which needs a signatureGenerator
+      const filled = this.isSignatureBasedAuth(mapper.security)
+        ? context.signatureGenerator !== undefined
+        : Boolean(await this.resolveAuthValue(mapper.security, context, fallbackApiKey));
+      if (!filled) {
         missing.push(mapper.security.scheme);
       }
     }

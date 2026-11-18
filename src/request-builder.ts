@@ -499,7 +499,7 @@ function serializeCookieStyle(
   return groups;
 }
 
-function assertHeaderSafe(name: string, value: string, context: Record<string, unknown> = {}): void {
+export function assertHeaderSafe(name: string, value: string, context: Record<string, unknown> = {}): void {
   // Header NAMES come from the spec (mapper.key) — untrusted under
   // secureDefaults, so they get the RFC 7230 token check too.
   if (!/^[\w!#$%&'*+\-.^`|~]+$/.test(name)) {
@@ -527,7 +527,7 @@ function assertHeaderSafe(name: string, value: string, context: Record<string, u
   }
 }
 
-function assertCookieName(name: string): void {
+export function assertCookieName(name: string): void {
   if (!/^[\w!#$%&'*+\-.^`|~]+$/.test(name)) {
     throw new RequestBuildError(`Invalid cookie name '${name}' (RFC 6265 token required)`, { cookie: name });
   }
@@ -545,7 +545,7 @@ function assertCookieName(name: string): void {
  *   character above U+00FF, which no header can carry. Comma and the bytes
  *   0x80-0xFF are tolerated, because arrays have always been comma-joined.
  */
-function assertCookieValue(name: string, value: string, strict = false): void {
+export function assertCookieValue(name: string, value: string, strict = false): void {
   if (
     strict
       ? !/^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*$/.test(value)

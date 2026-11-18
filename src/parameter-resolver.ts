@@ -718,7 +718,7 @@ export class ParameterResolver {
           description,
         };
       } else {
-        // Unknown type, skip
+        // mutualTLS: the HTTP client presents the certificate, there is nothing to map
         continue;
       }
 
