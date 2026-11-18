@@ -76,6 +76,7 @@ OpenAPIToolGenerator (src/generator.ts)
 | `scripts/spec-corpus/*`         | A LOCAL survey (not a CI gate, nothing committed but `sources.json`): `download.mjs` fetches 38 public specs (15 declaring 3.2, 8 3.1, 10 3.0, 5 Swagger 2.0; pinned commit + sha256, multi-file trees crawled) into the git-ignored `.spec-corpus/`, `run.mjs` runs each through the BUILT `dist/` in its own process (`child.mjs`; `stats.mjs`/`docstats.mjs` count operations independently of the library) and writes `results.json` + `REPORT.md`; `integrity.mjs` is the one definition of what the corpus must look like on disk (size + sha256 of a file, tree digest, symlink-refusing paths), shared by `download.mjs` (makes it so) and `run.mjs` (skips a spec that does not match: `HASH MISMATCH`, `--no-verify` overrides); the `local-refs` attempts allow `file` for multi-file specs, so run it only on specs you trust. Read its README before adding a spec (licences: no spec is redistributed) |
 | `.github/workflows/spec-watch.yml` | Weekly (Wed 06:23 UTC) and `workflow_dispatch` (`dry_run`): runs `sync-oas-sources.mjs --latest --json` in a read-only job and, in a separate `issues: write` job, opens or updates ONE issue `OpenAPI sources: newer versions available` (text built by `jq`, fetched text never reaches a shell or expression; a failed check fails the run rather than reporting "nothing newer"; only in `agentfront/mcp-from-openapi`) |
 | `docs/maintaining-openapi-support.md` | Maintainer runbook: how versions are represented, what each test layer proves, adding a version (3.3) step by step, moving a pinned schema iteration or the test documents, the spec-watch workflow and the local corpus |
+| `.github/workflows/prepare-release.yml` / `publish-release.yml` | Release flow (`docs/releasing.md`): Prepare Release opens the release pull request `release-pr/vX.Y.Z` into `release/X.Y.x` (version bump + `CHANGELOG.md` entry as its change, the release notes as its description; the notes job holds the model key and `contents: read` only); merging it runs Publish Release on the push: `detect` (the merged release pull request) -> `build` (test, build, `npm pack`, no write) -> `publish` (environment `release`, `id-token: write` only, publishes the packed tarball through npm trusted publishing, no checkout or install; the file name and environment are part of the npm configuration) -> `release` (tag + GitHub release from the pull request's title and description). No npm token |
 
 ## Development Commands
 
@@ -229,6 +230,7 @@ GenerateOptions (generateTools/generateTool)
 - All docs live in `docs/` folder
 - `docs/FORMAT_RESOLUTION.md` — Format resolution feature docs (built-in resolvers, custom resolvers, standalone usage)
 - `docs/maintaining-openapi-support.md` — Maintainer runbook: how versions are represented, adding a version, moving the pinned official sources, the `spec-watch` workflow, the local corpus
+- `docs/releasing.md` — Maintainer runbook: the release pull request flow, recovering a failed release, the npm trusted publisher and repository settings it needs
 
 ### README Links for npm
 

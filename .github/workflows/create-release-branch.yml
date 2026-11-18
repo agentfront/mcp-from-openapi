@@ -185,5 +185,5 @@ jobs:
           echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "1. Create PRs targeting \`${{ steps.check_branch.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "2. When ready to publish, run the **Publish Release** workflow from this branch" >> $GITHUB_STEP_SUMMARY
+          echo "2. When ready to publish, run the **Prepare Release** workflow from this branch, then review and merge its pull request" >> $GITHUB_STEP_SUMMARY
           echo "3. Subsequent releases from this branch will increment: ${{ steps.version.outputs.initial_version }} -> x.y.1 -> x.y.2 ..." >> $GITHUB_STEP_SUMMARY

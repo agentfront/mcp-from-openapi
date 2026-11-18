@@ -173,6 +173,7 @@ for (const tool of await generator.generateTools({ target: "claude" })) {
 | [Examples](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/examples.md)                       | MCP server, Zod, filtering, security, and more                    |
 | [Architecture](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/architecture.md)               | System overview, data flow, design patterns                       |
 | [Maintaining OpenAPI Support](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/maintaining-openapi-support.md) | For maintainers: adding a version, moving the pinned official sources |
+| [Releasing](https://github.com/agentfront/mcp-from-openapi/blob/main/docs/releasing.md) | For maintainers: the release pull request flow and the npm and repository settings it needs |
 
 ## Requirements
 

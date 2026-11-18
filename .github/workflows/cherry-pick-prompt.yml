@@ -19,9 +19,11 @@ jobs:
     # - PR was merged (not just closed)
     # - PR is not from a fork (forked PRs have read-only GITHUB_TOKEN)
     # - Target branch is a release branch (not main)
+    # - PR is not a release pull request (prepare-release.yml): its version bump belongs to its branch
     if: >
       github.event.pull_request.merged == true &&
       github.event.pull_request.head.repo.fork == false &&
+      !startsWith(github.event.pull_request.head.ref, 'release-pr/') &&
       github.event.pull_request.base.ref != github.event.repository.default_branch &&
       (startsWith(github.event.pull_request.base.ref, 'release/') ||
        startsWith(github.event.pull_request.base.ref, 'next/'))
