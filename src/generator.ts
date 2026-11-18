@@ -2951,38 +2951,32 @@ export class OpenAPIToolGenerator {
     // Trimming controls (after depth truncation, before client targets so the
     // dialect transforms see the final trimmed shape). Description caps run
     // BEFORE limitProperties so the "[N properties omitted]" notes survive.
+    // ROOT input properties are mapper-backed parameters — dropping one makes required calls impossible, so a
+    // step that drops properties applies to each parameter subtree; the parameter list itself is never trimmed
+    const belowInputRoot = (schema: JsonSchema, step: (subtree: JsonSchema) => JsonSchema): JsonSchema => {
+      const stepped: Record<string, JsonSchema> = {};
+      // The input root always holds its parameters (`ParameterResolver.resolve`)
+      for (const [key, value] of Object.entries(schema.properties!)) setOwnProperty(stepped, key, step(value as JsonSchema));
+      return { ...schema, properties: stepped };
+    };
     const applyTrim = (schema: JsonSchema, isInputRoot: boolean): JsonSchema => {
-      let trimmed = schema;
+      // A readOnly property is never sent in a request, a writeOnly one never returned (OpenAPI Schema Object)
+      let trimmed = isInputRoot
+        ? belowInputRoot(schema, (subtree) => SchemaBuilder.omitMarkedProperties(subtree, 'readOnly'))
+        : SchemaBuilder.omitMarkedProperties(schema, 'writeOnly');
       if (options.stripExamples) trimmed = SchemaBuilder.stripExamples(trimmed);
       if (options.maxDescriptionLength !== undefined) {
         trimmed = SchemaBuilder.capDescriptions(trimmed, options.maxDescriptionLength);
       }
       if (options.maxProperties !== undefined) {
-        if (isInputRoot) {
-          // ROOT input properties are mapper-backed parameters — dropping one
-          // makes required calls impossible. The cap applies per parameter
-          // subtree; the parameter list itself is never trimmed.
-          const properties = trimmed.properties;
-          if (properties && typeof properties === 'object') {
-            const limited: Record<string, JsonSchema> = {};
-            for (const [key, value] of Object.entries(properties)) {
-              limited[key] = SchemaBuilder.limitProperties(value as JsonSchema, options.maxProperties);
-            }
-            trimmed = { ...trimmed, properties: limited };
-          }
-        } else {
-          trimmed = SchemaBuilder.limitProperties(trimmed, options.maxProperties);
-        }
+        const limit = (subtree: JsonSchema): JsonSchema => SchemaBuilder.limitProperties(subtree, options.maxProperties!);
+        trimmed = isInputRoot ? belowInputRoot(trimmed, limit) : limit(trimmed);
       }
       return trimmed;
     };
-    if (options.stripExamples || options.maxProperties !== undefined || options.maxDescriptionLength !== undefined) {
-      resolvedInputSchema = applyTrim(resolvedInputSchema, true);
-      if (resolvedOutputSchema) {
-        resolvedOutputSchema = applyTrim(resolvedOutputSchema, false);
-      }
-      if (itemSchema) itemSchema = applyTrim(itemSchema, false);
-    }
+    resolvedInputSchema = applyTrim(resolvedInputSchema, true);
+    if (resolvedOutputSchema) resolvedOutputSchema = applyTrim(resolvedOutputSchema, false);
+    if (itemSchema) itemSchema = applyTrim(itemSchema, false);
 
     // Client dialect transforms (final step — the emitted schemas must be
     // exactly what the targeted client accepts)

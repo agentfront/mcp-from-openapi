@@ -540,7 +540,8 @@ export class ParameterResolver {
         // Always an object: conversion turns every subschema into one (a
         // boolean `false` property into `{ not: {} }`, which keeps it as an
         // input that accepts no value)
-        if (typeof propSchema === 'object') {
+        // A readOnly property is never sent in a request (OpenAPI Schema Object `readOnly`)
+        if (typeof propSchema === 'object' && (propSchema as Record<string, unknown>)['readOnly'] !== true) {
           const propEncoding = ownProperty(encoding, propName) as Record<string, unknown> | undefined;
           // Distribute media-type-level whole-body examples onto the
           // flattened properties: { example: { name: 'Ada' } } -> name: ['Ada']
@@ -867,10 +868,61 @@ function mapperEntry(inputKey: string, originalName: string, param: ParameterInf
   return entry;
 }
 
+/** Keywords that describe a value without constraining it: of several definitions, the last one's is kept */
+const ANNOTATION_KEYWORDS: ReadonlySet<string> = new Set([
+  'description',
+  'title',
+  'examples',
+  'default',
+  'deprecated',
+  'readOnly',
+  'writeOnly',
+  '$comment',
+]);
+
+/**
+ * The definitions of one property, in the order `allOf` members assign them,
+ * as one schema: each keyword of every definition, an annotation taken from
+ * the last that has it. When two set a constraint keyword differently, the
+ * `allOf` of all of them, which JSON Schema reads as every one applying. The
+ * definitions are `toJsonSchema` results, so objects (a boolean one included).
+ */
+function mergeDefinitions(definitions: unknown[]): unknown {
+  if (definitions.length === 1) return definitions[0];
+  const merged: Record<string, unknown> = {};
+  for (const definition of definitions as Record<string, unknown>[]) {
+    for (const [keyword, value] of Object.entries(definition)) {
+      const annotation = ANNOTATION_KEYWORDS.has(keyword) || keyword.startsWith('x-');
+      if (!annotation && Object.hasOwn(merged, keyword) && merged[keyword] !== value) return { allOf: definitions };
+      setOwnProperty(merged, keyword, value);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Keywords of an object body named properties cannot say: a body (or `allOf`
+ * member) holding one is kept whole, so the tool keeps the constraint
+ */
+const WHOLE_BODY_KEYWORDS = [
+  'oneOf',
+  'anyOf',
+  'not',
+  'if',
+  'minProperties',
+  'maxProperties',
+  'dependentRequired',
+  'dependentSchemas',
+  'patternProperties',
+  'propertyNames',
+  'enum',
+  'const',
+] as const;
+
 /**
  * A flattened view of an object request body: the combined property map and
- * required set, with `allOf` members merged in (later members win on property
- * collisions, required sets union).
+ * required set, with `allOf` members merged in (a property several members
+ * define is the `allOf` of their definitions, required sets union).
  */
 interface FlattenedObjectBody {
   properties: Record<string, JsonSchema>;
@@ -879,15 +931,17 @@ interface FlattenedObjectBody {
 
 /**
  * Collect the property map and required set of an object schema, merging
- * `allOf` members (in order). Returns 'union' when the schema — or ANY allOf
- * member, at any depth — carries a root `oneOf`/`anyOf`: such bodies cannot
- * be flattened into named properties without deleting the union constraint,
- * so the caller must keep the body whole.
+ * `allOf` members (in order). Returns 'whole' when the schema — or ANY allOf
+ * member, at any depth — carries a keyword named properties cannot say
+ * (`WHOLE_BODY_KEYWORDS`: a `oneOf`/`anyOf` union, `not`, `if`, a property
+ * count, ...): flattening would delete that constraint, so the caller must
+ * keep the body whole.
  *
- * The merge is the one a recursive `Object.assign` of each member's merged
- * map, in order, followed by the schema's own `properties`, would produce: a
- * key sits where it first appears in that sequence of assignments and holds
- * the value it was last assigned. Building that map for every member would
+ * A key sits where it first appears in the sequence of assignments a
+ * recursive `Object.assign` of each member's merged map, in order, followed
+ * by the schema's own `properties`, would make; its value merges every
+ * definition, in that order (`mergeDefinitions`), since JSON Schema applies
+ * every member, where an assignment would keep only the last. Building that map for every member would
  * cost quadratic time and memory on a long `allOf` chain (each level copies
  * the whole map below it), so the two are found directly instead, by walks
  * that each visit a member once — every key of a repeated member has already
@@ -895,7 +949,7 @@ interface FlattenedObjectBody {
  * walks keep their own stacks, so any `allOf` chain can be flattened (issue
  * #50). The schema is a `toJsonSchema` result, which is acyclic.
  */
-function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'union' {
+function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'whole' {
   // Forward, in assignment order (a member's members, then its own
   // properties): each key's first appearance, every required field, and
   // whether a union is reachable
@@ -904,22 +958,22 @@ function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'union'
   const required = new Set<string>();
   const entered = new Set<object>();
   const frames: { schema: Record<string, unknown>; members: unknown[]; next: number }[] = [];
-  // False when `member` is a union
+  // False when `member` holds a constraint named properties cannot say
   const enter = (member: unknown): boolean => {
     /* c8 ignore next -- defensive: toJsonSchema always yields objects, so non-object members cannot reach here */
     if (!member || typeof member !== 'object') return true;
     if (entered.has(member)) return true;
     entered.add(member);
     const record = member as Record<string, unknown>;
-    if (Array.isArray(record['oneOf']) || Array.isArray(record['anyOf'])) return false;
+    if (WHOLE_BODY_KEYWORDS.some((keyword) => record[keyword] !== undefined)) return false;
     frames.push({ schema: record, members: Array.isArray(record['allOf']) ? record['allOf'] : [], next: 0 });
     return true;
   };
-  if (!enter(schema)) return 'union';
+  if (!enter(schema)) return 'whole';
   while (frames.length > 0) {
     const frame = frames[frames.length - 1];
     if (frame.next < frame.members.length) {
-      if (!enter(frame.members[frame.next++])) return 'union';
+      if (!enter(frame.members[frame.next++])) return 'whole';
       continue;
     }
     frames.pop();
@@ -937,9 +991,9 @@ function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'union'
     }
   }
 
-  // Backward — own properties, then members from last to first: the first
-  // value seen for a key is the one it was last assigned
-  const values = new Map<string, unknown>();
+  // Backward — own properties, then members from last to first: each key's
+  // definitions, last assigned first
+  const values = new Map<string, unknown[]>();
   const assigned = new Set<object>();
   const pending: unknown[] = [schema];
   while (pending.length > 0) {
@@ -950,7 +1004,9 @@ function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'union'
     if (record['properties'] && typeof record['properties'] === 'object') {
       const own = record['properties'] as Record<string, unknown>;
       for (const key of Object.keys(own)) {
-        if (!values.has(key)) values.set(key, own[key]);
+        const definitions = values.get(key) ?? [];
+        if (!definitions.includes(own[key])) definitions.push(own[key]);
+        values.set(key, definitions);
       }
     }
     // Pushed in order, so the last member is assigned first
@@ -960,20 +1016,20 @@ function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'union'
   }
 
   const properties: Record<string, JsonSchema> = {};
-  for (const key of keys) setOwnProperty(properties, key, values.get(key));
+  for (const key of keys) setOwnProperty(properties, key, mergeDefinitions(values.get(key)!.reverse()));
   return { properties, required };
 }
 
 /**
  * Flatten an object body schema — including `allOf` compositions — into a
  * single property map. Returns undefined when the body cannot be represented
- * as named properties: `oneOf`/`anyOf` unions at the root OR inside any allOf
- * member (flattening would delete the union constraint), non-object schemas
+ * as named properties: a `WHOLE_BODY_KEYWORDS` constraint at the root OR inside
+ * any allOf member (flattening would delete it), non-object schemas
  * (arrays, primitives, binary), and free-form objects without properties.
  */
 function flattenObjectBody(schema: JsonSchema): FlattenedObjectBody | undefined {
   const collected = collectObjectMembers(schema);
-  if (collected === 'union') return undefined;
+  if (collected === 'whole') return undefined;
   return Object.keys(collected.properties).length > 0 ? collected : undefined;
 }
 

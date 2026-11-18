@@ -119,6 +119,20 @@ function isObject(value: unknown): value is object {
   return value !== null && typeof value === 'object';
 }
 
+/** Whether a node of the value graph `root` satisfies `test`; each object is looked at once, with its own stack */
+function holdsNode(root: unknown, test: (node: Record<string, unknown>) => boolean): boolean {
+  const pending = [root];
+  const seen = new Set<object>();
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!isObject(node) || seen.has(node)) continue;
+    seen.add(node);
+    if (test(node as Record<string, unknown>)) return true;
+    for (const value of Object.values(node)) pending.push(value);
+  }
+  return false;
+}
+
 /** Keywords that refuse what a removed `properties` or `prefixItems` allowed, when `false` */
 const CLOSING_KEYWORDS = ['additionalProperties', 'unevaluatedProperties', 'items', 'unevaluatedItems'] as const;
 
@@ -687,6 +701,32 @@ export class SchemaBuilder {
       // The omitted properties stay allowed
       if (next.additionalProperties === false) delete next.additionalProperties;
       if (next.unevaluatedProperties === false) delete next.unevaluatedProperties;
+      return next;
+    });
+  }
+
+  /**
+   * `schema` without the properties whose own schema says `keyword: true`, at
+   * every depth, and without their `required` entries: `readOnly` ones in a
+   * request, `writeOnly` ones in a response (OpenAPI Schema Object). Comes
+   * back unchanged, not copied, when no property is marked.
+   */
+  static omitMarkedProperties(schema: JsonSchema, keyword: 'readOnly' | 'writeOnly'): JsonSchema {
+    const isMarked = (property: unknown): boolean => isObject(property) && (property as Record<string, unknown>)[keyword] === true;
+    if (!holdsNode(schema, (node) => isObject(node['properties']) && Object.values(node['properties']).some(isMarked))) {
+      return schema;
+    }
+    return this.walkCopy(schema, (node) => {
+      const properties = node.properties;
+      if (!isObject(properties) || !Object.values(properties).some(isMarked)) return node;
+      const omitted = new Set(Object.keys(properties).filter((name) => isMarked((properties as Record<string, unknown>)[name])));
+      const next: JsonSchema = {
+        ...node,
+        properties: Object.fromEntries(Object.entries(properties).filter(([name]) => !omitted.has(name))),
+      };
+      const required = Array.isArray(node.required) ? node.required.filter((name) => !omitted.has(String(name))) : [];
+      if (required.length > 0) next.required = required;
+      else delete next.required;
       return next;
     });
   }

@@ -230,6 +230,12 @@
       "differences": [
         { "kind": "property-added-required", "leaf": "ResponseBuilder.statuses", "exports": ["ResponseBuilder", "typeof ResponseBuilder"] }
       ]
+    },
+    {
+      "reason": "`SchemaBuilder.omitMarkedProperties(schema, keyword)` leaves out the properties a schema marks `readOnly` or `writeOnly`, which the generator applies to input and output schemas as OpenAPI says those properties are not sent or not returned. An added static method: code using the class is unaffected.",
+      "differences": [
+        { "kind": "property-added-required", "leaf": "typeof SchemaBuilder.omitMarkedProperties", "exports": ["typeof SchemaBuilder"] }
+      ]
     }
   ]
 }

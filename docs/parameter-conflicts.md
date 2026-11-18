@@ -245,14 +245,16 @@ If a body property name conflicts with a path/query parameter, the conflict reso
 
 ### allOf bodies
 
-`allOf` compositions are flattened: object members merge into one property set (later members win on collisions, `required` sets union), so each combined property becomes its own input parameter. Members that carry only a `required` list (the base-`$ref` + required-tightening pattern) still contribute their required fields.
+`allOf` compositions are flattened: object members merge into one property set (`required` sets union), so each combined property becomes its own input parameter. A property that several members define keeps every definition's constraints, as JSON Schema applies every member: their keywords are combined (for an annotation such as `description`, the last member's wins), and when two members set one constraint keyword differently the property is the `allOf` of the definitions. Members that carry only a `required` list (the base-`$ref` + required-tightening pattern) still contribute their required fields.
+
+A property marked `readOnly: true` is left out of the input, and so is a `readOnly` property at any depth below an input: OpenAPI says such a property is not sent in a request. In an output schema, `writeOnly` properties are left out the same way.
 
 ### Whole-body parameters
 
 Bodies that cannot be flattened into named properties become a single `body` input parameter whose mapper entry carries `wholeBody: true` — the input value **is** the entire request body (do not wrap it in `{ body: value }`):
 
 - Non-object bodies: arrays, primitives, raw binary (`format: binary`)
-- `oneOf` / `anyOf` union bodies — at the root **or inside any `allOf` member** (the composed schema is preserved intact rather than flattening the union away)
+- Bodies holding a constraint named properties cannot say — at the root **or inside any `allOf` member** (the composed schema is preserved intact rather than flattening the constraint away): a `oneOf` / `anyOf` union, `not`, `if`, `minProperties` / `maxProperties`, `dependentRequired` / `dependentSchemas`, `patternProperties`, `propertyNames`, `enum`, `const` (a boolean `false` member, which accepts nothing, is `not: {}`)
 - Free-form objects without declared properties
 
 ```typescript
