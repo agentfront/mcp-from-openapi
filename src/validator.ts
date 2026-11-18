@@ -29,8 +29,10 @@ import {
   parameterNameNotStringDiagnostic,
   readParameterName,
   readSwagger2BasePath,
+  isHttpToken,
   resolveOperationLayout,
   securitySchemeProblem,
+  UNSAFE_CHARACTER_CLASS,
   swagger2SkippedOperations,
   wireMethod,
   type OperationEntry,
@@ -79,16 +81,9 @@ const LOCATION_FEATURES: Readonly<Record<string, SpecFeatureId>> = Object.freeze
 /** Longest method text a message quotes. */
 const METHOD_TEXT_MAX_LENGTH = 64;
 
-/**
- * Characters never put raw into a message (the spec layer's set): C0 and C1
- * controls, DEL, the line and paragraph separators, bidirectional formatting
- * characters, and lone surrogates (a cut can split a pair).
- */
-// Built from a string: a compiler may turn the escape of U+2028 in a regex
-// literal into a raw line separator, which ends the literal
+/** Characters never put raw into a message: the spec layer's set, and lone surrogates (a cut can split a pair). */
 const UNSAFE_MESSAGE_CHARACTERS = new RegExp(
-  '[\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069]' +
-    '|[\\ud800-\\udbff](?![\\udc00-\\udfff])|(?<![\\ud800-\\udbff])[\\udc00-\\udfff]',
+  `[${UNSAFE_CHARACTER_CLASS}]|[\\ud800-\\udbff](?![\\udc00-\\udfff])|(?<![\\ud800-\\udbff])[\\udc00-\\udfff]`,
   'g',
 );
 
@@ -477,6 +472,11 @@ export class Validator {
       }
     }
 
+    this.validateFieldTypes(doc, ROOT_FIELD_TYPES, '', context);
+    this.validateFieldTypes(doc.info, INFO_FIELD_TYPES, '/info', context);
+    this.validateEntries(ownProperty(doc, 'servers'), '/servers', context, SERVER_FIELD_TYPES);
+    this.validateEntries(ownProperty(doc, 'security'), '/security', context);
+
     // Check paths
     if (!doc.paths || Object.keys(doc.paths).length === 0) {
       warnings.push({
@@ -553,6 +553,50 @@ export class Validator {
     };
   }
 
+  /** `INVALID_FIELD_TYPE` for each field of `object` that is present with another type than `types` gives it. */
+  private validateFieldTypes(
+    object: unknown,
+    types: Readonly<Record<string, FieldType>>,
+    pointer: string,
+    context: ValidationContext,
+  ): void {
+    for (const [field, type] of Object.entries(types)) {
+      const value = ownProperty(object, field);
+      // A falsy value reads as absent, to generation and to the checks for a missing field
+      if (!value || hasFieldType(value, type)) continue;
+      context.errors.push({
+        message: `${field} must be ${FIELD_TYPE_NAMES[type]}, found ${describeValue(value)}`,
+        path: appendPointer(pointer, field),
+        code: 'INVALID_FIELD_TYPE',
+      });
+    }
+  }
+
+  /**
+   * `INVALID_FIELD_TYPE` for each entry of a list or map that is not an object (a server, a Security Requirement,
+   * a response; a map's extensions hold any value), and for each of its fields `entryTypes` names.
+   */
+  private validateEntries(
+    entries: unknown,
+    pointer: string,
+    context: ValidationContext,
+    entryTypes: Readonly<Record<string, FieldType>> = {},
+  ): void {
+    if (!isSpecObject(entries) && !Array.isArray(entries)) return;
+    for (const [key, entry] of Object.entries(entries)) {
+      if (key.startsWith('x-') && !Array.isArray(entries)) continue;
+      if (!isSpecObject(entry)) {
+        context.errors.push({
+          message: `Each entry must be an object, found ${describeValue(entry)}`,
+          path: appendPointer(pointer, key),
+          code: 'INVALID_FIELD_TYPE',
+        });
+      } else {
+        this.validateFieldTypes(entry, entryTypes, appendPointer(pointer, key), context);
+      }
+    }
+  }
+
   /**
    * `INVALID_SECURITY_SCHEME` for a scheme whose `type`, or an `apiKey` scheme whose `in` or `name`, the declared
    * version does not define (`SpecProfile.securitySchemeTypes`, `apiKeyLocations`), compared exactly: the
@@ -577,7 +621,7 @@ export class Validator {
    * external or dangling references.
    */
   private resolveParameterRef(param: any, context: ValidationContext): any {
-    if (!param || typeof param !== 'object' || !('$ref' in param)) return param;
+    if (!isReferenceObject(param)) return param;
     const match = context.parameterRef.exec(String(param.$ref));
     if (!match) return undefined;
     const name = match[1].replace(/~1/g, '/').replace(/~0/g, '~');
@@ -632,6 +676,9 @@ export class Validator {
         }
       }
       if (!isSpecObject(pathItem)) continue;
+
+      this.validateFieldTypes(pathItem, PATH_ITEM_FIELD_TYPES, pointer, context);
+      this.validateEntries(pathItem['servers'], appendPointer(pointer, 'servers'), context, SERVER_FIELD_TYPES);
 
       // Operation fields the declared version does not define: not read, reported
       warnings.push(...skippedOperationDiagnostics(pathItem, context.layout, context.version, pointer).map(toFinding));
@@ -691,6 +738,11 @@ export class Validator {
       entry.source === 'fixed' ? `${legacyBase}/${method}` : `${legacyBase}/additionalOperations/${legacyKey(method)}`;
     const pointer = operationPointer(path, entry);
     const label = operationLabel(method, path);
+    this.validateFieldTypes(operation, OPERATION_FIELD_TYPES, pointer, context);
+    for (const field of ['servers', 'security', 'responses']) {
+      const entryTypes = field === 'servers' ? SERVER_FIELD_TYPES : {};
+      this.validateEntries(ownProperty(operation, field), appendPointer(pointer, field), context, entryTypes);
+    }
 
     // Check for operationId
     if (!operation.operationId) {
@@ -900,9 +952,15 @@ export class Validator {
 
       // Reference Objects are opaque until dereferenced (initialize() resolves
       // them before its validation pass) — structural checks don't apply
-      if ('$ref' in param) {
-        continue;
+      if (isReferenceObject(param)) continue;
+      if (param['$ref'] !== undefined) {
+        errors.push({
+          message: `A Reference Object's $ref must be a string, found ${describeValue(param['$ref'])}`,
+          path: appendPointer(pointer, i, '$ref'),
+          code: 'INVALID_PARAMETER',
+        });
       }
+      this.validateFieldTypes(param, PARAMETER_FIELD_TYPES, appendPointer(pointer, i), context);
 
       // A number or boolean name (an unquoted YAML `2024`) is read as its text, with a warning;
       // `String()` is never applied to an object, whose text can throw and is no name to send
@@ -926,6 +984,15 @@ export class Validator {
       }
 
       const location = param['in'];
+      // A header or cookie name is sent as written: an HTTP token (RFC 9110, RFC 6265 cookie-name)
+      const sentAsWritten = location === 'header' || location === 'cookie';
+      if (sentAsWritten && nameRead.kind !== 'invalid' && !isHttpToken(nameRead.name)) {
+        errors.push({
+          message: `A ${location} parameter name must be an HTTP token, found ${describeValue(nameRead.name)}`,
+          path: appendPointer(pointer, i, 'name'),
+          code: 'INVALID_PARAMETER_NAME',
+        });
+      }
       if (!location) {
         errors.push({
           message: 'Parameter missing "in" field',
@@ -1015,6 +1082,44 @@ function pathTemplateProblem(path: string): string | undefined {
   if (!/^(?:[^{}]|\{[^{}]+\})*$/.test(path)) return 'has a `{` or `}` that is not part of a `{name}` template expression';
   return undefined;
 }
+
+/** The JSON type a field must have, as the official schemas require and generation reads it */
+type FieldType = 'array' | 'object' | 'string' | 'boolean' | 'schema';
+
+const FIELD_TYPE_NAMES: Readonly<Record<FieldType, string>> = {
+  array: 'an array',
+  object: 'an object',
+  string: 'a string',
+  boolean: 'a boolean',
+  schema: 'a Schema Object or a boolean',
+};
+
+function hasFieldType(value: unknown, type: FieldType): boolean {
+  if (type === 'array') return Array.isArray(value);
+  if (type === 'object') return isSpecObject(value);
+  if (type === 'schema') return typeof value === 'boolean' || isSpecObject(value);
+  return typeof value === type;
+}
+
+const ROOT_FIELD_TYPES = { servers: 'array', security: 'array' } as const;
+const SERVER_FIELD_TYPES = { url: 'string' } as const;
+const INFO_FIELD_TYPES = { title: 'string', version: 'string' } as const;
+const PATH_ITEM_FIELD_TYPES = { parameters: 'array', servers: 'array' } as const;
+const OPERATION_FIELD_TYPES = {
+  operationId: 'string',
+  parameters: 'array',
+  servers: 'array',
+  security: 'array',
+  responses: 'object',
+  deprecated: 'boolean',
+} as const;
+// `content` has its own warning, `INVALID_PARAMETER_CONTENT`
+const PARAMETER_FIELD_TYPES = {
+  required: 'boolean',
+  description: 'string',
+  deprecated: 'boolean',
+  schema: 'schema',
+} as const;
 
 /**
  * An operation's parameters merged with its path item's as generation merges

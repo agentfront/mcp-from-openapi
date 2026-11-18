@@ -93,7 +93,8 @@ export type AuthType = 'apiKey' | 'http' | 'oauth2' | 'openIdConnect' | 'mutualT
  * Helper to check if an object is a ReferenceObject
  */
 export function isReferenceObject(obj: any): obj is ReferenceObject {
-  return obj && typeof obj === 'object' && '$ref' in obj;
+  // A `$ref` that is not a string refers to nothing: the object is read as what it otherwise is
+  return Boolean(obj) && typeof obj === 'object' && typeof obj.$ref === 'string';
 }
 
 /**

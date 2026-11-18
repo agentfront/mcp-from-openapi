@@ -216,9 +216,9 @@ Errors (`valid: false`):
 | `INVALID_PATH_FORMAT` | A path does not start with `/` |
 | `NO_RESPONSES` | An operation has no `responses` (required in Swagger 2.0 and 3.0 only) or has an empty `responses` (any version) |
 | `MISSING_PATH_PARAMETER` | A path template variable has no matching `in: path` parameter |
-| `INVALID_PARAMETER` | An entry of a `parameters` list is not an object |
+| `INVALID_PARAMETER` | An entry of a `parameters` list is not an object, or has a `$ref` that is not a string (only a string `$ref` makes a Reference Object) |
 | `MISSING_PARAMETER_NAME`, `MISSING_PARAMETER_IN` | A parameter has no `name` or no `in` |
-| `INVALID_PARAMETER_NAME` | A parameter's `name` is an array or an object (a number or a boolean is read as its text, with a `PARAMETER_NAME_NOT_STRING` warning). Its `path` is a JSON Pointer |
+| `INVALID_PARAMETER_NAME` | A `header` or `cookie` parameter's `name` is not an HTTP token (it is sent as written), or a parameter's `name` is an array or an object (a number or a boolean is read as its text, with a `PARAMETER_NAME_NOT_STRING` warning). Its `path` is a JSON Pointer |
 | `INVALID_BASE_PATH` | Swagger 2.0: `basePath` does not start with `/`, or cannot be used in a URL (not a string, or holds `{`, `}`, whitespace, `?`, `#`, a backslash or a `.` or `..` segment). Its `path` is `/basePath` |
 | `INVALID_PARAMETER_IN` | `in` is not a location of the declared version (Swagger 2.0: `path`, `query`, `header`, `formData`, `body`; 3.0 and 3.1: `path`, `query`, `header`, `cookie`; 3.2 adds `querystring`) |
 | `PATH_PARAMETER_NOT_REQUIRED` | An `in: path` parameter is not `required: true` (also in Swagger 2.0, where the conversion would otherwise read it as required) |
@@ -236,6 +236,7 @@ Errors (`valid: false`):
 | `INVALID_METHOD_TOKEN` | An `additionalOperations` key is not an HTTP method token (RFC 9110) |
 | `DUPLICATE_FIXED_METHOD` | An `additionalOperations` key is the upper-case name of a method that has its own field (`GET`, `QUERY`) |
 | `INVALID_SECURITY_SCHEME` | The scheme map (`components.securitySchemes`, Swagger 2.0: `securityDefinitions`) is present but not a map, or a security scheme (Swagger 2.0: definition) has a `type` the declared version does not define, or an `apiKey` scheme has an `in` it does not define or no `name`; values compare exactly (Swagger 2.0: `basic`, `apiKey`, `oauth2`, in `header`/`query`; 3.0: `apiKey`, `http`, `oauth2`, `openIdConnect`, in `header`/`query`/`cookie`; 3.1 and 3.2 add `mutualTLS`) |
+| `INVALID_FIELD_TYPE` | A field generation reads has another type than the official schema gives it: `parameters`, `servers` and `security` must be arrays, `responses` an object, `operationId`, `info.title`, `info.version`, a server `url` and a parameter `description` strings, `deprecated` and a parameter `required` booleans, a parameter `schema` a Schema Object or a boolean; each server, Security Requirement and response must be an object (a response map's `x-` extensions hold any value). A falsy value reads as absent, as generation reads it |
 
 Warnings:
 

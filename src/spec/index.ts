@@ -15,6 +15,7 @@ export {
   DIAGNOSTIC_KEY_MAX_LENGTH,
   MAX_POINTER_SEGMENT_LENGTH,
   POINTER_TRUNCATION_MARKER,
+  UNSAFE_CHARACTER_CLASS,
   appendPointer,
   describeValue,
   diagnosticKey,

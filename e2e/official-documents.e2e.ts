@@ -399,9 +399,9 @@ const VALIDATOR_VERDICTS: Record<SchemaVersion, ValidatorVerdict[]> = {
     },
     {
       document: 'servers',
-      rejectedByOurValidator: false,
-      reason:
-        '`servers` is an object, not an array: the validator only tests that `servers` is present and its `length` is not 0, which an object passes.',
+      rejectedByOurValidator: true,
+      code: 'INVALID_FIELD_TYPE',
+      reason: '`servers` is an object, not an array.',
     },
     {
       document: 'unknown_container',
@@ -552,9 +552,9 @@ const VALIDATOR_VERDICTS: Record<SchemaVersion, ValidatorVerdict[]> = {
     },
     {
       document: 'servers',
-      rejectedByOurValidator: false,
-      reason:
-        '`servers` is an object, not an array: the validator only tests that `servers` is present and its `length` is not 0, which an object passes.',
+      rejectedByOurValidator: true,
+      code: 'INVALID_FIELD_TYPE',
+      reason: '`servers` is an object, not an array.',
     },
     {
       document: 'unknown_container',

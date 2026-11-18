@@ -1847,7 +1847,8 @@ describe('OpenAPIToolGenerator - Additional Coverage', () => {
         },
       };
 
-      const generator = await OpenAPIToolGenerator.fromJSON(openapi);
+      // Validation refuses a security that is not a list (INVALID_FIELD_TYPE): generation reads it with validate: false
+      const generator = await OpenAPIToolGenerator.fromJSON(openapi, { validate: false });
       const tools = await generator.generateTools();
 
       expect(tools.map((t) => t.name)).toEqual(['createUser']);

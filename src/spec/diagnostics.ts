@@ -125,14 +125,21 @@ export const SPEC_DIAGNOSTIC_CODES = Object.freeze({
 export type SpecDiagnosticCode = (typeof SPEC_DIAGNOSTIC_CODES)[keyof typeof SPEC_DIAGNOSTIC_CODES];
 
 /**
- * Characters never put raw into a diagnostic: C0 controls, DEL and C1
- * controls (which include the single-byte CSI terminals act on), the line and
- * paragraph separators, and the bidirectional formatting characters.
+ * The characters never put raw into a diagnostic or a message, as a regular
+ * expression character class: C0 controls, DEL and C1 controls (which include
+ * the single-byte CSI terminals act on), the line and paragraph separators,
+ * the bidirectional formatting characters (U+061C, U+200E, U+200F,
+ * U+202A-U+202E, U+2066-U+2069) and the invisible ones (U+200B-U+200D,
+ * U+2060, U+FEFF). A string, so no compiler turns an escaped U+2028 into a
+ * raw line separator, which would end a regular expression literal.
  */
-const UNSAFE_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+export const UNSAFE_CHARACTER_CLASS =
+  '\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200b-\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2060\\u2066-\\u2069\\ufeff';
+
+const UNSAFE_CHARACTERS = new RegExp(`[${UNSAFE_CHARACTER_CLASS}]`, 'g');
 
 /** One UTF-16 code unit that is unsafe, or a surrogate (a lone one, once pairs are taken out). */
-const UNSAFE_CODE_UNIT = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ud800-\udfff]/;
+const UNSAFE_CODE_UNIT = new RegExp(`[${UNSAFE_CHARACTER_CLASS}\\ud800-\\udfff]`);
 
 const escapeCodeUnit = (character: string): string =>
   `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`;

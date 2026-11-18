@@ -1242,9 +1242,9 @@ describe('version-aware validation (issue #55)', () => {
       ]);
     });
 
-    it('ignores parameters that are not a list, and never resolves references through the prototype', async () => {
+    it('refuses parameters that are not a list, and never resolves references through the prototype', async () => {
       expect(await errorCodes(doc('3.0.3', { '/a': { get: { operationId: 'a', responses: ok, parameters: {} } } }))).toEqual(
-        [],
+        ['INVALID_FIELD_TYPE'],
       );
       // `#/components/parameters/constructor` is dangling: the coverage check is deferred, not fed Object's constructor
       const result = await validate(

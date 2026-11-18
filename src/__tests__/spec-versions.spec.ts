@@ -941,6 +941,7 @@ describe('the spec barrel', () => {
       'MAX_POINTER_SEGMENT_LENGTH',
       'POINTER_TRUNCATION_MARKER',
       'SPEC_DIAGNOSTIC_CODES',
+      'UNSAFE_CHARACTER_CLASS',
       'appendPointer',
       'describeValue',
       'diagnosticKey',
