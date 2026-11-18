@@ -136,6 +136,14 @@ describe('overlay targets with recursive descent', () => {
     expect(outcome instanceof RangeError).toBe(false);
     if (outcome instanceof Error) expect(outcome).toBeInstanceOf(OverlayError);
   });
+
+  it('refuses a document that is not plain JSON without quoting it', () => {
+    const document: Record<string, unknown> = { openapi: '3.0.3' };
+    document['\u202Eloop'] = document;
+    expect(() => applyOverlay(document, overlay('$.openapi'))).toThrow(
+      new OverlayError('The document cannot be copied to apply the overlay: it holds a cycle, a value JSON cannot hold, or nesting too deep', {}),
+    );
+  });
 });
 
 describe('excludeMethods names an additional method in any case', () => {
