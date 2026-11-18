@@ -26,7 +26,7 @@ import type {
   SchemaOrBoolean,
   StandardMethod,
 } from './spec';
-import { SPEC_DIAGNOSTIC_CODES } from './spec';
+import { SPEC_DIAGNOSTIC_CODES, setOwnProperty } from './spec';
 import { SchemaError } from './errors';
 import { isExtensionKey, referenceAt } from './reference-sites';
 
@@ -322,7 +322,8 @@ function convertSchema(schema: SchemaObject | ReferenceObject, depth: number, st
         state,
         frames,
       );
-      if (value !== PENDING) (slots[at] as Record<string, unknown>)[slots[at + 1] as string] = value;
+      // A child's key can be a document's `__proto__`: defined, never assigned
+      if (value !== PENDING) setOwnProperty(slots[at] as object, slots[at + 1] as string, value);
       continue;
     }
     frames.pop();
@@ -330,7 +331,7 @@ function convertSchema(schema: SchemaObject | ReferenceObject, depth: number, st
     const parent = frames[frames.length - 1];
     if (!parent) return result;
     const at = parent.next - 4;
-    (parent.slots[at] as Record<string, unknown>)[parent.slots[at + 1] as string] = result;
+    setOwnProperty(parent.slots[at] as object, parent.slots[at + 1] as string, result);
   }
 }
 

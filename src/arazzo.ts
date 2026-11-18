@@ -27,6 +27,7 @@ import {
   listOperations,
   ownProperty,
   resolveOperationLayout,
+  setOwnProperty,
   toStandardMethod,
   wireMethod,
   type SpecDiagnostic,
@@ -862,7 +863,7 @@ function parseOutputs(outputs: Record<string, string> | undefined, path: string)
   if (!outputs) return undefined;
   const parsed: Record<string, RuntimeExpressionAST> = {};
   for (const [name, expression] of Object.entries(outputs)) {
-    parsed[name] = parseRuntimeExpression(expression, `${path}/${name}`);
+    setOwnProperty(parsed, name, parseRuntimeExpression(expression, `${path}/${name}`));
   }
   return parsed;
 }
@@ -1091,7 +1092,7 @@ function deriveOutputsSchema(
   for (const [name, ast] of Object.entries(outputs)) {
     // Shared with the step schemas of the IR: the tool gets the fresh, budgeted tree `truncateDepth` makes of it
     const derived = deriveOutputSchema(ast, stepMap, inputSchema, 0);
-    properties[name] = { ...derived, description: `Arazzo output: ${ast.raw}` };
+    setOwnProperty(properties, name, { ...derived, description: `Arazzo output: ${ast.raw}` });
   }
   // No `required`: outputs exist only after successful execution
   return { type: 'object', properties };

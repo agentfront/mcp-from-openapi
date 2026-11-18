@@ -17,7 +17,7 @@ import type {
   SchemaConversionOptions,
 } from './types';
 import { toJsonSchema, isReferenceObject, isPresentSchema } from './types';
-import { diagnosticKey, isSpecObject, ownProperty } from './spec';
+import { diagnosticKey, isSpecObject, ownProperty, setOwnProperty } from './spec';
 import { GenerationError } from './errors';
 import { classifyMediaType } from './media-type';
 
@@ -420,7 +420,7 @@ export class ParameterResolver {
             ? originalName
             : uniqueKey(this.namingStrategy.conflictResolver(originalName, param.location, index), taken);
 
-        properties[inputKey] = this.buildParameterSchema(param);
+        setOwnProperty(properties, inputKey, this.buildParameterSchema(param));
         if (param.required) {
           required.push(inputKey);
         }
@@ -433,7 +433,7 @@ export class ParameterResolver {
       const inputKey = uniqueKey(entry.inputKey, taken);
       mapper.push({ ...entry, inputKey });
       if (schema) {
-        properties[inputKey] = schema;
+        setOwnProperty(properties, inputKey, schema);
         if (entry.required) required.push(inputKey);
       }
     }
@@ -539,7 +539,7 @@ export class ParameterResolver {
         // boolean `false` property into `{ not: {} }`, which keeps it as an
         // input that accepts no value)
         if (typeof propSchema === 'object') {
-          const propEncoding = encoding?.[propName];
+          const propEncoding = ownProperty(encoding, propName) as Record<string, unknown> | undefined;
           // Distribute media-type-level whole-body examples onto the
           // flattened properties: { example: { name: 'Ada' } } -> name: ['Ada']
           const propExamples = mediaExamples
@@ -950,7 +950,7 @@ function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'union'
   }
 
   const properties: Record<string, JsonSchema> = {};
-  for (const key of keys) properties[key] = values.get(key) as JsonSchema;
+  for (const key of keys) setOwnProperty(properties, key, values.get(key));
   return { properties, required };
 }
 

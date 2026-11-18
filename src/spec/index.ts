@@ -35,6 +35,7 @@ export {
   isStandardMethod,
   listOperations,
   ownProperty,
+  setOwnProperty,
   toStandardMethod,
   wireMethod,
 } from './operations';

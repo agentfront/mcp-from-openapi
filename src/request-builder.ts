@@ -1,6 +1,6 @@
 import type { McpOpenAPITool, ParameterLocation, ParameterMapper } from './types';
 import { RequestBuildError } from './errors';
-import { describeValue, isDotSegment, isHttpToken, isRefusedMethod, wireMethod } from './spec';
+import { describeValue, isDotSegment, isHttpToken, isRefusedMethod, setOwnProperty, wireMethod } from './spec';
 import {
   FORM_URLENCODED,
   JSON_MEDIA_TYPE,
@@ -267,7 +267,7 @@ function createRecord<T>(): Record<string, T> {
 function toPlainRecord<T>(source: Record<string, T>): Record<string, T> {
   const plain: Record<string, T> = {};
   for (const key of Object.keys(source)) {
-    Object.defineProperty(plain, key, { value: source[key], writable: true, enumerable: true, configurable: true });
+    setOwnProperty(plain, key, source[key]);
   }
   return plain;
 }
@@ -1498,7 +1498,7 @@ export function buildHttpRequest(
       // Security entries apply only when a value was provided; they are never
       // treated as required here (frameworks resolve credentials separately).
       if (value === undefined || value === null) continue;
-      const formatted = formatSecurityValue(mapper, String(value));
+      const formatted = formatSecurityValue(mapper, primitiveString(value, mapper.key, mapper.type));
       if (mapper.type === 'header') {
         assertHeaderSafe(mapper.key, formatted);
         headers[mapper.key] = formatted;
@@ -1630,8 +1630,7 @@ export function buildHttpRequest(
         } else {
           bodyFields.set(mapper.key, mapper);
           if (bodyObject === undefined) bodyObject = {};
-          // defined, not assigned: a property named `__proto__` is a key
-          Object.defineProperty(bodyObject, mapper.key, { value, writable: true, enumerable: true, configurable: true });
+          setOwnProperty(bodyObject, mapper.key, value);
         }
         break;
       }
@@ -1713,6 +1712,8 @@ export function buildHttpRequest(
   let body: unknown;
   if (hasBody && rawBody !== undefined) {
     const ct = contentType!;
+    // A key of the document's `content` map: it is sent as a header value
+    assertHeaderSafe(contentTypeKey, ct);
     if (binaryBody) {
       // Raw binary: pass through untouched (string, Uint8Array, Blob, ...)
       body = rawBody;
@@ -1756,11 +1757,11 @@ export function buildHttpRequest(
       // (unlike a `content` parameter's media type, which is classified by
       // its essence): `application/json; charset=utf-8` falls to the branch
       // below, which also writes an object as JSON text
-      body = JSON.stringify(rawBody);
+      body = jsonText(rawBody, 'body', 'body');
       headers[contentTypeKey] = ct;
     } else {
       // text/plain, application/xml, ... : caller-provided string content
-      body = isPlainObject(rawBody) || Array.isArray(rawBody) ? JSON.stringify(rawBody) : String(rawBody);
+      body = typeof rawBody === 'object' && rawBody !== null ? jsonText(rawBody, 'body', 'body') : String(rawBody);
       headers[contentTypeKey] = ct;
     }
   }

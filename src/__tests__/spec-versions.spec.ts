@@ -959,6 +959,7 @@ describe('the spec barrel', () => {
       'isStandardMethod',
       'listOperations',
       'ownProperty',
+      'setOwnProperty',
       'toStandardMethod',
       'wireMethod',
     ],

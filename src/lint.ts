@@ -2,6 +2,7 @@ import type { ParameterObject } from './types';
 import { isReferenceObject } from './types';
 import { analyzeParameters } from './parameter-resolver';
 import { readStatusKey } from './response-builder';
+import { messageText, operationLabel } from './validator';
 import {
   MAX_CONVERSION_ENTRIES,
   detectSpecVersion,
@@ -181,7 +182,10 @@ const LISTED_NAMES = 10;
 
 /** `names` for a message, at most `LISTED_NAMES` of them: `a, b, c and 7 more` */
 function listNames(names: string[]): string {
-  const listed = names.slice(0, LISTED_NAMES).join(', ');
+  const listed = names
+    .slice(0, LISTED_NAMES)
+    .map((name) => messageText(name))
+    .join(', ');
   return names.length > LISTED_NAMES ? `${listed} and ${names.length - LISTED_NAMES} more` : listed;
 }
 
@@ -268,7 +272,8 @@ export function lintDocument(document: object): LintResult {
 
     for (const { method, operation } of listOperations(pathItem, { layout }).operations) {
       const wire = wireMethod(method);
-      const label = `${wire} ${pathStr}`;
+      // Bounded and escaped, as every finding quotes the document's text
+      const label = operationLabel(method, pathStr);
 
       // operationId presence + duplicates
       const operationId = typeof operation.operationId === 'string' ? operation.operationId : '';
@@ -288,7 +293,7 @@ export function lintDocument(document: object): LintResult {
           findings.push({
             severity: 'info',
             code: 'long-operation-id',
-            message: `operationId '${operationId.slice(0, 40)}…' exceeds 64 characters and will be truncated with a hash suffix.`,
+            message: `operationId '${messageText(operationId, 40)}' exceeds 64 characters and will be truncated with a hash suffix.`,
             path: label,
             hint: 'Shorten the operationId below 64 characters to keep tool names readable.',
           });
@@ -428,7 +433,7 @@ export function lintDocument(document: object): LintResult {
       findings.push({
         severity: 'error',
         code: 'duplicate-operation-id',
-        message: `operationId '${operationId}' is used by ${labels.length} operations: ${listNames(labels)}.`,
+        message: `operationId '${messageText(operationId)}' is used by ${labels.length} operations: ${listNames(labels)}.`,
         path: labels[0],
         hint: 'Make operationIds unique — duplicates force hash-suffixed tool names.',
       });

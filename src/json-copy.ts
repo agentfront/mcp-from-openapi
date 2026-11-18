@@ -1,5 +1,6 @@
 import { ParseError, SchemaError } from './errors';
 import { referenceAt } from './reference-sites';
+import { setOwnProperty } from './spec';
 
 /**
  * A node budget that every value copied for one schema, or one tool, counts
@@ -234,14 +235,7 @@ function copyTree(root: object, budget: CopyBudget, options: CopyOptions): unkno
       (frame.out as unknown[])[index] = value;
       return;
     }
-    const key = frame.keys[index];
-    if (key === '__proto__') {
-      // An own `__proto__` key (JSON.parse creates one); assigning it would
-      // set the copy's prototype instead
-      Object.defineProperty(frame.out, key, { value, enumerable: true, writable: true, configurable: true });
-    } else {
-      (frame.out as Record<string, unknown>)[key] = value;
-    }
+    setOwnProperty(frame.out, frame.keys[index], value);
   };
 
   push(root);

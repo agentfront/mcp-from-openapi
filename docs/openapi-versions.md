@@ -1519,7 +1519,6 @@ What the library does not do yet. These exist today and apply as stated; each is
 - A Security Requirement that names a scheme by the URI of another document is dropped (`UNRESOLVED_SECURITY_SCHEME`); schemes of other documents are never read.
 - A request body media type that carries parameters is matched whole. `application/x-www-form-urlencoded; charset=utf-8` is not recognized as a form, so an object body is sent as JSON text under that `content-type` header (`{"a":"x y","n":1}`); `multipart/form-data; boundary=x` is sent the same way, as JSON text, with that header. `application/json; charset=utf-8` happens to work, because an object is written as JSON anyway. Media types of `content` parameters and whole queries are compared without their parameters and are not affected.
 - A cookie parameter with the default `form` style is sent without percent-encoding, where OpenAPI 3.2.1 describes percent-encoded form cookies: a value with a space or `;` throws a `RequestBuildError` instead of being encoded, and `%` and non-ASCII characters up to U+00FF are sent as they are.
-- A parameter named `__proto__` gets a mapper entry (and a `required` entry, when it is required) but no property in `inputSchema.properties`.
 
 ---
 

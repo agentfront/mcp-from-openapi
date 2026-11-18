@@ -51,6 +51,7 @@ import {
   readParameterName,
   resolveOperationLayout,
   securitySchemeProblem,
+  setOwnProperty,
   toStandardMethod,
   MAX_CONVERSION_ENTRIES,
   upgradeSwagger2,
@@ -192,19 +193,6 @@ function matchesMethodFilter(filter: readonly string[], method: string, addition
   );
 }
 
-/**
- * Sets `key` as an own data property. Plain assignment of the key
- * `__proto__` replaces the object's prototype instead, so a document key
- * `__proto__` (which `JSON.parse` creates as an own property) would vanish
- * and its value's fields would be inherited by the object.
- */
-function setOwnProperty(target: Record<string, unknown>, key: string, value: unknown): void {
-  if (key === '__proto__') {
-    Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
-  } else {
-    target[key] = value;
-  }
-}
 
 /** A validation warning as a diagnostic. */
 function fromValidationWarning(warning: ValidationWarning): SpecDiagnostic {
@@ -501,6 +489,16 @@ async function readLocalFile(reference: string): Promise<Buffer | RefRefusal> {
           : messageText(String(message), REF_TEXT_MAX_LENGTH),
     };
   }
+}
+
+/**
+ * The message of an error a load met, for a load error: a parser quotes the document, so the text is bounded and
+ * escaped, and a YAML code frame (after the first blank line) is left out.
+ */
+function parserMessage(error: unknown): string {
+  /* c8 ignore next -- every parser and reader throws an Error */
+  const message = error instanceof Error ? error.message : String(error);
+  return messageText(message.split('\n\n', 1)[0], DEREFERENCE_ERROR_MAX_LENGTH);
 }
 
 /** What a reference error shows for the working directory, which tells a document's author where the host runs */
@@ -1359,8 +1357,7 @@ export class OpenAPIToolGenerator {
       if (error instanceof LoadError || error instanceof OverlayError) {
         throw error;
       }
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      throw new LoadError(`Failed to load OpenAPI spec from URL: ${errorMessage}`, {
+      throw new LoadError(`Failed to load OpenAPI spec from URL: ${parserMessage(error)}`, {
         url,
         originalError: error,
       });
@@ -1405,9 +1402,7 @@ export class OpenAPIToolGenerator {
       if (error instanceof OverlayError || error instanceof LoadError) {
         throw error;
       }
-      /* c8 ignore next */
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      throw new LoadError(`Failed to load OpenAPI spec from file: ${errorMessage}`, {
+      throw new LoadError(`Failed to load OpenAPI spec from file: ${parserMessage(error)}`, {
         filePath,
         originalError: error,
       });
@@ -1426,9 +1421,7 @@ export class OpenAPIToolGenerator {
       if (error instanceof OverlayError || error instanceof LoadError) {
         throw error;
       }
-      /* c8 ignore next */
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      throw new ParseError(`Failed to parse YAML: ${errorMessage}`, {
+      throw new ParseError(`Failed to parse YAML: ${parserMessage(error)}`, {
         originalError: error,
       });
     }

@@ -2,6 +2,7 @@ import type { JSONSchema } from 'zod/v4/core';
 import { SchemaError } from './errors';
 import { chargeBudget, copyJsonValue, mapSlots, type CopyBudget } from './json-copy';
 import { isExtensionKey, referenceAt } from './reference-sites';
+import { setOwnProperty } from './spec';
 
 /** JSON Schema type from Zod v4 */
 type JsonSchema = JSONSchema.JSONSchema;
@@ -585,7 +586,7 @@ export class SchemaBuilder {
         chargeBudget(budget);
         const mapped: Record<string, JsonSchema> = {};
         for (const [name, sub] of Object.entries(value as Record<string, JsonSchema>)) {
-          mapped[name] = this.truncateDepthRecursive(sub, childDepth, maxDepth, budget);
+          setOwnProperty(mapped, name, this.truncateDepthRecursive(sub, childDepth, maxDepth, budget));
         }
         copyRecord[key] = mapped;
       } else if (kind === 'schema' && !Array.isArray(value)) {
@@ -632,7 +633,7 @@ export class SchemaBuilder {
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
         const mapped: Record<string, JsonSchema> = {};
         for (const [name, sub] of Object.entries(value as Record<string, JsonSchema>)) {
-          mapped[name] = this.walkCopy(sub, visit, seen);
+          setOwnProperty(mapped, name, this.walkCopy(sub, visit, seen));
         }
         copy[key] = mapped;
       }

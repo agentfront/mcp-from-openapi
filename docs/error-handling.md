@@ -34,7 +34,7 @@ try {
   const generator = await OpenAPIToolGenerator.fromURL('https://example.com/bad-url');
 } catch (error) {
   if (error instanceof LoadError) {
-    console.error(error.message);     // "Failed to load OpenAPI spec from URL: ..."
+    console.error(error.message);     // "Failed to load OpenAPI spec from URL: ..." (the parser's text, escaped)
     console.error(error.context?.url); // "https://example.com/bad-url"
     console.error(error.context?.status); // 404
   }

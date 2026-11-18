@@ -67,7 +67,7 @@ import {
   type SpecDiagnostic,
   type SpecDiagnosticSeverity,
 } from './diagnostics';
-import { isSpecObject, listOperations, ownProperty, type OperationEntry } from './operations';
+import { isSpecObject, listOperations, ownProperty, setOwnProperty, type OperationEntry } from './operations';
 import { parameterNameNotStringDiagnostic, readParameterName } from './parameters';
 import type { OAS30 } from './types';
 import { SPEC_FEATURES, SPEC_PROFILES, isSwagger2, listSkippedNewerOperations } from './versions';
@@ -442,28 +442,17 @@ function trailPointer(trail: Trail): string {
     : appendPointer(trail.root, POINTER_TRUNCATION_MARKER, ...segments);
 }
 
-/**
- * Sets an own enumerable property, `__proto__` included (a plain assignment
- * would set the prototype instead).
- */
-function setEntry(target: SpecRecord, key: string, value: unknown): void {
-  if (key === '__proto__') {
-    Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
-  } else {
-    target[key] = value;
-  }
-}
 
 /** Copies `key` from `source` to `target` when `source` owns it with a value. */
 function copyField(source: SpecRecord, target: SpecRecord, key: string): void {
   const value = ownProperty(source, key);
-  if (value !== undefined) setEntry(target, key, value);
+  if (value !== undefined) setOwnProperty(target, key, value);
 }
 
 /** Copies every `x-` extension of `source` to `target`, by reference. */
 function copyExtensions(source: SpecRecord, target: SpecRecord): void {
   for (const key of Object.keys(source)) {
-    if (key.startsWith('x-')) setEntry(target, key, source[key]);
+    if (key.startsWith('x-')) setOwnProperty(target, key, source[key]);
   }
 }
 
@@ -1032,7 +1021,7 @@ class Swagger2Upgrader {
     const schemas: SpecRecord = {};
     this.forEachEntry(document, 'definitions', (key, value, trail) => {
       if (isSpecObject(value)) {
-        setEntry(schemas, key, this.schemas.rewrite(value, trail));
+        setOwnProperty(schemas, key, this.schemas.rewrite(value, trail));
       } else {
         this.invalid(`A definition must be a Schema Object, found ${describeValue(value)}; it is ignored`, trail);
       }
@@ -1044,7 +1033,7 @@ class Swagger2Upgrader {
       const parameter = this.parseParameter(value, trail);
       if (parameter === undefined) return;
       if (parameter.in === 'body') {
-        setEntry(requestBodies, key, this.body(parameter, consumes, trail));
+        setOwnProperty(requestBodies, key, this.body(parameter, consumes, trail));
       } else if (parameter.in === 'formData') {
         this.report(
           'info',
@@ -1053,20 +1042,20 @@ class Swagger2Upgrader {
           trail,
         );
       } else {
-        setEntry(parameters, key, this.parameter(parameter));
+        setOwnProperty(parameters, key, this.parameter(parameter));
       }
     });
 
     const responses: SpecRecord = {};
     this.forEachEntry(document, 'responses', (key, value, trail) => {
       const response = this.response(value, produces, trail);
-      if (response !== undefined) setEntry(responses, key, response);
+      if (response !== undefined) setOwnProperty(responses, key, response);
     });
 
     const securitySchemes: SpecRecord = {};
     this.forEachEntry(document, 'securityDefinitions', (key, value, trail) => {
       const scheme = this.securityScheme(value, trail);
-      if (scheme !== undefined) setEntry(securitySchemes, key, scheme);
+      if (scheme !== undefined) setOwnProperty(securitySchemes, key, scheme);
     });
 
     const sections: Array<[string, SpecRecord]> = [
@@ -1121,11 +1110,11 @@ class Swagger2Upgrader {
       const item = value[key];
       if (item === undefined) continue;
       if (key.startsWith('x-')) {
-        setEntry(paths, key, item);
+        setOwnProperty(paths, key, item);
         continue;
       }
       const converted = this.pathItem(item, childTrail(trail, key), context);
-      if (converted !== undefined) setEntry(paths, key, converted);
+      if (converted !== undefined) setOwnProperty(paths, key, converted);
     }
     return paths;
   }
@@ -1157,7 +1146,7 @@ class Swagger2Upgrader {
     const pathForms = this.mergeForms(new Map(), shared.forms);
     const item: SpecRecord = {};
     for (const entry of listed.operations) {
-      setEntry(item, entry.method, this.operation(entry, childTrail(trail, entry.method), shared, pathForms, context));
+      setOwnProperty(item, entry.method, this.operation(entry, childTrail(trail, entry.method), shared, pathForms, context));
     }
     if (shared.others.length > 0) item['parameters'] = this.parameterArray(shared.others);
     copyExtensions(value, item);
@@ -1596,7 +1585,7 @@ class Swagger2Upgrader {
     const schema = this.bodySchema(parameter);
     this.charge(consumes.types.length);
     const content: SpecRecord = {};
-    for (const mediaType of consumes.types) setEntry(content, mediaType, { schema });
+    for (const mediaType of consumes.types) setOwnProperty(content, mediaType, { schema });
     const out: SpecRecord = {};
     copyField(parameter.source, out, 'description');
     out['content'] = content;
@@ -1650,7 +1639,7 @@ class Swagger2Upgrader {
     const properties: SpecRecord = {};
     const required: string[] = [];
     fields.forEach((field, index) => {
-      setEntry(properties, field.name, converted[index].schema);
+      setOwnProperty(properties, field.name, converted[index].schema);
       if (converted[index].required) required.push(field.name);
     });
     const schema: SpecRecord = { type: 'object', properties };
@@ -1666,14 +1655,14 @@ class Swagger2Upgrader {
     let encoding: SpecRecord | undefined;
     if (encodings.length > 0) {
       encoding = {};
-      for (const [name, fieldEncoding] of encodings) setEntry(encoding, name, { ...fieldEncoding });
+      for (const [name, fieldEncoding] of encodings) setOwnProperty(encoding, name, { ...fieldEncoding });
     }
     this.charge(mediaTypes.length);
     const content: SpecRecord = {};
     for (const mediaType of mediaTypes) {
       const media: SpecRecord = { schema };
       if (encoding !== undefined) media['encoding'] = encoding;
-      setEntry(content, mediaType.type, media);
+      setOwnProperty(content, mediaType.type, media);
     }
     const out: SpecRecord = { content };
     if (required.length > 0) out['required'] = true;
@@ -1793,11 +1782,11 @@ class Swagger2Upgrader {
       const response = value[key];
       if (response === undefined) continue;
       if (key.startsWith('x-')) {
-        setEntry(out, key, response);
+        setOwnProperty(out, key, response);
         continue;
       }
       const converted = this.response(response, produces, childTrail(trail, key));
-      if (converted !== undefined) setEntry(out, key, converted);
+      if (converted !== undefined) setOwnProperty(out, key, converted);
     }
     return out;
   }
@@ -1829,7 +1818,7 @@ class Swagger2Upgrader {
         used.add(exampleKey);
         media['example'] = (parts.examples as SpecRecord)[exampleKey];
       }
-      if (Object.keys(media).length > 0) setEntry(content, mediaType, media);
+      if (Object.keys(media).length > 0) setOwnProperty(content, mediaType, media);
     });
     if (Object.keys(content).length > 0) this.noteAssumed(produces, trail);
     if (parts.examples !== undefined) this.reportUnusedExamples(parts.examples, used, produces, trail);
@@ -1922,7 +1911,7 @@ class Swagger2Upgrader {
         const header = headersValue[name];
         if (header === undefined) continue;
         const converted = this.header(header, childTrail(headersTrail, name));
-        if (converted !== undefined) setEntry(headers, name, converted);
+        if (converted !== undefined) setOwnProperty(headers, name, converted);
       }
     } else if (headersValue !== undefined) {
       this.invalid(
@@ -2286,31 +2275,31 @@ class SchemaRewriter {
       const value = schema[key];
       switch (key) {
         case 'items':
-          setEntry(target, key, Array.isArray(value) ? {} : result(value));
+          setOwnProperty(target, key, Array.isArray(value) ? {} : result(value));
           break;
         case 'allOf':
         case 'anyOf':
         case 'oneOf':
-          setEntry(target, key, Array.isArray(value) ? value.map(result) : value);
+          setOwnProperty(target, key, Array.isArray(value) ? value.map(result) : value);
           break;
         case 'not':
         case 'additionalProperties':
-          setEntry(target, key, result(value));
+          setOwnProperty(target, key, result(value));
           break;
         case 'properties':
           if (isSpecObject(value)) {
             const properties: SpecRecord = {};
-            for (const name of Object.keys(value)) setEntry(properties, name, result(value[name]));
-            setEntry(target, key, properties);
+            for (const name of Object.keys(value)) setOwnProperty(properties, name, result(value[name]));
+            setOwnProperty(target, key, properties);
           } else {
-            setEntry(target, key, value);
+            setOwnProperty(target, key, value);
           }
           break;
         case 'discriminator':
-          setEntry(target, key, typeof value === 'string' ? { propertyName: value } : value);
+          setOwnProperty(target, key, typeof value === 'string' ? { propertyName: value } : value);
           break;
         case '$ref':
-          setEntry(
+          setOwnProperty(
             target,
             key,
             typeof value === 'string' && value.startsWith(DEFINITIONS_PREFIX)
@@ -2319,12 +2308,12 @@ class SchemaRewriter {
           );
           break;
         case 'x-nullable':
-          if (!convertsNullable) setEntry(target, key, value);
+          if (!convertsNullable) setOwnProperty(target, key, value);
           break;
         case 'additionalItems':
           break;
         default:
-          setEntry(target, key, value);
+          setOwnProperty(target, key, value);
       }
     }
     if (convertsNullable) target['nullable'] = xNullable;
