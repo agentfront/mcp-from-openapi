@@ -143,7 +143,7 @@ const DEFAULT_MAX_TOOL_NAME_LENGTH = 64;
  * almost always succeeds), but finite so a tiny `maxToolNameLength` whose
  * entire name space is exhausted fails loudly instead of looping forever.
  */
-const MAX_NAME_DEDUP_ATTEMPTS = 256;
+export const MAX_NAME_DEDUP_ATTEMPTS = 256;
 
 /**
  * Parameter locations the generator maps to a request (`querystring`, from
@@ -155,14 +155,19 @@ const MAX_NAME_DEDUP_ATTEMPTS = 256;
 const MAPPED_PARAMETER_LOCATIONS: readonly string[] = Object.freeze(['path', 'query', 'querystring', 'header', 'cookie']);
 
 /**
- * Whether `method` (an operation's method as `listOperations` gives it)
- * passes a method filter: a standard method matches in any case (`'GET'`
- * matches `get`), an `additionalOperations` method only exactly as written.
+ * Whether a method filter names `method` (an operation's method as
+ * `listOperations` gives it): a standard method in any case (`'GET'` names
+ * `get`), an `additionalOperations` method exactly as written, or in any case
+ * with `additionalInAnyCase` (an exclusion: a document cannot pass one by
+ * spelling `PURGE` as `Purge`).
  */
-function matchesMethodFilter(filter: readonly string[], method: string): boolean {
+function matchesMethodFilter(filter: readonly string[], method: string, additionalInAnyCase: boolean): boolean {
   const standard = toStandardMethod(method);
+  const additional = additionalInAnyCase ? method.toLowerCase() : method;
   return filter.some((candidate) =>
-    standard === undefined ? candidate === method : toStandardMethod(candidate) === standard,
+    standard === undefined
+      ? (additionalInAnyCase ? candidate.toLowerCase() : candidate) === additional
+      : toStandardMethod(candidate) === standard,
   );
 }
 
@@ -989,6 +994,23 @@ export function fnv1aHex(input: string): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * `name` with a hash of `seed` appended, reseeded (`seed#`) while the result is in `usedNames`; `undefined`
+ * after `MAX_NAME_DEDUP_ATTEMPTS`, since a tiny `maxLength` (1 leaves 16 hex names) can exhaust the name space.
+ */
+export function dedupedToolName(
+  name: string,
+  seed: string,
+  maxLength: number,
+  usedNames: ReadonlySet<string>,
+): string | undefined {
+  for (let attempt = 0, attemptSeed = seed; attempt < MAX_NAME_DEDUP_ATTEMPTS; attempt++, attemptSeed += '#') {
+    const deduped = normalizeToolName(`${name}_${fnv1aHex(attemptSeed)}`, maxLength, attemptSeed);
+    if (!usedNames.has(deduped)) return deduped;
+  }
+  return undefined;
 }
 
 /**
@@ -2141,27 +2163,15 @@ export class OpenAPIToolGenerator {
           // per operation, so the suffixed name is deterministic across runs.
           if (usedNames.has(tool.name)) {
             const maxLength = positiveOr(options.maxToolNameLength, DEFAULT_MAX_TOOL_NAME_LENGTH);
-            // Recheck after renaming: the suffixed name can itself be taken
-            // (e.g. an operationId that mimics a suffixed name, or truncated
-            // hash-only names under tiny caps). Extending the seed reseeds
-            // the hash deterministically until a free name is found — bounded,
-            // because a tiny cap (e.g. 1 = 16 possible hex names) can exhaust
-            // the name space entirely.
-            let seed = `${method} ${pathStr}`;
-            let deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
-            let attempts = 1;
-            while (usedNames.has(deduped)) {
-              if (attempts >= MAX_NAME_DEDUP_ATTEMPTS) {
-                throw new GenerationError(
-                  `Unable to find a unique tool name for "${tool.name}" (${operationLabel(method, pathStr)}) ` +
-                    `within ${MAX_NAME_DEDUP_ATTEMPTS} attempts — the name space under maxToolNameLength=${maxLength} ` +
-                    `is exhausted. Increase maxToolNameLength or rename the operation.`,
-                  { name: tool.name, method, path: pathStr, maxToolNameLength: maxLength },
-                );
-              }
-              seed += '#';
-              deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
-              attempts++;
+            // The suffixed name can itself be taken (an operationId mimicking one, hash-only names under a tiny cap)
+            const deduped = dedupedToolName(tool.name, `${method} ${pathStr}`, maxLength, usedNames);
+            if (deduped === undefined) {
+              throw new GenerationError(
+                `Unable to find a unique tool name for "${tool.name}" (${operationLabel(method, pathStr)}) ` +
+                  `within ${MAX_NAME_DEDUP_ATTEMPTS} attempts — the name space under maxToolNameLength=${maxLength} ` +
+                  `is exhausted. Increase maxToolNameLength or rename the operation.`,
+                { name: tool.name, method, path: pathStr, maxToolNameLength: maxLength },
+              );
             }
             tool = { ...tool, name: deduped };
             // The TypeScript declaration derives its type names from the tool
@@ -3076,10 +3086,10 @@ export class OpenAPIToolGenerator {
     }
 
     // Method filters: a standard method in any case, an additional one as written
-    if (options.includeMethods && !matchesMethodFilter(options.includeMethods, method)) {
+    if (options.includeMethods && !matchesMethodFilter(options.includeMethods, method, false)) {
       return false;
     }
-    if (options.excludeMethods && matchesMethodFilter(options.excludeMethods, method)) {
+    if (options.excludeMethods && matchesMethodFilter(options.excludeMethods, method, true)) {
       return false;
     }
 

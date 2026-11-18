@@ -175,24 +175,26 @@ function isContainer(value: unknown): value is Record<string, unknown> | unknown
   return value !== null && typeof value === 'object';
 }
 
-/** All descendant matches of a node (self excluded), depth-first. */
-function descendants(match: Match): Match[] {
+/**
+ * The matches and all their descendants, depth-first. Each container is
+ * walked once, so nested matches (`$..a..b`) cost no more than the document,
+ * and the walk keeps its own stack, so any depth is walked.
+ */
+function withDescendants(matches: Match[]): Match[] {
   const result: Match[] = [];
-  const walk = (node: unknown): void => {
-    if (!isContainer(node)) return;
-    if (Array.isArray(node)) {
-      node.forEach((item, index) => {
-        result.push({ parent: node, key: index, value: item });
-        walk(item);
-      });
-    } else {
-      for (const [key, value] of Object.entries(node)) {
-        result.push({ parent: node, key, value });
-        walk(value);
-      }
-    }
-  };
-  walk(match.value);
+  const walked = new Set<object>();
+  const stack = [...matches].reverse();
+  while (stack.length > 0) {
+    const match = stack.pop()!;
+    result.push(match);
+    const node = match.value;
+    if (!isContainer(node) || walked.has(node)) continue;
+    walked.add(node);
+    const children: Match[] = Array.isArray(node)
+      ? node.map((item, index) => ({ parent: node, key: index, value: item }))
+      : Object.entries(node).map(([key, value]) => ({ parent: node, key, value }));
+    for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]);
+  }
   return result;
 }
 
@@ -218,7 +220,7 @@ function dedupeMatches(matches: Match[]): Match[] {
 }
 
 function applySegment(matches: Match[], segment: Segment): Match[] {
-  const scope: Match[] = segment.recursive ? matches.flatMap((m) => [m, ...descendants(m)]) : matches;
+  const scope: Match[] = segment.recursive ? withDescendants(matches) : matches;
   const next: Match[] = [];
 
   for (const match of scope) {
@@ -320,8 +322,13 @@ export function applyOverlay<T extends object>(document: T, overlay: OverlayDocu
     throw new OverlayError('Overlay document must have an actions array', {});
   }
 
-  // Overlays run before dereferencing, so the document is JSON-safe
-  const result = JSON.parse(JSON.stringify(document)) as T;
+  // Overlays run before dereferencing, so the document is JSON-safe; one nested too deeply to copy is refused
+  let result: T;
+  try {
+    result = JSON.parse(JSON.stringify(document)) as T;
+  } catch (error: unknown) {
+    throw new OverlayError(`The document cannot be copied to apply the overlay (${String(error)})`, {});
+  }
 
   for (const [index, action] of overlay.actions.entries()) {
     if (!action || typeof action !== 'object' || typeof action.target !== 'string') {

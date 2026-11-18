@@ -37,7 +37,7 @@ await fetch(request.url, {
 | Path styles     | `simple`, `label`, `matrix` — primitives, arrays, and objects, explode both ways                                                 |
 | Headers         | `simple` serialization, RFC 7230 name check, value check (tab, space, visible ASCII, U+0080 to U+00FF; CR/LF/NUL named as injection)  |
 | Cookies         | Folded `Cookie` header with verbatim values, RFC 6265 name/value validation; `form` (the default) and the OpenAPI 3.2 `cookie` style |
-| Reserved names  | A name the input chooses (a form whole query, an exploded `form` object in the query, an exploded `style: cookie` object) never adds or replaces a credential or a sibling parameter |
+| Reserved names  | A name the input chooses (a form whole query, an exploded `form` object in the query, an exploded `style: cookie` object) never adds or replaces a credential or a sibling parameter. It is compared as common servers read it: `api_key[]` and `api_key[x]` are `api_key`, and a credential's name is matched in any case (`API_KEY`) |
 | `allowReserved` | `: / ? @ ! $ ' ( ) * , ;` left as they are in a query value or a form field; `& = + # [ ]` always encoded ([`allowReserved`](#allowreserved)) |
 | Bodies          | JSON (incl. `+json`), `x-www-form-urlencoded` (`null` properties left out), `multipart/form-data` (`FormData`, or a `Blob` when a part needs a header), raw binary pass-through, text |
 | Encoding Objects | Per-field `style`, `explode` and `allowReserved` in a form body, a form whole query and a form `content` parameter; those and `contentType` and `headers` for the parts of a multipart body ([Encoding Objects](#encoding-objects)) |

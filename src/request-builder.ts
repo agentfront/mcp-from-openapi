@@ -1326,9 +1326,12 @@ function checkMapper(mapper: unknown): { wholeQuery: ParameterMapper | undefined
  * body field), whether or not it has a value — so the input can neither
  * stand in for a credential nor override a sibling parameter.
  *
- * Names compare exactly and case-sensitively, as query and cookie names do on
- * the wire. They are compared unencoded; percent-encoding and form-encoding
- * are both one-to-one, so names that differ here differ on the wire too.
+ * Names are compared unencoded; percent-encoding and form-encoding are both
+ * one-to-one, so names that differ here differ on the wire too. They are
+ * compared as common servers read them: a name whose part before its first
+ * `[` is reserved is refused (`api_key[]` and `api_key[x]` are read as
+ * `api_key`), and so is a credential's name in another case (`API_KEY`; some
+ * servers read names in any case, and a credential is the one to protect).
  *
  * Cookies also hold one value per name, so with `claimed` (shared by the
  * whole request) two inputs naming the same cookie are refused too, instead
@@ -1341,8 +1344,20 @@ function nameClaimer(
 ): (name: string) => void {
   const kind = owner.type === 'cookie' ? 'cookie' : owner.type === 'body' ? 'form field' : 'query parameter';
   const source = `The input of ${owner.type} parameter '${owner.key}' (input key '${owner.inputKey}')`;
+  const credentialsInAnyCase = new Map<string, ParameterMapper>();
+  for (const holders of reserved.values()) {
+    for (const holder of holders) if (holder.security && holder !== owner) credentialsInAnyCase.set(holder.key.toLowerCase(), holder);
+  }
+  const holderOf = (name: string): ParameterMapper | undefined => {
+    const bracket = name.indexOf('[');
+    for (const reservedName of bracket > 0 ? [name, name.slice(0, bracket)] : [name]) {
+      const holder = reserved.get(reservedName)?.find((other) => other !== owner);
+      if (holder !== undefined) return holder;
+    }
+    return credentialsInAnyCase.get(name.toLowerCase());
+  };
   return (name) => {
-    const holder = reserved.get(name)?.find((other) => other !== owner);
+    const holder = holderOf(name);
     if (holder !== undefined) {
       throw new RequestBuildError(
         `${source} names the ${kind} '${name}', which this tool reserves for ${

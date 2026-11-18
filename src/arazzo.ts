@@ -9,7 +9,7 @@
  * schemas and mapper so an executor needs no second spec pass. This library
  * never fetches source URLs, performs HTTP, or evaluates expressions.
  */
-import { OpenAPIToolGenerator, fnv1aHex, normalizeToolName } from './generator';
+import { MAX_NAME_DEDUP_ATTEMPTS, OpenAPIToolGenerator, dedupedToolName, normalizeToolName } from './generator';
 import { ArazzoError, SchemaError } from './errors';
 import { collectPayloadExpressions, parseExpressionValue, parseRuntimeExpression } from './arazzo-expressions';
 import { inferAnnotationsFromMethod } from './annotations';
@@ -469,9 +469,15 @@ function resolveReusable<T>(
 }
 
 /** Resolve `#/components/inputs/...` $refs inside a workflow inputs schema. */
-function resolveInputRefs(node: unknown, components: ArazzoComponents | undefined, path: string, seen: Set<string>): unknown {
+function resolveInputRefs(
+  node: unknown,
+  components: ArazzoComponents | undefined,
+  path: string,
+  seen: Set<string>,
+  resolved: Map<string, unknown>,
+): unknown {
   if (Array.isArray(node)) {
-    return node.map((item) => resolveInputRefs(item, components, path, seen));
+    return node.map((item) => resolveInputRefs(item, components, path, seen, resolved));
   }
   if (!node || typeof node !== 'object') {
     return node;
@@ -484,6 +490,8 @@ function resolveInputRefs(node: unknown, components: ArazzoComponents | undefine
       err(`Unsupported $ref "${ref}" in workflow inputs (only ${prefix}<name> is resolvable)`, path);
     }
     const name = ref.slice(prefix.length);
+    // Each input is resolved once and shared: a chain that references the previous input twice stays linear
+    if (resolved.has(name)) return resolved.get(name);
     const target = ownComponent(components?.inputs, name);
     if (!target) {
       err(`Unknown workflow inputs reference "${ref}"`, path);
@@ -492,13 +500,14 @@ function resolveInputRefs(node: unknown, components: ArazzoComponents | undefine
       err(`Cyclic workflow inputs reference "${ref}"`, path);
     }
     seen.add(name);
-    const resolved = resolveInputRefs(target, components, path, seen);
+    const value = resolveInputRefs(target, components, path, seen, resolved);
     seen.delete(name);
-    return resolved;
+    resolved.set(name, value);
+    return value;
   }
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
-    out[key] = resolveInputRefs(value, components, path, seen);
+    out[key] = resolveInputRefs(value, components, path, seen, resolved);
   }
   return out;
 }
@@ -1080,11 +1089,9 @@ function deriveOutputsSchema(
   const stepMap = new Map(steps.map((s) => [s.stepId, s]));
   const properties: Record<string, JsonSchema> = {};
   for (const [name, ast] of Object.entries(outputs)) {
+    // Shared with the step schemas of the IR: the tool gets the fresh, budgeted tree `truncateDepth` makes of it
     const derived = deriveOutputSchema(ast, stepMap, inputSchema, 0);
-    // Deep-copy so the tool's output schema never aliases the embedded step
-    // schemas inside the IR (mutating one view must not corrupt the other)
-    const copied = JSON.parse(JSON.stringify(derived)) as JsonSchema;
-    properties[name] = { ...copied, description: `Arazzo output: ${ast.raw}` };
+    properties[name] = { ...derived, description: `Arazzo output: ${ast.raw}` };
   }
   // No `required`: outputs exist only after successful execution
   return { type: 'object', properties };
@@ -1179,7 +1186,7 @@ function buildWorkflowTool(
   // kept once it fits the budget
   const resolvedInputs =
     workflow.inputs !== undefined
-      ? resolveInputRefs(workflow.inputs, ctx.doc.components, `${wPath}/inputs`, new Set())
+      ? resolveInputRefs(workflow.inputs, ctx.doc.components, `${wPath}/inputs`, new Set(), new Map())
       : undefined;
   let inputsAtMaxDepth: JsonSchema | undefined;
   const convertInputs = (depth: number): JsonSchema => {
@@ -1382,12 +1389,13 @@ export async function fromArazzo(document: ArazzoDocument | string, options: Fro
     // `flow` both become `flow`) — dedupe with the generator's hash pattern.
     if (usedNames.has(tool.name)) {
       const maxLength = ctx.generateOptions.maxToolNameLength ?? 64;
-      let seed = workflow.workflowId;
-      let deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
-      /* c8 ignore next 4 -- reachable only via an fnv1a hash collision between distinct ids */
-      while (usedNames.has(deduped)) {
-        seed += '#';
-        deduped = normalizeToolName(`${tool.name}_${fnv1aHex(seed)}`, maxLength, seed);
+      const deduped = dedupedToolName(tool.name, workflow.workflowId, maxLength, usedNames);
+      if (deduped === undefined) {
+        err(
+          `Unable to find a unique tool name for "${tool.name}" within ${MAX_NAME_DEDUP_ATTEMPTS} attempts: the name ` +
+            `space under maxToolNameLength=${maxLength} is exhausted`,
+          wPath,
+        );
       }
       tool = { ...tool, name: deduped };
     }
