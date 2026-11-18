@@ -3858,7 +3858,8 @@ describe('includeSecurityInInput per-scheme selection', () => {
 
     expect(props).toContain('ApiKeyAuth');
     expect(props).not.toContain('BearerAuth');
-    expect((tool.inputSchema as any).required).toEqual(['ApiKeyAuth']);
+    // The two requirements are a choice, so neither input is required
+    expect((tool.inputSchema as any).required).toBeUndefined();
     expect(securitySchemes).toEqual(expect.arrayContaining(['BearerAuth', 'ApiKeyAuth']));
   });
 

@@ -1925,7 +1925,8 @@ describe('upgradeSwagger2: components', () => {
     (field) => {
       const { doc, diagnostics } = run(swagger({ [field]: ['x'] }));
 
-      expect(doc.components).toBeUndefined();
+      // A securityDefinitions of the wrong kind still defines a scheme map, an empty one
+      expect(doc.components).toEqual(field === 'securityDefinitions' ? { securitySchemes: {} } : undefined);
       expect(diagnostics.map((d) => [d.code, d.path])).toEqual([[C.SWAGGER_INVALID_VALUE, `/${field}`]]);
     },
   );
@@ -2787,7 +2788,7 @@ describe('upgradeSwagger2: bounded output (review round 2)', () => {
     expect(result.doc.components).toEqual({ securitySchemes: {} });
     expect(codes(result.diagnostics)).toEqual([C.SWAGGER_UNSUPPORTED_SECURITY_SCHEME]);
     expect(run(swagger({ securityDefinitions: {} })).doc.components).toEqual({ securitySchemes: {} });
-    expect('components' in run(swagger({ securityDefinitions: 'x' })).doc).toBe(false);
+    expect(run(swagger({ securityDefinitions: 'x' })).doc.components).toEqual({ securitySchemes: {} });
   });
 
   it('reports a finding of one kind once, however deep or often', () => {

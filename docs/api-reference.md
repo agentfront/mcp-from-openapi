@@ -117,7 +117,8 @@ resolve(
   operation: OperationObject,
   pathParameters?: ParameterObject[],
   securityRequirements?: SecurityRequirement[],
-  includeSecurityInInput?: boolean | string[]
+  includeSecurityInInput?: boolean | string[],
+  securityAlternatives?: SecurityRequirement[][] // the requirement objects; more than one is a choice
 ): { inputSchema: JsonSchema; mapper: ParameterMapper[]; ignored: IgnoredParameter[] }
 ```
 
@@ -233,7 +234,7 @@ Errors (`valid: false`):
 | `DEREFERENCE_REQUIRED` | Returned by `generator.validate()`, never by `Validator.validate()`: a Swagger 2.0 document loaded with `dereference: false` (see above) |
 | `INVALID_METHOD_TOKEN` | An `additionalOperations` key is not an HTTP method token (RFC 9110) |
 | `DUPLICATE_FIXED_METHOD` | An `additionalOperations` key is the upper-case name of a method that has its own field (`GET`, `QUERY`) |
-| `INVALID_SECURITY_SCHEME` | A security scheme (Swagger 2.0: definition) has a `type` the declared version does not define, or an `apiKey` scheme has an `in` it does not define or no `name`; values compare exactly (Swagger 2.0: `basic`, `apiKey`, `oauth2`, in `header`/`query`; 3.0: `apiKey`, `http`, `oauth2`, `openIdConnect`, in `header`/`query`/`cookie`; 3.1 and 3.2 add `mutualTLS`) |
+| `INVALID_SECURITY_SCHEME` | The scheme map (`components.securitySchemes`, Swagger 2.0: `securityDefinitions`) is present but not a map, or a security scheme (Swagger 2.0: definition) has a `type` the declared version does not define, or an `apiKey` scheme has an `in` it does not define or no `name`; values compare exactly (Swagger 2.0: `basic`, `apiKey`, `oauth2`, in `header`/`query`; 3.0: `apiKey`, `http`, `oauth2`, `openIdConnect`, in `header`/`query`/`cookie`; 3.1 and 3.2 add `mutualTLS`) |
 
 Warnings:
 
@@ -657,6 +658,7 @@ interface ToolMetadata {
   tags?: string[];
   deprecated?: boolean;
   security?: SecurityRequirement[];
+  securityAlternatives?: SecurityRequirement[][]; // With several requirement objects: each ([] for {}); any one authenticates
   servers?: ServerInfo[];
   responseStatusCodes?: number[]; // From output schema: each explicit code, and 0 for `default` (not a streamed response's)
   responseStatusRanges?: ResponseStatusRange[]; // From output schema: its range keys (`2XX`), upper-cased; absent when it has none
@@ -708,6 +710,8 @@ interface SecurityParameterInfo {
   apiKeyName?: string; // API key parameter name
   apiKeyIn?: "query" | "header" | "cookie";
   description?: string;
+  alternatives?: number[]; // With a choice: the indexes of metadata.securityAlternatives that need this scheme
+  optional?: boolean; // With a choice: one alternative is empty, so a call needs no credential
 }
 ```
 

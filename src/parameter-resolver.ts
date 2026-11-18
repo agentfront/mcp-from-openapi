@@ -323,6 +323,11 @@ export class ParameterResolver {
    *   string, serialized in its `content` media type); its input property is
    *   annotated `x-parameter-location: 'query'` and
    *   `x-parameter-whole-query: true`.
+   * - `securityAlternatives`, when given, are the Security Requirement
+   *   objects `securityRequirements` lists the schemes of. With more than
+   *   one, they are a choice: each credential entry names the alternatives
+   *   that need it (`security.alternatives`, `security.optional` when one
+   *   is empty) and is not required, nor is its input.
    *
    * @throws GenerationError when the parameters break a querystring rule:
    *   more than one `in: querystring`, one together with `in: query`
@@ -334,6 +339,7 @@ export class ParameterResolver {
     pathParameters?: ParameterObject[],
     securityRequirements?: SecurityRequirement[],
     includeSecurityInInput?: boolean | string[],
+    securityAlternatives?: SecurityRequirement[][],
   ): {
     inputSchema: JsonSchema;
     mapper: ParameterMapper[];
@@ -352,7 +358,11 @@ export class ParameterResolver {
 
     const requestBody = operation.requestBody as RequestBodyObject | undefined;
 
-    const credentials = this.securityEntries(securityRequirements ?? [], includeSecurityInInput ?? false);
+    const credentials = this.securityEntries(
+      securityRequirements ?? [],
+      includeSecurityInInput ?? false,
+      securityAlternatives ?? [],
+    );
     const credentialWireNames = new Set(credentials.map(({ entry }) => wireName(entry.type, entry.key)));
     const ignored: IgnoredParameter[] = [];
 
@@ -424,7 +434,7 @@ export class ParameterResolver {
       mapper.push({ ...entry, inputKey });
       if (schema) {
         properties[inputKey] = schema;
-        required.push(inputKey);
+        if (entry.required) required.push(inputKey);
       }
     }
 
@@ -646,9 +656,13 @@ export class ParameterResolver {
   private securityEntries(
     securityRequirements: SecurityRequirement[],
     includeInInput: boolean | string[],
+    alternatives: SecurityRequirement[][],
   ): Array<{ entry: ParameterMapper; schema?: JsonSchema }> {
     const entries: Array<{ entry: ParameterMapper; schema?: JsonSchema }> = [];
     const seen = new Set<string>();
+    // A choice of requirement objects: no scheme is required on its own
+    const choice = alternatives.length > 1;
+    const optional = alternatives.some((alternative) => alternative.length === 0);
     for (const secReq of securityRequirements) {
       const { scheme, type, name: apiKeyName, in: apiKeyIn, scopes } = secReq;
       // A scheme named in several alternative requirements is one credential
@@ -660,6 +674,12 @@ export class ParameterResolver {
         scheme,
         type,
         scopes,
+        ...(choice && {
+          alternatives: alternatives.flatMap((alternative, index) =>
+            alternative.some((requirement) => requirement.scheme === scheme) ? [index] : [],
+          ),
+          ...(optional && { optional }),
+        }),
       };
 
       // Determine parameter details based on security type
@@ -728,7 +748,7 @@ export class ParameterResolver {
         (schema as any)['x-mcp-header'] = headerKey;
       }
       entries.push({
-        entry: { inputKey, type: paramLocation, key: headerKey, required: true, security: securityInfo },
+        entry: { inputKey, type: paramLocation, key: headerKey, required: !choice, security: securityInfo },
         ...(schemeInInput && { schema }),
       });
     }

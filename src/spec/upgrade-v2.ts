@@ -1079,9 +1079,9 @@ class Swagger2Upgrader {
     for (const [name, section] of sections) {
       if (Object.keys(section).length > 0) components[name] = section;
     }
-    // Kept even when empty: a requirement naming a scheme that could not be converted must stay
-    // unsatisfiable, as a scheme `securityDefinitions` does not define is, not read as no security
-    if (isSpecObject(ownProperty(document, 'securityDefinitions'))) components['securitySchemes'] = securitySchemes;
+    // Kept even when empty, and when `securityDefinitions` is no map: a requirement naming a scheme that could not
+    // be converted must stay unsatisfiable, as a scheme `securityDefinitions` does not define is, not read as no security
+    if (ownProperty(document, 'securityDefinitions') !== undefined) components['securitySchemes'] = securitySchemes;
     return components;
   }
 

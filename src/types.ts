@@ -1119,6 +1119,15 @@ export interface SecurityParameterInfo {
    * Description of the security scheme
    */
   description?: string;
+
+  /**
+   * With a choice of Security Requirement objects (`metadata.securityAlternatives`), the indexes of the
+   * alternatives that need this scheme; one alternative is applied, not every scheme
+   */
+  alternatives?: number[];
+
+  /** With a choice, whether one alternative is empty (`{}`): the operation also accepts a call without credentials */
+  optional?: boolean;
 }
 
 /**
@@ -1166,6 +1175,12 @@ export interface ToolMetadata {
    * Security requirements
    */
   security?: SecurityRequirement[];
+
+  /**
+   * With more than one Security Requirement object, each as listed (`[]` for `{}`, no authentication): any one of
+   * them authenticates a call. `security` lists their schemes together
+   */
+  securityAlternatives?: SecurityRequirement[][];
 
   /**
    * Server information

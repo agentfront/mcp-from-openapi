@@ -534,8 +534,16 @@ export class Validator {
         code: 'NO_SECURITY_SCHEMES',
       });
     }
+    const schemesPointer = swagger ? '/securityDefinitions' : '/components/securitySchemes';
     if (isSpecObject(schemes)) {
-      this.validateSecuritySchemes(schemes, swagger ? '/securityDefinitions' : '/components/securitySchemes', context);
+      this.validateSecuritySchemes(schemes, schemesPointer, context);
+    } else if (schemes !== undefined) {
+      // Read as a map that defines no scheme: every requirement naming one is unsatisfiable
+      errors.push({
+        message: `The security schemes must be a map, found ${describeValue(schemes)}`,
+        path: schemesPointer,
+        code: 'INVALID_SECURITY_SCHEME',
+      });
     }
 
     return {

@@ -54,7 +54,15 @@ If every requirement of an operation is dropped, no way to authenticate is known
 
 A scheme the library cannot send drops the requirements that name it the same way, with an `UNSUPPORTED_SECURITY_SCHEME` diagnostic: a `type` that is none of `apiKey`, `http`, `oauth2`, `openIdConnect`, `mutualTLS` (compared exactly: `HTTP` is not `http`), or an `apiKey` scheme whose `in` is none of `query`, `header`, `cookie` or that has no `name`. Its key is never sent in a place the scheme does not name. `validate()` reports such a scheme as an `INVALID_SECURITY_SCHEME` error, with the values of the declared version (Swagger 2.0: `basic`, `apiKey`, `oauth2`, an `apiKey` in `header` or `query`; `mutualTLS` from OpenAPI 3.1). A `mutualTLS` scheme keeps its tool: the HTTP client presents the certificate (`clientCertificate`), so the tool has no input for it, and an `info` diagnostic says so.
 
-Requirements listed as alternatives (`security: [{ a: [] }, { b: [] }]`) are not kept as a choice: every scheme of every requirement object that can be satisfied becomes a requirement of the tool. See [OpenAPI Versions](./openapi-versions.md#diagnostics).
+A scheme map that is present but not a map (`securitySchemes: null`, an array; Swagger 2.0: `securityDefinitions`) defines no scheme: `validate()` reports it (`INVALID_SECURITY_SCHEME`) and every requirement naming a scheme is unsatisfiable, in every version. Only a document with no scheme map at all keeps generating with empty security.
+
+### Alternatives
+
+Requirements listed as alternatives (`security: [{ a: [] }, { b: [] }]`) mean `a` OR `b`, and the tool keeps the choice:
+
+- `metadata.securityAlternatives` lists each requirement object that can be satisfied, in document order (`[]` for `{}`, no authentication); `metadata.security` still lists all their schemes. It is absent for a single requirement object (schemes required together).
+- Each credential mapper entry has `required: false`, `security.alternatives` (the indexes of the alternatives that need it) and `security.optional: true` when one alternative is empty. With `includeSecurityInInput`, the inputs of a choice are not required.
+- `SecurityResolver.resolve` applies only the first alternative whose credentials the context holds, and none when it holds none completely, so a host that holds both `a` and `b` sends one. `checkMissingSecurity` reports nothing while one alternative can be applied or one is empty, and otherwise the schemes it could not fill.
 
 ### Schemes named by URI (OpenAPI 3.2)
 

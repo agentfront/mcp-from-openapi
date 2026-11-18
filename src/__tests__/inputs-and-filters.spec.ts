@@ -88,8 +88,11 @@ describe('every input key names one value in one place', () => {
       },
       { includeSecurityInInput: true },
     );
-    expect(tool.inputSchema.required).toEqual(['key', 'tok']);
-    expect(tool.mapper.filter((entry) => entry.security)).toHaveLength(2);
+    expect(tool.inputSchema.required).toBeUndefined();
+    expect(tool.mapper.filter((entry) => entry.security).map((entry) => entry.security?.alternatives)).toEqual([
+      [0, 1],
+      [1],
+    ]);
   });
 });
 

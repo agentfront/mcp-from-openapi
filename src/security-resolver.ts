@@ -199,6 +199,20 @@ function ownValue(record: Record<string, string> | undefined, key: string | unde
   return record[key] || undefined;
 }
 
+/**
+ * The credential entries a call applies: every entry, or with a choice of Security Requirement objects
+ * (`security.alternatives`) those of the first alternative whose entries are all filled, and none when none is.
+ */
+function appliedEntries(entries: ParameterMapper[], filled: (entry: ParameterMapper) => boolean): ParameterMapper[] {
+  const alternatives = new Map<number, ParameterMapper[]>();
+  for (const entry of entries) {
+    for (const index of entry.security?.alternatives ?? []) alternatives.set(index, [...(alternatives.get(index) ?? []), entry]);
+  }
+  if (alternatives.size === 0) return entries;
+  const first = [...alternatives.keys()].sort((a, b) => a - b).find((index) => alternatives.get(index)!.every(filled));
+  return first === undefined ? [] : alternatives.get(first)!;
+}
+
 /** Whether the mapper has exactly one apiKey scheme, the only case `SecurityContext.apiKey` is used for */
 function singleApiKeyScheme(mappers: ParameterMapper[]): boolean {
   const apiKeySchemes = mappers.filter((mapper) => mapper.security?.type === 'apiKey').map((mapper) => mapper.security!.scheme);
@@ -261,24 +275,18 @@ export class SecurityResolver {
     // Check if signature-based auth is needed
     let requiresSignature = false;
     let signatureScheme: string | undefined;
-    const fallbackApiKey = singleApiKeyScheme(mappers);
+    const { applied, values } = await this.credentials(mappers, context);
 
-    for (const mapper of mappers) {
-      // Skip non-security parameters
-      if (!mapper.security) {
-        continue;
-      }
-
+    for (const mapper of applied) {
       // Check for signature-based auth
-      if (this.isSignatureBasedAuth(mapper.security)) {
+      if (this.isSignatureBasedAuth(mapper.security!)) {
         requiresSignature = true;
-        signatureScheme = mapper.security.scheme;
+        signatureScheme = mapper.security!.scheme;
         // Signature will be added later by signRequest()
         continue;
       }
 
-      // Try to resolve the auth value
-      const authValue = await this.resolveAuthValue(mapper.security, context, fallbackApiKey);
+      const authValue = values.get(mapper);
       if (!authValue) {
         // Auth value not available - skip this security requirement
         // Framework may want to throw an error or log a warning
@@ -316,6 +324,25 @@ export class SecurityResolver {
     }
 
     return resolved;
+  }
+
+  /**
+   * The credential entries of `mappers`, the value the context gives each (none for a signature entry, which
+   * `signRequest` signs), whether each is filled, and the entries a call applies (`appliedEntries`).
+   */
+  private async credentials(mappers: ParameterMapper[], context: SecurityContext) {
+    const entries = mappers.filter((mapper) => mapper.security !== undefined);
+    const fallbackApiKey = singleApiKeyScheme(mappers);
+    const values = new Map<ParameterMapper, string | undefined>();
+    for (const entry of entries) {
+      if (!this.isSignatureBasedAuth(entry.security!)) {
+        values.set(entry, await this.resolveAuthValue(entry.security!, context, fallbackApiKey));
+      }
+    }
+    // A signature entry is filled by signRequest, which needs a signatureGenerator
+    const filled = (entry: ParameterMapper): boolean =>
+      this.isSignatureBasedAuth(entry.security!) ? context.signatureGenerator !== undefined : Boolean(values.get(entry));
+    return { entries, values, filled, applied: appliedEntries(entries, filled) };
   }
 
   /**
@@ -492,22 +519,11 @@ export class SecurityResolver {
     mappers: ParameterMapper[],
     context: SecurityContext
   ): Promise<string[]> {
-    const missing: string[] = [];
-    const fallbackApiKey = singleApiKeyScheme(mappers);
-
-    for (const mapper of mappers) {
-      if (!mapper.security) continue;
-
-      // A signature scheme is filled by signRequest, which needs a signatureGenerator
-      const filled = this.isSignatureBasedAuth(mapper.security)
-        ? context.signatureGenerator !== undefined
-        : Boolean(await this.resolveAuthValue(mapper.security, context, fallbackApiKey));
-      if (!filled) {
-        missing.push(mapper.security.scheme);
-      }
-    }
-
-    return missing;
+    const { entries, applied, filled } = await this.credentials(mappers, context);
+    // A choice is satisfied by one alternative, or by none when one is empty
+    const choice = entries.some((entry) => entry.security!.alternatives !== undefined);
+    if (choice && (applied.length > 0 || entries.some((entry) => entry.security!.optional))) return [];
+    return entries.filter((entry) => !filled(entry)).map((entry) => entry.security!.scheme);
   }
 
   /**

@@ -2721,6 +2721,7 @@ export class OpenAPIToolGenerator {
     // Extract security requirements, once: both the mapper and the metadata
     // read them (an operation's own `security` replaces the document's)
     let securityRequirements: SecurityRequirement[] | undefined = undefined;
+    let securityAlternatives: SecurityRequirement[][] | undefined = undefined;
     const securitySpec = operation.security ?? document.security;
     if (securitySpec) {
       const securityPointer =
@@ -2741,6 +2742,8 @@ export class OpenAPIToolGenerator {
         );
       }
       securityRequirements = extracted.requirements;
+      // Kept only for a choice: one requirement object is what `security` already says
+      if (extracted.alternatives.length > 1) securityAlternatives = extracted.alternatives;
     }
     for (const diagnostic of this.wholeQueryCredentialDiagnostics(
       pathStr,
@@ -2834,7 +2837,13 @@ export class OpenAPIToolGenerator {
         new ParameterResolver(options.namingStrategy, {
           includeExamples: options.includeExamples,
           schemaConversion: schemaConversion(depth),
-        }).resolve(resolvedOperation, pathParameters, securityRequirements, options.includeSecurityInInput),
+        }).resolve(
+          resolvedOperation,
+          pathParameters,
+          securityRequirements,
+          options.includeSecurityInInput,
+          securityAlternatives,
+        ),
       (resolved) => resolved.inputSchema,
     );
     const { inputSchema, mapper, ignored } = input.converted;
@@ -2897,6 +2906,7 @@ export class OpenAPIToolGenerator {
 
     // Extract metadata
     const metadata = this.extractMetadata(pathStr, method, operation, document, outputSchema, securityRequirements);
+    if (securityAlternatives) metadata.securityAlternatives = securityAlternatives;
 
     // The schemas with formats resolved and depth bounded (see `finishSchema`);
     // the stream's item schema goes through every step an output schema does
@@ -3301,20 +3311,20 @@ export class OpenAPIToolGenerator {
     security: unknown,
     document: OpenAPIDocument,
     pointer: string,
-  ): { requirements: SecurityRequirement[]; unsatisfiable: boolean } {
+  ): { requirements: SecurityRequirement[]; alternatives: SecurityRequirement[][]; unsatisfiable: boolean } {
+    // Present but not a map (null, an array): defines no scheme, so every requirement naming one is unsatisfiable
     const schemes: unknown = document.components?.securitySchemes;
     if (!Array.isArray(security)) {
       // Not a list: without schemes there was never anything to read; with
       // them the tool fails, as it always has (now with a typed error)
-      if (!schemes) return { requirements: [], unsatisfiable: false };
+      if (schemes === undefined) return { requirements: [], alternatives: [], unsatisfiable: false };
       throw new GenerationError(
         `${pointer} must be an array of Security Requirement Objects, found ${describeValue(security)}`,
         { pointer },
       );
     }
 
-    const requirements: SecurityRequirement[] = [];
-    let kept = 0;
+    const alternatives: SecurityRequirement[][] = [];
     security.forEach((requirement: unknown, index: number) => {
       if (!isSpecObject(requirement)) {
         this.addDiagnostic({
@@ -3365,11 +3375,13 @@ export class OpenAPIToolGenerator {
           path: appendPointer(pointer, index, scheme),
         });
       }
-      if (!satisfiable) return;
-      kept++;
-      requirements.push(...resolved);
+      if (satisfiable) alternatives.push(resolved);
     });
-    return { requirements, unsatisfiable: Boolean(schemes) && security.length > 0 && kept === 0 };
+    return {
+      requirements: alternatives.flat(),
+      alternatives,
+      unsatisfiable: schemes !== undefined && security.length > 0 && alternatives.length === 0,
+    };
   }
 
   /**

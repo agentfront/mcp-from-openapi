@@ -181,7 +181,8 @@ describe('story: serialization on the wire', () => {
       `Basic ${Buffer.from('ada:s3cret').toString('base64')}`,
     );
 
-    // apiKeys is keyed by the WIRE parameter name (apiKeyName), not the scheme
+    // apiKeys is keyed by the WIRE parameter name (apiKeyName), not the scheme. The four requirements are
+    // alternatives: only the first one the context fills is sent, the header key, not the query key too
     const keys = await resolver.resolve(
       tool.mapper,
       createSecurityContext({ apiKeys: { 'X-API-Key': 'hk-1', api_key: 'qk-2' } }),
@@ -189,7 +190,11 @@ describe('story: serialization on the wire', () => {
     await sendBuiltRequest(buildHttpRequest(tool, {}, { baseUrl }), keys);
     const captured = loopback.requests.at(-1)!;
     expect(captured.headers['x-api-key']).toBe('hk-1');
-    expect(new URL(`http://x${captured.url}`).searchParams.get('api_key')).toBe('qk-2');
+    expect(new URL(`http://x${captured.url}`).searchParams.get('api_key')).toBeNull();
+
+    const queryOnly = await resolver.resolve(tool.mapper, createSecurityContext({ apiKeys: { api_key: 'qk-2' } }));
+    await sendBuiltRequest(buildHttpRequest(tool, {}, { baseUrl }), queryOnly);
+    expect(new URL(`http://x${loopback.requests.at(-1)!.url}`).searchParams.get('api_key')).toBe('qk-2');
   });
 });
 
