@@ -1,5 +1,6 @@
 import { OpenAPIToolGenerator } from '../generator';
 import { ParameterResolver } from '../parameter-resolver';
+import { buildHttpRequest } from '../request-builder';
 import { SecurityResolver } from '../security-resolver';
 import type { McpOpenAPITool, SecurityRequirement } from '../types';
 
@@ -13,6 +14,8 @@ const schemes = {
     flows: { clientCredentials: { tokenUrl: 'https://auth.example.test/token', scopes: { read: 'r', admin: 'a' } } },
   },
   certificate: { type: 'mutualTLS' },
+  hmacPrimary: { type: 'http', scheme: 'hmac-primary' },
+  hmacBackup: { type: 'http', scheme: 'hmac-backup' },
 };
 
 async function toolFor(security: unknown[], options: Record<string, unknown> = {}): Promise<McpOpenAPITool> {
@@ -153,18 +156,60 @@ describe('each alternative asks for what it needs', () => {
 
   it('applies an alternative that needs a client certificate only with one', async () => {
     const tool = await toolFor([{ certificate: [], partnerKey: [] }, { userToken: [] }]);
-    expect(tool.mapper.map((entry) => entry.security?.certificateAlternatives)).toEqual([[0], [0]]);
+    expect(tool.mapper.map((entry) => entry.security?.clientCertificates)).toEqual([
+      [{ scheme: 'certificate', alternatives: [0] }],
+      [{ scheme: 'certificate', alternatives: [0] }],
+    ]);
     expect((await resolver.resolve(tool.mapper, held)).headers).toEqual({ Authorization: 'Bearer SYNTH-USER' });
     expect((await resolver.resolve(tool.mapper, { ...held, clientCertificate })).headers).toEqual({
       'X-Partner-Key': 'SYNTH-PARTNER',
     });
   });
 
+  it('reports the client certificate missing when it is all that keeps every alternative from applying', async () => {
+    const tool = await toolFor([
+      { certificate: [], partnerKey: [] },
+      { certificate: [], userToken: [] },
+    ]);
+    expect(await resolver.checkMissingSecurity(tool.mapper, held)).toEqual(['certificate']);
+    expect(await resolver.checkMissingSecurity(tool.mapper, { ...held, clientCertificate })).toEqual([]);
+    expect(await resolver.checkMissingSecurity(tool.mapper, { clientCertificate })).toEqual(['partnerKey', 'userToken']);
+  });
+
+  it('signs nothing when no alternative can be applied', async () => {
+    const tool = await toolFor([{ hmacPrimary: [], partnerKey: [] }, { userToken: [] }]);
+    const signatureGenerator = jest.fn(async () => 'SYNTH-SIG');
+    const data = { method: 'GET', url: 'https://api.example.test/p', headers: { accept: 'application/json' } };
+    expect(await resolver.signRequest(tool.mapper, data, { signatureGenerator })).toEqual(data.headers);
+    expect(signatureGenerator).not.toHaveBeenCalled();
+  });
+
+  it('signs only the signature entries of the alternative it applies', async () => {
+    const tool = await toolFor([{ hmacPrimary: [] }, { hmacBackup: [] }]);
+    const signed: string[] = [];
+    const signatureGenerator = async (_data: unknown, security: { scheme: string }) => {
+      signed.push(security.scheme);
+      return `SYNTH-SIG-${security.scheme}`;
+    };
+    const headers = await resolver.signRequest(tool.mapper, { method: 'GET', url: 'https://api.example.test/p', headers: {} }, {
+      signatureGenerator,
+    });
+    expect(signed).toEqual(['hmacPrimary']);
+    expect(headers).toEqual({ Authorization: 'SYNTH-SIG-hmacPrimary' });
+  });
+
+  it('sends the credentials of one alternative when the input gives several', async () => {
+    const tool = await toolFor([{ partnerKey: [] }, { userToken: [] }], { includeSecurityInInput: true });
+    const both = buildHttpRequest(tool, { partnerKey: 'SYNTH-PARTNER', userToken: 'SYNTH-USER' });
+    expect(both.headers).toEqual({ 'X-Partner-Key': 'SYNTH-PARTNER' });
+    expect(buildHttpRequest(tool, { userToken: 'SYNTH-USER' }).headers).toEqual({ Authorization: 'Bearer SYNTH-USER' });
+  });
+
   it('is satisfied by a client certificate alone when an alternative needs nothing else', async () => {
     const tool = await toolFor([{ certificate: [] }, { userToken: [] }]);
     expect(await resolver.checkMissingSecurity(tool.mapper, { clientCertificate })).toEqual([]);
     expect((await resolver.resolve(tool.mapper, { ...held, clientCertificate })).headers).toEqual({});
-    expect(await resolver.checkMissingSecurity(tool.mapper, {})).toEqual(['userToken']);
+    expect(await resolver.checkMissingSecurity(tool.mapper, {})).toEqual(['userToken', 'certificate']);
   });
 });
 

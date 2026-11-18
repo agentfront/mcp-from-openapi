@@ -715,7 +715,7 @@ interface SecurityParameterInfo {
   description?: string;
   alternatives?: number[]; // With a choice: the indexes of metadata.securityAlternatives that need this scheme
   alternativeScopes?: string[][]; // The scopes each of `alternatives` asks, when they differ
-  certificateAlternatives?: number[]; // The alternatives that also need a client certificate (mutualTLS)
+  clientCertificates?: Array<{ scheme: string; alternatives: number[] }>; // Each mutualTLS scheme of a choice, with the alternatives that need it
   optional?: boolean; // With a choice: one alternative is empty, so a call needs no credential
 }
 ```

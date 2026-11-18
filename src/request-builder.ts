@@ -280,6 +280,37 @@ function readInput(input: object | undefined, key: string): unknown {
   return input !== undefined && Object.hasOwn(input, key) ? (input as Record<string, unknown>)[key] : undefined;
 }
 
+/** The credential entries of each alternative of a choice of Security Requirements (`security.alternatives`). Internal. */
+export function entriesByAlternative(entries: readonly ParameterMapper[]): Map<number, ParameterMapper[]> {
+  const alternatives = new Map<number, ParameterMapper[]>();
+  for (const entry of entries) {
+    for (const index of entry.security?.alternatives ?? []) {
+      const members = alternatives.get(index);
+      if (members) members.push(entry);
+      else alternatives.set(index, [entry]);
+    }
+  }
+  return alternatives;
+}
+
+/**
+ * The credential entries the input gives that are not needed by the first alternative it gives completely: one
+ * alternative of a choice is sent. None when the input gives no alternative completely.
+ */
+function unchosenCredentials(mapper: readonly ParameterMapper[], input: object | undefined): Set<ParameterMapper> {
+  const given = (entry: ParameterMapper): boolean => {
+    const value = readInput(input, entry.inputKey);
+    return value !== undefined && value !== null;
+  };
+  const alternatives = entriesByAlternative(mapper);
+  const chosen = [...alternatives.keys()]
+    .sort((a, b) => a - b)
+    .map((index) => alternatives.get(index)!)
+    .find((entries) => entries.every(given));
+  if (chosen === undefined) return new Set();
+  return new Set(mapper.filter((entry) => entry.security?.alternatives !== undefined && !chosen.includes(entry)));
+}
+
 /**
  * Serialize a PATH parameter per its style/explode (OpenAPI serialization
  * table). Returns the UNENCODED replacement string; percent-encoding is
@@ -1472,6 +1503,7 @@ export function buildHttpRequest(
     throw new RequestBuildError(`Tool input must be an object; received ${describeValue(input)}`, {});
   }
   const values: object | undefined = input ?? undefined;
+  const unchosen = unchosenCredentials(tool.mapper, values);
 
   let path = tool.metadata.path;
   const queryPairs: Array<[key: string, value: string, allowReserved?: boolean]> = [];
@@ -1513,9 +1545,9 @@ export function buildHttpRequest(
     const value = readInput(values, mapper.inputKey);
 
     if (mapper.security) {
-      // Security entries apply only when a value was provided; they are never
+      // Security entries apply only when a value was provided, of the alternative chosen; they are never
       // treated as required here (frameworks resolve credentials separately).
-      if (value === undefined || value === null) continue;
+      if (value === undefined || value === null || unchosen.has(mapper)) continue;
       const formatted = formatSecurityValue(mapper, primitiveString(value, mapper.key, mapper.type));
       if (mapper.type === 'header') {
         assertHeaderSafe(mapper.key, formatted);

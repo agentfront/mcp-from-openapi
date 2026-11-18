@@ -144,6 +144,20 @@ describe('a flattened body keeps every constraint of its allOf members', () => {
     expect(tool.inputSchema.properties?.['n']).toMatchObject({ allOf: [first, second] });
   });
 
+  it('keeps the annotations of definitions it leaves under allOf, so a readOnly one is still left out', async () => {
+    const schema = {
+      type: 'object',
+      required: ['n', 'm'],
+      allOf: [
+        { type: 'object', properties: { n: { type: 'object', properties: { a: { type: 'string' } } } } },
+        { type: 'object', properties: { n: { type: 'object', readOnly: true, description: 'later' } } },
+      ],
+      properties: { m: { type: 'string' } },
+    };
+    const tool = await toolFor(jsonBody(schema));
+    expect(tool.mapper.map((entry) => entry.key)).toEqual(['m']);
+  });
+
   it('merges a definition that only adds annotations to one read with its siblings', async () => {
     const nested = { type: 'object', properties: { a: { type: 'string' } }, additionalProperties: false };
     const schema = {

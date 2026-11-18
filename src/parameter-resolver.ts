@@ -678,9 +678,15 @@ export class ParameterResolver {
     // A choice of requirement objects: no scheme is required on its own
     const choice = alternatives.length > 1;
     const optional = alternatives.some((alternative) => alternative.length === 0);
-    const certificateAlternatives = alternatives.flatMap((alternative, index) =>
-      alternative.some((requirement) => requirement.type === 'mutualTLS') ? [index] : [],
+    const certificateSchemes = new Set(
+      alternatives.flat().flatMap((requirement) => (requirement.type === 'mutualTLS' ? [requirement.scheme] : [])),
     );
+    const clientCertificates = [...certificateSchemes].map((scheme) => ({
+      scheme,
+      alternatives: alternatives.flatMap((alternative, index) =>
+        alternative.some((requirement) => requirement.scheme === scheme) ? [index] : [],
+      ),
+    }));
     for (const secReq of securityRequirements) {
       const { scheme, type, name: apiKeyName, in: apiKeyIn, scopes } = secReq;
       // A scheme named in several alternative requirements is one credential
@@ -699,7 +705,7 @@ export class ParameterResolver {
         ...(choice && {
           alternatives: naming.map((named) => named.index),
           ...(scopesDiffer && { alternativeScopes: naming.map((named) => named.scopes) }),
-          ...(certificateAlternatives.length > 0 && { certificateAlternatives }),
+          ...(clientCertificates.length > 0 && { clientCertificates }),
           ...(optional && { optional }),
         }),
       };
@@ -943,17 +949,28 @@ function mergeDefinitions(definitions: unknown[]): unknown {
     .map((definition) => Object.keys(definition).filter((keyword) => !isAnnotationKeyword(keyword)))
     .filter((keywords) => keywords.length > 0);
   const readsSiblings = constraining.some((keywords) => keywords.some((keyword) => SIBLING_READ_KEYWORDS.has(keyword)));
-  if (constraining.length > 1 && readsSiblings) return { allOf: definitions };
+  if (constraining.length > 1 && readsSiblings) return allOfDefinitions(definitions);
   const merged: Record<string, unknown> = {};
   for (const definition of definitions as Record<string, unknown>[]) {
     for (const [keyword, value] of Object.entries(definition)) {
       if (!isAnnotationKeyword(keyword) && Object.hasOwn(merged, keyword) && merged[keyword] !== value) {
-        return { allOf: definitions };
+        return allOfDefinitions(definitions);
       }
       setOwnProperty(merged, keyword, value);
     }
   }
   return merged;
+}
+
+/** The `allOf` of `definitions`, with the annotations the last to have each sets beside it (a `readOnly` is read there) */
+function allOfDefinitions(definitions: unknown[]): Record<string, unknown> {
+  const schema: Record<string, unknown> = { allOf: definitions };
+  for (const definition of definitions as Record<string, unknown>[]) {
+    for (const [keyword, value] of Object.entries(definition)) {
+      if (isAnnotationKeyword(keyword)) setOwnProperty(schema, keyword, value);
+    }
+  }
+  return schema;
 }
 
 /** Keywords that, unless `false`, let a body (or `allOf` member) hold properties it does not name */

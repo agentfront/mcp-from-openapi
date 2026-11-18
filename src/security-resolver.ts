@@ -1,5 +1,5 @@
 import type { ParameterMapper, SecurityParameterInfo } from './types';
-import { assertCookieName, assertCookieValue, assertHeaderSafe } from './request-builder';
+import { assertCookieName, assertCookieValue, assertHeaderSafe, entriesByAlternative } from './request-builder';
 
 /**
  * Context for resolving security parameters
@@ -199,23 +199,24 @@ function ownValue(record: Record<string, string> | undefined, key: string | unde
   return record[key] || undefined;
 }
 
+/** The `mutualTLS` schemes a choice names (`security.clientCertificates`), with the alternatives that need each */
+function clientCertificatesOf(entries: ParameterMapper[]): Array<{ scheme: string; alternatives: number[] }> {
+  return entries.flatMap((entry) => entry.security?.clientCertificates ?? []);
+}
+
 /**
  * The credential entries a call applies: every entry, or with a choice of Security Requirement objects
  * (`security.alternatives`) those of the first alternative whose entries are all filled and whose client
- * certificate (`security.certificateAlternatives`) the context holds; `undefined` when no alternative is.
+ * certificate (`security.clientCertificates`) the context holds; `undefined` when no alternative is.
  */
 function appliedEntries(
   entries: ParameterMapper[],
   filled: (entry: ParameterMapper) => boolean,
   hasCertificate: boolean,
 ): ParameterMapper[] | undefined {
-  const alternatives = new Map<number, ParameterMapper[]>();
-  const needCertificate = new Set<number>();
-  for (const entry of entries) {
-    for (const index of entry.security?.alternatives ?? []) alternatives.set(index, [...(alternatives.get(index) ?? []), entry]);
-    for (const index of entry.security?.certificateAlternatives ?? []) needCertificate.add(index);
-  }
+  const alternatives = entriesByAlternative(entries);
   if (alternatives.size === 0) return entries;
+  const needCertificate = new Set(clientCertificatesOf(entries).flatMap((certificate) => certificate.alternatives));
   const first = [...new Set([...alternatives.keys(), ...needCertificate])]
     .sort((a, b) => a - b)
     .find((index) => (hasCertificate || !needCertificate.has(index)) && (alternatives.get(index) ?? []).every(filled));
@@ -545,14 +546,18 @@ export class SecurityResolver {
     // A choice is satisfied by one alternative, or by none when one is empty
     const choice = entries.some((entry) => entry.security!.alternatives !== undefined);
     if (choice && (applied !== undefined || entries.some((entry) => entry.security!.optional))) return [];
-    return [...new Set(entries.filter((entry) => !filled(entry)).map((entry) => entry.security!.scheme))];
+    const unfilled = entries.filter((entry) => !filled(entry)).map((entry) => entry.security!.scheme);
+    const certificates = context.clientCertificate ? [] : clientCertificatesOf(entries).map((certificate) => certificate.scheme);
+    return [...new Set([...unfilled, ...certificates])];
   }
 
   /**
    * Sign a request for signature-based authentication
    *
    * Use this when resolved.requiresSignature is true.
-   * This method will call the signatureGenerator from context to sign the request.
+   * This method will call the signatureGenerator from context to sign the request. With a choice of Security
+   * Requirements it signs the entries of the alternative `resolve` applies, reading the context's credentials
+   * again to find it.
    *
    * @param mappers - Parameter mappers from the tool definition
    * @param signatureData - Request data to sign
@@ -583,13 +588,15 @@ export class SecurityResolver {
       throw new Error('Signature-based auth required but no signatureGenerator provided');
     }
 
-    for (const mapper of mappers) {
-      if (!mapper.security || !this.isSignatureBasedAuth(mapper.security)) {
+    // The signature entries of the alternative `resolve` applies: the same choice, made again
+    const { applied } = await this.credentials(mappers, context);
+    for (const mapper of applied ?? []) {
+      if (!this.isSignatureBasedAuth(mapper.security!)) {
         continue;
       }
 
       // Call signature generator
-      const signature = await context.signatureGenerator(signatureData, mapper.security);
+      const signature = await context.signatureGenerator(signatureData, mapper.security!);
 
       // Add signature to appropriate location
       if (mapper.type === 'header') {

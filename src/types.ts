@@ -1199,8 +1199,11 @@ export interface SecurityParameterInfo {
    */
   alternativeScopes?: string[][];
 
-  /** With a choice, the alternatives that also need a client certificate (a `mutualTLS` scheme, not in the mapper) */
-  certificateAlternatives?: number[];
+  /**
+   * With a choice, each `mutualTLS` scheme the alternatives name, with the alternatives that need it (it has no
+   * mapper entry: the HTTP client presents the certificate)
+   */
+  clientCertificates?: Array<{ scheme: string; alternatives: number[] }>;
 
   /** With a choice, whether one alternative is empty (`{}`): the operation also accepts a call without credentials */
   optional?: boolean;
