@@ -20,7 +20,6 @@ import type {
   OperationWithContext,
   ParameterMapper,
   ToolMetadata,
-  ServerObject,
   ServerInfo,
   PathItemObject,
   JsonSchema,
@@ -251,7 +250,9 @@ const runFailures = new WeakSet<object>();
  * Apply the `secureDefaults` load preset: redirects off, external `$ref`
  * resolution disabled. Explicitly-set options always win over the preset.
  */
-function applySecureDefaults(options: LoadOptions): LoadOptions {
+function applySecureDefaults(given: LoadOptions | null): LoadOptions {
+  // `null`, from a caller without types, is no options
+  const options = given ?? {};
   if (!options.secureDefaults) return options;
   return {
     ...options,
@@ -575,7 +576,8 @@ class ExternalRefError extends Error {
       ...(base === undefined ? {} : { base: bounded(base) }),
       resolved: bounded(resolved),
     };
-    if (options.location !== undefined) this.pointer = jsonPointer(...options.location);
+    // Bounded like the other context fields: a pointer of many levels is display-only then
+    if (options.location !== undefined) this.pointer = bounded(jsonPointer(...options.location));
   }
 }
 
@@ -1375,7 +1377,7 @@ export class OpenAPIToolGenerator {
   static async fromFile(filePath: string, options: LoadOptions = {}): Promise<OpenAPIToolGenerator> {
     try {
       // A bad option fails before anything is read
-      if (options.documentUri !== undefined) parseDocumentUri(options.documentUri);
+      if (options?.documentUri !== undefined) parseDocumentUri(options.documentUri);
       // Lazy-load Node builtins so the module is importable off-Node (Workers).
       const [path, fs, url] = await Promise.all([import('path'), import('fs/promises'), import('url')]);
       /* c8 ignore next -- both branches tested but V8 source-map misaligns ternary */
@@ -2156,8 +2158,16 @@ export class OpenAPIToolGenerator {
     const sortedPaths = Object.entries(document.paths).sort(([a], [b]) => (a < b ? -1 : 1));
 
     for (const [pathStr, pathItem] of sortedPaths) {
-      // A path item that is still a reference (dereferencing off) is skipped, as before
-      if (ownProperty(pathItem, '$ref') !== undefined) continue;
+      // A path item that is still a reference (not read, or dereferencing off) holds no operation to read
+      if (isReferenceObject(pathItem)) {
+        this.addDiagnostic({
+          severity: 'warning',
+          code: DIAGNOSTIC_CODES.UNRESOLVED_REFERENCE,
+          message: `Path ${describeValue(pathStr)} is a reference that was not resolved; its operations make no tools`,
+          path: jsonPointer('paths', pathStr),
+        });
+        continue;
+      }
 
       for (const entry of this.walkPathItem(pathStr, pathItem, true)) {
         // Fixed methods are lowercase field names (names and dedup hashes are
@@ -2713,13 +2723,24 @@ export class OpenAPIToolGenerator {
     if (streamingBody !== undefined) this.addDiagnostic(streamingBody);
 
     // Extract security requirements, once: both the mapper and the metadata
-    // read them (an operation's own `security` replaces the document's)
+    // read them (an operation's own `security` list replaces the document's)
     let securityRequirements: SecurityRequirement[] | undefined = undefined;
     let securityAlternatives: SecurityRequirement[][] | undefined = undefined;
-    const securitySpec = operation.security ?? document.security;
+    const ownSecurity: unknown = operation.security;
+    if (ownSecurity !== undefined && ownSecurity !== null && !Array.isArray(ownSecurity)) {
+      this.addDiagnostic({
+        severity: 'warning',
+        code: DIAGNOSTIC_CODES.INVALID_SECURITY_REQUIREMENT,
+        message:
+          `${operationLabel(method, pathStr)}: security must be a list of Security Requirements, found ` +
+          `${describeValue(ownSecurity)}; the document's requirements apply`,
+        path: appendPointer(operationPointer(pathStr, entry), 'security'),
+      });
+    }
+    const operationSecurity = Array.isArray(ownSecurity);
+    const securitySpec = operationSecurity ? ownSecurity : document.security;
     if (securitySpec) {
-      const securityPointer =
-        operation.security !== undefined ? appendPointer(operationPointer(pathStr, entry), 'security') : '/security';
+      const securityPointer = operationSecurity ? appendPointer(operationPointer(pathStr, entry), 'security') : '/security';
       const extracted = this.extractSecurityRequirements(securitySpec, document, securityPointer);
       if (extracted.unsatisfiable) {
         throw this.skipOperation(
@@ -2915,6 +2936,7 @@ export class OpenAPIToolGenerator {
       method,
       operation,
       document,
+      ownProperty(pathItem, 'servers'),
       new ResponseBuilder(options).statuses(operation.responses),
       securityRequirements,
     );
@@ -3124,7 +3146,7 @@ export class OpenAPIToolGenerator {
     }
 
     // Check deprecated
-    if (operation.deprecated && !options.includeDeprecated) {
+    if (operation.deprecated === true && !options.includeDeprecated) {
       return false;
     }
 
@@ -3231,6 +3253,7 @@ export class OpenAPIToolGenerator {
     method: HTTPMethod,
     operation: OperationObject,
     document: OpenAPIDocument,
+    pathItemServers: unknown,
     responseStatuses: ResponseStatus[],
     securityRequirements: SecurityRequirement[] | undefined,
   ): ToolMetadata {
@@ -3249,18 +3272,18 @@ export class OpenAPIToolGenerator {
       metadata.security = securityRequirements;
     }
 
-    // Extract servers
-    const servers = operation.servers ?? document.servers;
+    // The servers of the operation, else of its path item, else of the document: the first list (a server is an object)
+    const servers = [operation.servers, pathItemServers, document.servers].find(Array.isArray) as unknown[] | undefined;
     if (servers) {
-      metadata.servers = servers.map((server: ServerObject) => {
+      metadata.servers = servers.filter(isSpecObject).map((server) => {
         // OpenAPI 3.2 `name`, when the document gives a string
         const name = ownProperty(server, 'name');
         return {
-          url: this.options.baseUrl || server.url,
+          url: this.options.baseUrl || (server['url'] as string),
           ...(typeof name === 'string' && { name }),
-          description: server.description,
+          description: server['description'] as string | undefined,
           // A parsed document's maps hold no `undefined` values
-          variables: server.variables as ServerInfo['variables'],
+          variables: server['variables'] as ServerInfo['variables'],
         };
       });
     } else if (this.options.baseUrl) {

@@ -2,7 +2,7 @@ import type { ParameterObject } from './types';
 import { isReferenceObject } from './types';
 import { analyzeParameters } from './parameter-resolver';
 import { readStatusKey } from './response-builder';
-import { messageText, operationLabel } from './validator';
+import { messageText, operationLabel, withTextName } from './validator';
 import {
   MAX_CONVERSION_ENTRIES,
   detectSpecVersion,
@@ -192,11 +192,14 @@ function listNames(names: string[]): string {
 /**
  * The Parameter Objects of a `parameters` value. A document being linted may
  * be imperfect, so anything that is not an array of objects is skipped, as is
- * each entry that is not an object or is a Reference Object.
+ * each entry that is not an object or is a Reference Object. A number or
+ * boolean name is read as its text, as generation reads it.
  */
 function readParameters(value: unknown): ParameterObject[] {
   return Array.isArray(value)
-    ? value.filter((param): param is ParameterObject => isSpecObject(param) && !isReferenceObject(param))
+    ? value
+        .filter((param): param is ParameterObject => isSpecObject(param) && !isReferenceObject(param))
+        .map((param) => withTextName(param) as ParameterObject)
     : [];
 }
 
@@ -264,7 +267,7 @@ export function lintDocument(document: object): LintResult {
   for (const [pathStr, pathItem] of Object.entries(isSpecObject(paths) ? paths : {}).sort(([a], [b]) =>
     a < b ? -1 : 1,
   )) {
-    if (!isSpecObject(pathItem) || '$ref' in pathItem) continue;
+    if (!isSpecObject(pathItem) || isReferenceObject(pathItem)) continue;
 
     // Path-item-level parameters apply to every operation (the generator
     // merges them the same way) — lint must see them too.

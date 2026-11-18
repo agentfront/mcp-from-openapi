@@ -709,7 +709,7 @@ export class Validator {
         this.validateOperation(entry, path, resolvedPathLevel, pathLevel, templateNames, pathLevelQuerystringValid, context);
       }
 
-      if (listed.operations.length === 0 && !pathItem['$ref']) {
+      if (listed.operations.length === 0 && !isReferenceObject(pathItem)) {
         warnings.push({
           message: `Path has no operations: ${messageText(path)}`,
           path: legacyBase,

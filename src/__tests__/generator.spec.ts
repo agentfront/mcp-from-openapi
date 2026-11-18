@@ -1339,14 +1339,9 @@ describe('ParameterResolver', () => {
       expect(oauthSchema.description).not.toContain('scopes:');
     });
 
-    it('should throw when request body has empty content', () => {
+    it('reads a request body with empty content as no body', () => {
       const resolver = new ParameterResolver();
-      expect(() => resolver.resolve({
-        requestBody: {
-          required: true,
-          content: {},
-        },
-      })).toThrow('No content type available in request body');
+      expect(resolver.resolve({ requestBody: { required: true, content: {} } }).mapper).toEqual([]);
     });
 
     it('should use fallback content type when none match preferences', () => {
@@ -1840,22 +1835,19 @@ describe('OpenAPIToolGenerator - Additional Coverage', () => {
         components: { securitySchemes: { token: { type: 'http', scheme: 'bearer' } } },
         paths: {
           '/users': {
-            // `security` must be a list: with schemes defined, this tool fails
-            get: { operationId: 'getUsers', security: { token: [] }, responses: { '200': { description: 'OK' } } },
+            // An operationId must be a string: this tool fails
+            get: { operationId: { name: 'getUsers' }, responses: { '200': { description: 'OK' } } },
             post: { operationId: 'createUser', responses: { '200': { description: 'OK' } } },
           },
         },
       };
 
-      // Validation refuses a security that is not a list (INVALID_FIELD_TYPE): generation reads it with validate: false
+      // Validation refuses an operationId that is not a string (INVALID_FIELD_TYPE): read with validate: false
       const generator = await OpenAPIToolGenerator.fromJSON(openapi, { validate: false });
       const tools = await generator.generateTools();
 
       expect(tools.map((t) => t.name)).toEqual(['createUser']);
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Failed to generate tool for GET /users:',
-        '/paths/~1users/get/security must be an array of Security Requirement Objects, found an object',
-      );
+      expect(consoleSpy).toHaveBeenCalledWith('Failed to generate tool for GET /users:', expect.any(String));
 
       consoleSpy.mockRestore();
     });
@@ -6606,22 +6598,34 @@ describe('OpenAPI 3.2 operations, versions and diagnostics (issue #55)', () => {
       expect(codes(generator)).toEqual(['UNRESOLVED_SECURITY_SCHEME', 'INVALID_SECURITY_REQUIREMENT']);
     });
 
-    it('fails a tool whose security is not a list when schemes exist, as before, with a typed error', async () => {
+    it('reads an operation security that is not a list as absent, and fails on such a document security', async () => {
+      // The operation's: the document's requirements apply, with a diagnostic
       const generator = await OpenAPIToolGenerator.fromJSON(securedSpec({ basic: [] }), { validate: false });
-      await expect(generator.generateTool('/pets', 'put')).rejects.toThrow(GenerationError);
-      await expect(generator.generateTool('/pets', 'put')).rejects.toThrow(
-        '/paths/~1pets/put/security must be an array of Security Requirement Objects, found an object',
+      expect((await generator.generateTool('/pets', 'put')).metadata.security).toBeUndefined();
+      expect(generator.getDiagnostics().map((diagnostic) => diagnostic.code)).toEqual(['INVALID_SECURITY_REQUIREMENT']);
+
+      // The document's, with schemes: the tool fails with a typed error
+      const pets = { '/pets': { put: op({ operationId: 'updatePet' }) } };
+      const documentLevel = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', pets, { ...schemes, security: { basic: [] } }),
+        { validate: false },
+      );
+      await expect(documentLevel.generateTool('/pets', 'put')).rejects.toThrow(GenerationError);
+      await expect(documentLevel.generateTool('/pets', 'put')).rejects.toThrow(
+        '/security must be an array of Security Requirement Objects, found an object',
       );
       const warn = silenceWarnings();
       try {
-        expect(await generator.generateTools()).toEqual([]);
+        expect(await documentLevel.generateTools()).toEqual([]);
         expect(warn).toHaveBeenCalledWith('Failed to generate tool for PUT /pets:', expect.any(String));
       } finally {
         warn.mockRestore();
       }
 
       // without schemes there was never anything to read: the tool is generated
-      const noSchemes = await OpenAPIToolGenerator.fromJSON(securedSpec({ basic: [] }, {}), { validate: false });
+      const noSchemes = await OpenAPIToolGenerator.fromJSON(clean('3.2.0', pets, { security: { basic: [] } }), {
+        validate: false,
+      });
       expect((await noSchemes.generateTool('/pets', 'put')).metadata.security).toEqual([]);
     });
   });
@@ -7079,19 +7083,14 @@ describe('OpenAPI 3.2 parameters and responses (issue #55)', () => {
       expect(generator.getDiagnostics().filter((d) => d.code === 'UNSUPPORTED_STREAMING_REQUEST_BODY')).toEqual([]);
     });
 
-    it('keeps the earlier outcome for a request body with an empty content map', async () => {
-      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-      try {
-        const generator = await OpenAPIToolGenerator.fromJSON(
-          clean('3.2.0', { '/a': { post: op({ operationId: 'a', requestBody: { content: {} } }) } }),
-          { validate: false },
-        );
-        expect(await generator.generateTools()).toEqual([]);
-        expect(warn).toHaveBeenCalledWith('Failed to generate tool for POST /a:', 'No content type available in request body');
-        expect(generator.getDiagnostics().map((diagnostic) => diagnostic.code)).toEqual(['TOOL_GENERATION_FAILED']);
-      } finally {
-        warn.mockRestore();
-      }
+    it('reads a request body with an empty content map as no body', async () => {
+      const generator = await OpenAPIToolGenerator.fromJSON(
+        clean('3.2.0', { '/a': { post: op({ operationId: 'a', requestBody: { content: {} } }) } }),
+        { validate: false },
+      );
+      const [tool] = await generator.generateTools();
+      expect(tool.mapper).toEqual([]);
+      expect(generator.getDiagnostics()).toEqual([]);
     });
   });
 

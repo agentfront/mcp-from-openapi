@@ -52,7 +52,7 @@ tool.inputSchema.properties.headerTrace;
 // { type: 'string', 'x-parameter-location': 'header', 'x-mcp-header': 'trace' }
 ```
 
-This is always on. Conflict renames only change the input key, so `x-mcp-header` preserves the true header; security-derived header inputs (when `includeSecurityInInput` is set) carry it too (`Authorization`, or the API-key header name). All client targets preserve `x-` keywords, so the marker survives `target` transforms. Generic MCP-to-HTTP bridges can use it to route inputs into headers without consulting the mapper.
+This is always on. Conflict renames only change the input key, so `x-mcp-header` preserves the true header; security-derived header inputs (when `includeSecurityInInput` is set) carry it too (`Authorization`, or the API-key header name). All client targets preserve `x-` keywords, so the marker survives `target` transforms. Generic MCP-to-HTTP bridges can use it to route inputs into headers without consulting the mapper. Only the library writes it: a parameter schema's own `x-mcp-header`, `x-parameter-style`, `x-parameter-explode`, `x-parameter-content-type` or `x-parameter-whole-query` is removed before the library writes its own, so a document cannot route a query parameter into `Authorization` this way.
 
 ## Security elicitation descriptors
 

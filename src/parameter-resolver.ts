@@ -389,8 +389,10 @@ export class ParameterResolver {
     }
 
     // Process request body
-    if (requestBody?.content) {
-      const contentType = this.selectContentType(requestBody.content);
+    // A content map with no media type is no body
+    if (requestBody?.content && Object.keys(requestBody.content).length > 0) {
+      // `content` holds a media type (checked above), so one is selected
+      const contentType = selectRequestMediaType(requestBody.content) as string;
       // 3.2 also allows a Reference Object here; like the rest of generation, read it as resolved
       const mediaType = requestBody.content[contentType] as MediaTypeObject | undefined;
 
@@ -466,13 +468,13 @@ export class ParameterResolver {
       return {
         name: param.name,
         location: param.in as ParameterLocation,
-        required: param.required ?? param.in === 'path',
-        schema: param.schema ?? { type: 'string' },
-        description: param.description,
+        required: isRequired(param),
+        schema: typeof param.schema === 'boolean' || isSpecObject(param.schema) ? param.schema : { type: 'string' },
+        description: textOf(param.description),
         style: param.style,
         explode: param.explode,
         allowReserved: param.allowReserved,
-        deprecated: param.deprecated,
+        deprecated: param.deprecated === true || undefined,
         examples: this.includeExamples ? collectExampleValues(param.example, param.examples) : undefined,
       };
     }
@@ -485,11 +487,11 @@ export class ParameterResolver {
       name: param.name,
       // The whole query string is a query entry (ParameterLocation is unchanged)
       location: wholeQuery ? 'query' : (param.in as ParameterLocation),
-      required: param.required ?? param.in === 'path',
+      required: isRequired(param),
       // No schema (or no Media Type Object): unconstrained for JSON, an object for a form, else a string
       schema: (mediaSchema ?? schemaWithoutMediaSchema(contentType)) as SchemaOrBoolean,
-      description: param.description,
-      deprecated: param.deprecated,
+      description: textOf(param.description),
+      deprecated: param.deprecated === true || undefined,
       // The parameter's own example(s) first, else the media type's
       examples: this.includeExamples
         ? (collectExampleValues(param.example, param.examples) ??
@@ -544,9 +546,7 @@ export class ParameterResolver {
           // flattened properties: { example: { name: 'Ada' } } -> name: ['Ada']
           const propExamples = mediaExamples
             ?.map((ex) =>
-              ex !== null && typeof ex === 'object' && !Array.isArray(ex)
-                ? (ex as Record<string, unknown>)[propName]
-                : undefined,
+              ex !== null && typeof ex === 'object' && !Array.isArray(ex) ? ownProperty(ex, propName) : undefined,
             )
             .filter((value) => value !== undefined);
           const info: ParameterInfo = {
@@ -599,6 +599,8 @@ export class ParameterResolver {
    */
   private buildParameterSchema(param: ParameterInfo): JsonSchema {
     const schema: JsonSchema = toJsonSchema(param.schema as any, this.schemaConversion);
+    // The library's own annotations say where the value goes: one the document wrote would contradict the mapper
+    for (const key of RESERVED_PARAMETER_ANNOTATIONS) delete (schema as Record<string, unknown>)[key];
 
     if (param.description) {
       schema.description = param.description;
@@ -639,17 +641,6 @@ export class ParameterResolver {
     }
 
     return schema;
-  }
-
-  /**
-   * Select the most appropriate content type
-   */
-  private selectContentType(content: Record<string, any>): string {
-    const contentType = selectRequestMediaType(content);
-    if (!contentType) {
-      throw new Error('No content type available in request body');
-    }
-    return contentType;
   }
 
   /** The mapper entry of each scheme the requirements name, with its input schema when the scheme is an input */
@@ -798,6 +789,25 @@ const IGNORED_HEADER_PARAMETERS: ReadonlySet<string> = new Set([
 function isIgnoredHeaderParameter(name: string): boolean {
   const lowerCaseName = name.toLowerCase();
   return IGNORED_HEADER_PARAMETERS.has(lowerCaseName) || lowerCaseName.startsWith('x-forwarded-');
+}
+
+/** The annotations `buildParameterSchema` writes, never taken from the document */
+const RESERVED_PARAMETER_ANNOTATIONS = [
+  'x-mcp-header',
+  'x-parameter-style',
+  'x-parameter-explode',
+  'x-parameter-content-type',
+  'x-parameter-whole-query',
+] as const;
+
+/** A path parameter is always required (a path has no place without it); another only when `required: true` */
+function isRequired(param: ParameterObject): boolean {
+  return param.in === 'path' || param.required === true;
+}
+
+/** `value` when it is a string: a description of another type is not one */
+function textOf(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
 }
 
 /** Where a value goes on the wire; header names compare in any case */
