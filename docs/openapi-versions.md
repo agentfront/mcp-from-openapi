@@ -1453,6 +1453,37 @@ tool.outputSchema.properties.customer.anyOf[0]['x-expansionResources'];
 // { oneOf: [{ $ref: '#/components/schemas/customer' }, { $ref: '#/components/schemas/deleted_customer' }] }
 ```
 
+### `$ref` beside other keywords
+
+In a document declaring OpenAPI 3.1 or later, a Schema Object is JSON Schema 2020-12, where a `$ref` applies together with the keywords beside it. Dereferencing replaces the whole object with the target, so the library first moves the `$ref` into `allOf` (`{ $ref, maxLength: 5 }` becomes `{ allOf: [{ $ref }], maxLength: 5 }`), which means the same:
+
+| Schema in a 3.1 document | Before | Now |
+| --- | --- | --- |
+| `{ $ref: '#/components/schemas/Code', maxLength: 5 }` | `{ type: 'string' }`: `maxLength` dropped | `{ allOf: [{ type: 'string' }], maxLength: 5 }` |
+| `{ $ref: '#/components/schemas/Pet', required: ['name'] }` as a body | Flattened, nothing required | Flattened, `name` required |
+| `{ $ref: '#/components/schemas/Code', readOnly: true }` as a property | An input | Left out of the input, as `readOnly` says |
+| `{ $ref: '#/components/schemas/Code', description: 'A code' }` | The target | The target, as before: only `summary`, `description`, `title`, `$comment` and `x-` fields beside it, which describe, leave a `$ref` alone |
+
+A `$ref` that is not a schema (a Parameter, Response or path item reference) and any data (`example`, `examples`, `default`, `enum`, `const`, an `x-` value) are not changed. In OpenAPI 3.0 and Swagger 2.0, keywords beside a `$ref` are ignored, as those versions say.
+
+### A cut or a cycle never makes a schema refuse what the document accepts
+
+A schema cut at `maxSchemaDepth`, and a cycle the conversion cuts with `{}`, accept more than the document's schema. Above such a subschema, a keyword that would turn that into refusing more is changed:
+
+| Above a cut or cycle | Now |
+| --- | --- |
+| `not` | Left out (it would refuse more) |
+| `if` | Left out with its `then` and `else` (it would select more) |
+| `oneOf` | Read as `anyOf`: a value can now match two members (beside an `anyOf`, as `allOf: [{ anyOf: [...] }]`) |
+| `contains` | Its `maxContains` is left out |
+| `allOf`, `anyOf`, `oneOf`, `if`, `then`, `else`, `dependentSchemas` | `unevaluatedProperties` and `unevaluatedItems` beside them are left out |
+
+A cut that removes only `$defs` or `definitions` changes nothing above it. `SchemaBuilder.truncateDepth` applies the same rule on its own.
+
+### An open object body is kept whole
+
+A request body (or `allOf` member) whose `additionalProperties` or `unevaluatedProperties` is anything but `false` accepts properties it does not name, which a flattened input could not send. Such a body is now one `body` input (`wholeBody: true`), as is a body whose properties are all `readOnly`. A body without either keyword, or with `additionalProperties: false`, is flattened as before.
+
 ### Fields that only add
 
 `x-parameter-content-type` and `x-parameter-whole-query` on input properties, `wholeQuery` on a mapper entry, `queryString` on a built request, `metadata.servers[].name`, `metadata.responseStream` and `responseHints.streaming`, `LoadOptions.documentUri`, `rule`, `reference`, `base`, `resolved` and `path` on the `context` of a `ParseError`, `context.reason` on an `SsrfError`, `metadata.responseStatusRanges` and the type `ResponseStatusRange`, `upgradeSwagger2` with its options (`documentUri`, `maxEntries`) and result types (`document`, `diagnostics`, `parameterIndexes`, `tooLarge`), `MAX_MEDIA_TYPES_PER_LIST` and `MAX_CONVERSION_ENTRIES`, and the `OAS20` types, the `SWAGGER_*` conversion codes (and `DEREFERENCE_REQUIRED` and `INVALID_BASE_PATH`, validation errors for a Swagger 2.0 document), the `info` severity of a diagnostic and `SpecDiagnostic.document`, and the new warnings (`INVALID_PARAMETER_CONTENT`, `DUPLICATE_PARAMETER`, `PARAMETER_NAME_NOT_STRING`, `REQUIRED_INPUT_ACCEPTS_NOTHING`, `SCHEMA_DEPTH_REDUCED`, `UNSUPPORTED_STREAMING_REQUEST_BODY`, `REQUEST_BODY_WITHOUT_MEDIA_TYPE`, `COOKIE_CONTENT_NOT_SENDABLE`, `QUERYSTRING_WITH_QUERY_CREDENTIAL`, `INVALID_SELF`, `REFUSED_SELF`, `UNRESOLVABLE_SELF`, `BASE_URI_TOO_LONG`; a valid document stays valid, apart from a 3.2 document whose `$self` is not a URI reference, which `validate()` now rejects with `INVALID_SELF`). `fromArazzo` rejects a `loadOptions.documentUri` with an `ArazzoError` (see [Arazzo Workflows](./arazzo.md#sources)).
@@ -1503,9 +1534,7 @@ What the library does not do yet. These exist today and apply as stated; each is
 - A multipart part is marked as a file (`serialization.binary: true` on its mapper entry) for `format: binary` and for a schema with `contentMediaType` and no `type`, but not for the bare OpenAPI 3.1+ spelling of a binary part (`{}`, or a schema with only a `description`), nor for `type: string` with `contentMediaType` (read as an embedded string payload, not a file). With a `Blob` the request is the same under all five: each goes out as a file part with the `Blob`'s content type, because `buildHttpRequest` decides a file part from the value, so only what reads the mapper sees the difference. Write `type: string, format: binary` (the spelling the official 3.1 and 3.2 test document `media-type-examples.yaml` uses for a binary part) to have the part marked.
 - A whole request body of `application/octet-stream` whose schema is `{}` or has only a `description` (in OpenAPI 3.0 and 3.1+ alike), or is `type: string` with `contentMediaType` (3.1+), is not marked binary: a `Uint8Array` given as `body` is sent as JSON text (`{"0":1,"1":2,"2":3}`) under `content-type: application/octet-stream`. Write the schema as `type: string, format: binary`, or in 3.1+ as `contentMediaType: application/octet-stream` with no `type`: the builder then sends the bytes untouched (`Uint8Array`, `Blob` or string).
 - In a document declaring OpenAPI 3.0, a tuple `items` (a list of schemas, the JSON Schema draft-04 form that 3.0 does not allow) and `additionalItems` are left as written in the tool's schema, with no diagnostic and no `validate()` warning, so the tool's JSON Schema 2020-12 schema is invalid there (Ajv's 2020 dialect refuses it: `items must be object,boolean`); the same happens in a 3.1 document that uses the draft-04 form instead of `prefixItems`. Only a Swagger 2.0 document is converted: its tuple `items` becomes `items: {}` and `additionalItems` is dropped (`SWAGGER_NOT_CONVERTED`).
-- With `validate: false`, a path parameter with an explicit `required: false` stays optional in a tool of an OpenAPI 3 document (validation rejects it with `PATH_PARAMETER_NOT_REQUIRED`; the Swagger 2.0 conversion makes every path parameter required): a call that leaves it out fails with `Unresolved path parameters remain`.
-- Path-level `servers` are ignored. Operation-level and document-level `servers` are used.
-- A `$ref` with sibling keywords (`$ref` plus `description`) keeps only the target when the library dereferences internal references itself; external references keep the siblings.
+- Keywords beside a `$ref` inside a document the entry document references (another file or URL) are merged into the target by `$RefParser`, where a keyword beside the `$ref` replaces the target's. In the entry document they are read as the declared version says (see [`$ref` beside other keywords](#ref-beside-other-keywords)).
 - The delimiter of a non-exploded array is percent-encoded: `style: form` with `explode: false` is sent as `ids=1%2C2%2C3`, `pipeDelimited` as `ids=1%7C2%7C3` and `spaceDelimited` as `ids=1%202%203` in a query (`+` in a form). OpenAPI 3.2.1 says the delimiters are not percent-encoded; servers generally accept both. `allowReserved: true` keeps the comma raw (`ids=1,2,3`) but not `|`.
 - A `spaceDelimited` or `pipeDelimited` **object** is comma-joined (`o=a%2C1%2Cb%2C2`), as is `form` with `explode: false`: the specification gives no delimiter form for them.
 - The indexed array conventions that go beyond the specification (`expand[0]`, `line_items[0][price]`, `items[][key]`) are not produced, so an array of objects in a form field, a `deepObject` or a query parameter is a `RequestBuildError`.

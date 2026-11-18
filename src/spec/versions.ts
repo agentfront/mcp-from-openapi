@@ -290,6 +290,8 @@ export interface SpecProfile extends OperationLayout {
   readonly securitySchemeTypes: readonly string[];
   /** The `in` values of an `apiKey` security scheme, which also requires a `name`. */
   readonly apiKeyLocations: readonly string[];
+  /** Whether a Schema Object's `$ref` applies together with its other keywords, rather than replacing them. */
+  readonly schemaReferenceSiblings: boolean;
 }
 
 const PROFILE_2_0: SpecProfile = Object.freeze({
@@ -326,6 +328,8 @@ const PROFILE_2_0: SpecProfile = Object.freeze({
   securitySchemeTypes: Object.freeze(['basic', 'apiKey', 'oauth2']),
   // 2.0 schema #/definitions/apiKeySecurity/properties/in/enum (required: type, name, in)
   apiKeyLocations: Object.freeze(['header', 'query']),
+  // 2.0 spec text, Reference Object: a JSON Reference, whose other members are ignored
+  schemaReferenceSiblings: false,
 });
 
 const PROFILE_3_0: SpecProfile = Object.freeze({
@@ -360,6 +364,8 @@ const PROFILE_3_0: SpecProfile = Object.freeze({
   securitySchemeTypes: Object.freeze(['apiKey', 'http', 'oauth2', 'openIdConnect']),
   // 3.0 schema #/definitions/APIKeySecurityScheme/properties/in/enum (required: type, name, in)
   apiKeyLocations: Object.freeze(['header', 'query', 'cookie']),
+  // 3.0 spec text, Reference Object: "any properties added SHALL be ignored"
+  schemaReferenceSiblings: false,
 });
 
 const PROFILE_3_1: SpecProfile = Object.freeze({
@@ -392,6 +398,8 @@ const PROFILE_3_1: SpecProfile = Object.freeze({
   securitySchemeTypes: Object.freeze(['apiKey', 'http', 'mutualTLS', 'oauth2', 'openIdConnect']),
   // 3.1 schema #/$defs/security-scheme/$defs/type-apikey: properties/in/enum (required: name, in)
   apiKeyLocations: Object.freeze(['query', 'header', 'cookie']),
+  // 3.1 spec text, Schema Object: JSON Schema 2020-12, where `$ref` is an applicator beside other keywords
+  schemaReferenceSiblings: true,
 });
 
 const PROFILE_3_2: SpecProfile = Object.freeze({
@@ -428,6 +436,8 @@ const PROFILE_3_2: SpecProfile = Object.freeze({
   securitySchemeTypes: Object.freeze(['apiKey', 'http', 'mutualTLS', 'oauth2', 'openIdConnect']),
   // 3.2 schema #/$defs/security-scheme/$defs/type-apikey: properties/in/enum (required: name, in)
   apiKeyLocations: Object.freeze(['query', 'header', 'cookie']),
+  // 3.2 spec text, Schema Object: JSON Schema 2020-12, as in 3.1
+  schemaReferenceSiblings: true,
 });
 
 /**

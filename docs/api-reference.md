@@ -639,7 +639,7 @@ interface ParameterMapper {
 }
 ```
 
-`wholeBody` is set for non-object bodies (arrays, primitives, binary) and root `oneOf`/`anyOf` union bodies: send `input[inputKey]` directly as the request body instead of wrapping it in `{ [key]: value }`. See [SerializationInfo](#serializationinfo) for the content-type, encoding, and binary markers.
+`wholeBody` is set for a body that cannot be flattened into named properties (a non-object body, a union, a constraint properties cannot say, an open object: see [Whole-body parameters](./parameter-conflicts.md#whole-body-parameters)): send `input[inputKey]` directly as the request body instead of wrapping it in `{ [key]: value }`. See [SerializationInfo](#serializationinfo) for the content-type, encoding, and binary markers.
 
 `wholeQuery` is set only on a `type: 'query'` entry, for an OpenAPI 3.2 parameter `in: querystring`: the input value is the entire query string, serialized in `serialization.contentType`, and `key` (the parameter's name) is never sent. An operation has at most one such entry and no other non-security `query` entry. See [Request Builder](./request-builder.md#whole-query-parameters).
 

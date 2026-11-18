@@ -92,4 +92,5 @@ export {
 export type { Swagger2BasePath, UpgradeSwagger2Options, UpgradeSwagger2Result } from './upgrade-v2';
 
 export { parameterNameNotStringDiagnostic, readParameterName, withTextName } from './parameters';
+export { wrapReferenceSiblings } from './schema-references';
 export type { ParameterName } from './parameters';

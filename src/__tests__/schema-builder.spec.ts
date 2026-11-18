@@ -592,7 +592,7 @@ describe('SchemaBuilder', () => {
       expect(result.items[1]).toEqual({ type: 'number' });
     });
 
-    it('should traverse composition members and not', () => {
+    it('should traverse composition members and not, keeping what a cut member allowed', () => {
       const schema = {
         oneOf: [{ type: 'object', properties: { a: { type: 'string' } } }],
         anyOf: [{ type: 'object', properties: { b: { type: 'string' } } }],
@@ -601,10 +601,12 @@ describe('SchemaBuilder', () => {
       } as any;
       const result = SchemaBuilder.truncateDepth(schema, 1) as any;
 
-      expect(result.oneOf[0].properties).toBeUndefined();
       expect(result.anyOf[0].properties).toBeUndefined();
       expect(result.allOf[0].properties).toBeUndefined();
-      expect(result.not.properties).toBeUndefined();
+      // A cut member matches more: the oneOf is read as anyOf (beside the anyOf, under allOf), the not left out
+      expect(result.oneOf).toBeUndefined();
+      expect(result.allOf[1].anyOf[0].properties).toBeUndefined();
+      expect(result.not).toBeUndefined();
     });
 
     it('should traverse object-valued additionalProperties', () => {
@@ -676,10 +678,9 @@ describe('SchemaBuilder.truncateDepth 2020-12 keyword coverage', () => {
     expect(result.prefixItems[1]).toEqual({ type: 'number' });
   });
 
-  it('should truncate schemas under if/then/else, propertyNames, and contains', () => {
+  it('should truncate schemas under then/else, propertyNames, and contains, and leave out an if a cut loosened', () => {
     const result = SchemaBuilder.truncateDepth(
       {
-        if: deep,
         then: deep,
         else: deep,
         propertyNames: { pattern: '^a' },
@@ -688,11 +689,11 @@ describe('SchemaBuilder.truncateDepth 2020-12 keyword coverage', () => {
       1,
     ) as any;
 
-    expect(result.if.properties).toBeUndefined();
     expect(result.then.properties).toBeUndefined();
     expect(result.else.properties).toBeUndefined();
     expect(result.contains.properties).toBeUndefined();
     expect(result.propertyNames).toEqual({ pattern: '^a' }); // leaf: untouched
+    expect(SchemaBuilder.truncateDepth({ if: deep, then: deep, else: deep } as any, 1)).toEqual({});
   });
 
   it('should strip deep keyword children at the truncation boundary', () => {

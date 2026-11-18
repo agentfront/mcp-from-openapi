@@ -264,7 +264,7 @@ The reference becomes a local one before dereferencing, and it is held to this:
 - **No fragment, an empty one (`#`) and `""` mean the whole document.** `""` counts only when the document has a base; without one it is left as written.
 - **The target must exist as written.** A pointer that leads nowhere fails the load with a `ParseError` of rule `missing-target`: `it names this document, but "#/components/schemas/Nope" points to nothing in it`. It never becomes `{}`.
 - **The pointer may not pass through another `$ref`.** `#/components/schemas/Alias/properties`, where `Alias` is `{ "$ref": "#/components/schemas/Pet" }`, is refused with the same rule (`its pointer goes through another $ref (at "#/components/schemas/Alias"), which is not followed`): the two dereferencers the library uses would not agree on it.
-- **Keywords next to the `$ref` are dropped**, as for any `#/...` reference (the siblings were kept when the document was fetched again).
+- **Keywords next to the `$ref` are dropped**, as for any `#/...` reference (the siblings were kept when the document was fetched again). In a document declaring 3.1 or later, the constraints beside a schema's `$ref` apply instead ([`$ref` beside other keywords](./openapi-versions.md#ref-beside-other-keywords)).
 
 An ordinary local reference (`#/...`) keeps the reading it always had: its percent-escapes are not decoded, and one that leads nowhere becomes `{}` without an error. Only a reference that names the document by URI is checked.
 

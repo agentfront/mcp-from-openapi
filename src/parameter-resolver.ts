@@ -951,6 +951,9 @@ function mergeDefinitions(definitions: unknown[]): unknown {
   return merged;
 }
 
+/** Keywords that, unless `false`, let a body (or `allOf` member) hold properties it does not name */
+const OPENING_KEYWORDS = ['additionalProperties', 'unevaluatedProperties'] as const;
+
 /**
  * Keywords of an object body named properties cannot say: a body (or `allOf`
  * member) holding one is kept whole, so the tool keeps the constraint
@@ -1017,6 +1020,8 @@ function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'whole'
     entered.add(member);
     const record = member as Record<string, unknown>;
     if (WHOLE_BODY_KEYWORDS.some((keyword) => record[keyword] !== undefined)) return false;
+    // Other properties the body accepts could not be sent through a closed input
+    if (OPENING_KEYWORDS.some((keyword) => record[keyword] !== undefined && record[keyword] !== false)) return false;
     frames.push({ schema: record, members: Array.isArray(record['allOf']) ? record['allOf'] : [], next: 0 });
     return true;
   };
@@ -1074,8 +1079,9 @@ function collectObjectMembers(schema: JsonSchema): FlattenedObjectBody | 'whole'
 /**
  * Flatten an object body schema — including `allOf` compositions — into a
  * single property map. Returns undefined when the body cannot be represented
- * as named properties: a `WHOLE_BODY_KEYWORDS` constraint at the root OR inside
- * any allOf member (flattening would delete it), non-object schemas
+ * as named properties: a `WHOLE_BODY_KEYWORDS` constraint or an open
+ * `OPENING_KEYWORDS` keyword at the root OR inside any allOf member
+ * (flattening would delete it), non-object schemas
  * (arrays, primitives, binary), and objects without a property a request
  * sends (free-form, or every property `readOnly`).
  */

@@ -55,6 +55,7 @@ import {
   MAX_CONVERSION_ENTRIES,
   upgradeSwagger2,
   wireMethod,
+  wrapReferenceSiblings,
   diagnosticKey,
   type OperationEntry,
   type OperationLayout,
@@ -1982,6 +1983,8 @@ export class OpenAPIToolGenerator {
         originalError: error,
       });
     }
+    // Before any `$ref` is read: dereferencing would drop the keywords beside a schema's `$ref`
+    if (getSpecProfile(this.specVersion.family)?.schemaReferenceSiblings) wrapReferenceSiblings(copy);
     const exact = new Map<object, readonly string[]>();
     const base = this.documentBase;
     if (base !== undefined) {

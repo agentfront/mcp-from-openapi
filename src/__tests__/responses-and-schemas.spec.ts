@@ -154,6 +154,61 @@ describe('schema trimming never refuses what the document accepts', () => {
     expect((cut.properties as Record<string, unknown>)['c']).not.toHaveProperty('unevaluatedItems');
   });
 
+  it('reads oneOf as anyOf, and leaves out a not or an if, over a cycle cut', () => {
+    const node: Record<string, any> = {
+      type: 'object',
+      properties: {
+        parent: { oneOf: [{ type: 'null' }, null] },
+        other: { not: null },
+        branch: { if: null, then: { required: ['x'] }, else: { required: ['y'] } },
+        list: { type: 'array', contains: null, maxContains: 1 },
+        plain: { not: { type: 'string' } },
+      },
+    };
+    node.properties.parent.oneOf[1] = node;
+    node.properties.other.not = node;
+    node.properties.branch.if = node;
+    node.properties.list.contains = node;
+    const properties = toJsonSchema(node as never).properties as Record<string, Record<string, unknown>>;
+    expect(properties['parent']).toEqual({ anyOf: [{ type: 'null' }, {}] });
+    expect(properties['other']).toEqual({});
+    expect(properties['branch']).toEqual({});
+    expect(properties['list']).toEqual({ type: 'array', contains: {} });
+    expect(properties['plain']).toEqual({ not: { type: 'string' } });
+  });
+
+  it('keeps a oneOf that holds an anyOf by moving the loosened members under allOf', () => {
+    const node: Record<string, any> = { oneOf: [{ type: 'string' }, null], anyOf: [{ minLength: 1 }] };
+    node.oneOf[1] = node;
+    expect(toJsonSchema(node as never)).toEqual({
+      anyOf: [{ minLength: 1 }],
+      allOf: [{ anyOf: [{ type: 'string' }, {}] }],
+    });
+  });
+
+  it.each([
+    ['not', { not: { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] } }, {}],
+    [
+      'oneOf',
+      { oneOf: [{ type: 'object', properties: { a: { type: 'string' } } }, { type: 'string' }] },
+      { anyOf: [{ type: 'object', description: '[Truncated: nested schema exceeds maxSchemaDepth]' }, { type: 'string' }] },
+    ],
+    [
+      'unevaluatedProperties',
+      { allOf: [{ properties: { a: { type: 'string' } } }], unevaluatedProperties: false },
+      { allOf: [{ description: '[Truncated: nested schema exceeds maxSchemaDepth]' }] },
+    ],
+  ])('keeps a %s over a depth cut from refusing what the document accepts', (_label, schema, expected) => {
+    expect(SchemaBuilder.truncateDepth(schema as never, 1)).toEqual(expected);
+  });
+
+  it('keeps a oneOf whose member a cut takes only definitions from', () => {
+    const schema = { oneOf: [{ type: 'string', $defs: { a: { type: 'string' } } }, { type: 'number' }] };
+    expect(SchemaBuilder.truncateDepth(schema as never, 1)).toEqual({
+      oneOf: [{ type: 'string', description: '[Truncated: nested schema exceeds maxSchemaDepth]' }, { type: 'number' }],
+    });
+  });
+
   it('opens an object whose properties maxProperties removed', () => {
     const limited = SchemaBuilder.limitProperties(
       {

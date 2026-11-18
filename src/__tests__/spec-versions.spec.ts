@@ -8,6 +8,7 @@ import * as diagnosticsModule from '../spec/diagnostics';
 import * as operationsModule from '../spec/operations';
 import * as upgradeModule from '../spec/upgrade-v2';
 import * as parametersModule from '../spec/parameters';
+import * as schemaReferencesModule from '../spec/schema-references';
 import * as versionsModule from '../spec/versions';
 import {
   DESCRIBED_VALUE_MAX_LENGTH,
@@ -376,6 +377,7 @@ describe('profiles', () => {
       self: false,
       securitySchemeTypes: ['basic', 'apiKey', 'oauth2'],
       apiKeyLocations: ['header', 'query'],
+      schemaReferenceSiblings: false,
     },
     '3.0': {
       fixedMethods: ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'],
@@ -392,6 +394,7 @@ describe('profiles', () => {
       self: false,
       securitySchemeTypes: ['apiKey', 'http', 'oauth2', 'openIdConnect'],
       apiKeyLocations: ['header', 'query', 'cookie'],
+      schemaReferenceSiblings: false,
     },
     '3.1': {
       fixedMethods: ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'],
@@ -408,6 +411,7 @@ describe('profiles', () => {
       self: false,
       securitySchemeTypes: ['apiKey', 'http', 'mutualTLS', 'oauth2', 'openIdConnect'],
       apiKeyLocations: ['query', 'header', 'cookie'],
+      schemaReferenceSiblings: true,
     },
     '3.2': {
       fixedMethods: ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace', 'query'],
@@ -424,6 +428,7 @@ describe('profiles', () => {
       self: true,
       securitySchemeTypes: ['apiKey', 'http', 'mutualTLS', 'oauth2', 'openIdConnect'],
       apiKeyLocations: ['query', 'header', 'cookie'],
+      schemaReferenceSiblings: true,
     },
   };
 
@@ -991,6 +996,7 @@ describe('the spec barrel', () => {
       'upgradeSwagger2',
     ],
     parameters: ['parameterNameNotStringDiagnostic', 'readParameterName', 'withTextName'],
+    schemaReferences: ['wrapReferenceSiblings'],
   };
   const modules: Record<keyof typeof RUNTIME_EXPORTS, Record<string, unknown>> = {
     diagnostics: diagnosticsModule,
@@ -998,6 +1004,7 @@ describe('the spec barrel', () => {
     versions: versionsModule,
     upgrade: upgradeModule,
     parameters: parametersModule,
+    schemaReferences: schemaReferencesModule,
   };
 
   it('exports every runtime value of the layer and nothing else', () => {

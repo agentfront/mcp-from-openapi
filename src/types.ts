@@ -142,6 +142,51 @@ const SCHEMA_SINGLE_KEYWORDS = [
   'unevaluatedProperties',
 ] as const;
 
+/** Map-of-schemas keywords whose subschemas apply to the instance (`$defs`/`definitions` never do) */
+const APPLIED_SCHEMA_MAP_KEYWORDS: ReadonlySet<string> = new Set(['properties', 'patternProperties', 'dependentSchemas']);
+
+/** Keywords holding only definitions: a subschema there never applies to the instance */
+export const DEFINITION_KEYWORDS: ReadonlySet<string> = new Set(['$defs', 'definitions']);
+
+/** In-place applicators that collect annotations: what `unevaluatedProperties`/`unevaluatedItems` read */
+const ANNOTATING_APPLICATORS = ['allOf', 'anyOf', 'oneOf', 'if', 'then', 'else', 'dependentSchemas'] as const;
+
+/**
+ * Keeps `schema` accepting every value the document's accepts when some of its subschemas accept more
+ * (`isLoosened`: cut at a depth, or a cycle cut with `{}`), and returns whether one does, which makes
+ * `schema` accept more too. Over such a subschema a `not` would refuse more and an `if` select more, so
+ * they are left out (with the `then`/`else` an `if` selects), as is a `contains`'s `maxContains`; a
+ * `oneOf` becomes `anyOf`, as a value can now match two members; and `unevaluated*` goes when an
+ * annotating applicator holds one, as it may no longer count what that one did. Internal.
+ */
+export function keepAccepting(schema: Record<string, unknown>, isLoosened: (value: unknown) => boolean): boolean {
+  const loosenedUnder = (keyword: string): boolean => {
+    const value = schema[keyword];
+    if (value === null || typeof value !== 'object' || DEFINITION_KEYWORDS.has(keyword)) return false;
+    const members = Array.isArray(value)
+      ? value
+      : APPLIED_SCHEMA_MAP_KEYWORDS.has(keyword)
+        ? Object.values(value)
+        : [value];
+    return members.some(isLoosened);
+  };
+  if (!Object.keys(schema).some(loosenedUnder)) return false;
+  if (ANNOTATING_APPLICATORS.some(loosenedUnder)) {
+    delete schema['unevaluatedProperties'];
+    delete schema['unevaluatedItems'];
+  }
+  if (loosenedUnder('not')) delete schema['not'];
+  if (loosenedUnder('if')) for (const keyword of ['if', 'then', 'else']) delete schema[keyword];
+  if (loosenedUnder('contains')) delete schema['maxContains'];
+  if (loosenedUnder('oneOf')) {
+    const members = schema['oneOf'];
+    delete schema['oneOf'];
+    if (schema['anyOf'] === undefined) schema['anyOf'] = members;
+    else schema['allOf'] = [...(Array.isArray(schema['allOf']) ? schema['allOf'] : []), { anyOf: members }];
+  }
+  return true;
+}
+
 /**
  * Convert OpenAPI schema to JsonSchema
  * Note: OpenAPI 3.0 uses a subset of JSON Schema Draft 4
@@ -185,6 +230,7 @@ export function toJsonSchema(schema: object | boolean, options: SchemaConversion
     cyclic: undefined,
     cut: false,
     lowWater: Infinity,
+    loosened: new WeakSet(),
   };
   // Any object converts (a Schema or Reference Object of any version, or a
   // schema-shaped object the caller built); a boolean becomes its object form
@@ -242,6 +288,8 @@ interface ConversionState {
   cut: boolean;
   /** Lowest stack index a cycle cut in the subtree being converted pointed at. */
   lowWater: number;
+  /** Results that accept more than their schema: a `{}` placeholder, and a result holding one (`keepAccepting`). */
+  readonly loosened: WeakSet<object>;
 }
 
 interface CachedConversion {
@@ -357,7 +405,7 @@ function visitSchema(
   }
   if (depth > state.maxDepth) {
     state.cut = true;
-    return {} as JsonSchema;
+    return placeholder(state);
   }
   const node: unknown = schema;
   if (typeof node === 'boolean') {
@@ -380,9 +428,16 @@ function visitSchema(
   const onStack = state.stack.get(node);
   if (onStack !== undefined) {
     state.lowWater = Math.min(state.lowWater, onStack);
-    return {} as JsonSchema;
+    return placeholder(state);
   }
   return enterSchema(schema, depth, node, state, frames);
+}
+
+/** `{}` in place of a schema the conversion does not reach (below `maxDepth`, or a cycle): it accepts any value */
+function placeholder(state: ConversionState): JsonSchema {
+  const schema = {} as JsonSchema;
+  state.loosened.add(schema);
+  return schema;
 }
 
 /** Charge `cost` nodes against the conversion's budget, throwing once it is exceeded */
@@ -425,6 +480,7 @@ function queueMembers(members: unknown[], depth: number, slots: unknown[], state
  * result, store the result for reuse, and pop the node off the path.
  */
 function finishSchema(frame: ConversionFrame, state: ConversionState): JsonSchema {
+  const loosened = keepAccepting(frame.result, (value) => state.loosened.has(value as object));
   let result = frame.result as JsonSchema;
   if (frame.wrapNullable) {
     // Hoist pure annotation keywords onto the wrapper so descriptions and
@@ -440,6 +496,7 @@ function finishSchema(frame: ConversionFrame, state: ConversionState): JsonSchem
     wrapper['anyOf'] = [inner, { type: 'null' }];
     result = wrapper as JsonSchema;
   }
+  if (loosened) state.loosened.add(result);
   const node = frame.node;
   if (node) {
     state.cache.set(node, {

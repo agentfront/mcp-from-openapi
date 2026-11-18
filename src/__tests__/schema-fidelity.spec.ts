@@ -179,6 +179,22 @@ describe('a flattened body keeps every constraint of its allOf members', () => {
     expect(tool.mapper).toEqual([expect.objectContaining({ wholeBody: true })]);
   });
 
+  it.each([true, {}, { type: 'string' }])(
+    'keeps a body whole when additionalProperties is %p, so it can send other properties',
+    async (additionalProperties) => {
+      const schema = { type: 'object', properties: { a: { type: 'string' } }, additionalProperties };
+      const tool = await toolFor(jsonBody(schema));
+      expect(tool.mapper).toEqual([expect.objectContaining({ key: 'body', wholeBody: true })]);
+      expect(buildHttpRequest(tool, { body: { a: 'x', extra: 'y' } }).body).toBe('{"a":"x","extra":"y"}');
+    },
+  );
+
+  it('still flattens a body whose additionalProperties is false', async () => {
+    const schema = { type: 'object', properties: { a: { type: 'string' } }, additionalProperties: false };
+    const tool = await toolFor(jsonBody(schema));
+    expect(tool.mapper.map((entry) => entry.key)).toEqual(['a']);
+  });
+
   it('still flattens an ordinary object body', async () => {
     const tool = await toolFor(jsonBody({ type: 'object', properties: { a: { type: 'string' } }, required: ['a'] }));
     expect(tool.mapper.map((entry) => entry.key)).toEqual(['a']);

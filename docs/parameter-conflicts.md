@@ -255,7 +255,8 @@ Bodies that cannot be flattened into named properties become a single `body` inp
 
 - Non-object bodies: arrays, primitives, raw binary (`format: binary`)
 - Bodies holding a constraint named properties cannot say — at the root **or inside any `allOf` member** (the composed schema is preserved intact rather than flattening the constraint away): a `oneOf` / `anyOf` union, `not`, `if`, `minProperties` / `maxProperties`, `dependentRequired` / `dependentSchemas`, `patternProperties`, `propertyNames`, `enum`, `const` (a boolean `false` member, which accepts nothing, is `not: {}`)
-- Free-form objects without declared properties
+- Objects that accept properties they do not name: `additionalProperties` or `unevaluatedProperties` set to anything but `false`
+- Objects without a property a request sends: free-form objects without declared properties, and objects whose properties are all `readOnly`
 
 ```typescript
 // POST with `schema: { type: 'array', items: { type: 'string' } }`:

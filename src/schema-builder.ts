@@ -3,6 +3,7 @@ import { SchemaError } from './errors';
 import { chargeBudget, copyJsonValue, mapSlots, type CopyBudget } from './json-copy';
 import { isExtensionKey, referenceAt } from './reference-sites';
 import { setOwnProperty } from './spec';
+import { DEFINITION_KEYWORDS, keepAccepting } from './types';
 
 /** JSON Schema type from Zod v4 */
 type JsonSchema = JSONSchema.JSONSchema;
@@ -138,9 +139,6 @@ const CLOSING_KEYWORDS = ['additionalProperties', 'unevaluatedProperties', 'item
 
 /** Keywords whose subschema a value must not match (`not`) or only selects a branch (`if`) */
 const NEGATED_OR_CONDITIONAL_KEYWORDS: ReadonlySet<string> = new Set(['not', 'if']);
-
-/** Keywords that only hold definitions: removing them allows nothing more */
-const DEFINITION_KEYWORDS: ReadonlySet<string> = new Set(['$defs', 'definitions']);
 
 /**
  * Helper class for building and manipulating JSON schemas
@@ -502,7 +500,7 @@ export class SchemaBuilder {
         );
       },
     };
-    return this.truncateDepthRecursive(schema, 0, normalizeDepthBound(maxDepth), budget);
+    return this.truncateDepthRecursive(schema, 0, normalizeDepthBound(maxDepth), budget, new WeakSet());
   }
 
   /** Keys whose value is a map of schemas (JSON Schema 2020-12) */
@@ -543,12 +541,15 @@ export class SchemaBuilder {
   // shared subschemas come out as independent copies. Because the walk is
   // depth-bounded it terminates even on circular schema graphs (which
   // `clone()`'s JSON round-trip would reject), and its work is bounded by the
-  // size of the tree it returns — which `budget.maxNodes` caps.
+  // size of the tree it returns — which `budget.maxNodes` caps. `loosened`
+  // holds the copies that accept more than their node: a cut that removed a
+  // constraint, and a copy holding one (`keepAccepting`).
   private static truncateDepthRecursive(
     node: JsonSchema,
     depth: number,
     maxDepth: number,
     budget: CopyBudget,
+    loosened: WeakSet<object>,
   ): JsonSchema {
     if (!node || typeof node !== 'object') {
       // A boolean schema (`properties: { a: true }`) is one value
@@ -565,10 +566,10 @@ export class SchemaBuilder {
     const copyRecord = copy as Record<string, unknown>;
     const kinds = this.TRUNCATE_KEY_KINDS;
 
+    // Whether a removed keyword allowed something a closing keyword would then refuse: not an empty map or list
+    let opened = false;
     if (depth >= maxDepth) {
       let stripped = false;
-      // Whether a removed keyword allowed something a closing keyword would then refuse: not an empty map or list
-      let opened = false;
       for (const key of Object.keys(copyRecord)) {
         const value = copyRecord[key];
         if (!kinds.has(key) || !isObject(value)) continue;
@@ -609,15 +610,15 @@ export class SchemaBuilder {
         chargeBudget(budget);
         const mapped: Record<string, JsonSchema> = {};
         for (const [name, sub] of Object.entries(value as Record<string, JsonSchema>)) {
-          setOwnProperty(mapped, name, this.truncateDepthRecursive(sub, childDepth, maxDepth, budget));
+          setOwnProperty(mapped, name, this.truncateDepthRecursive(sub, childDepth, maxDepth, budget, loosened));
         }
         copyRecord[key] = mapped;
       } else if (kind === 'schema' && !Array.isArray(value)) {
-        copyRecord[key] = this.truncateDepthRecursive(value as JsonSchema, childDepth, maxDepth, budget);
+        copyRecord[key] = this.truncateDepthRecursive(value as JsonSchema, childDepth, maxDepth, budget, loosened);
       } else if (kind === 'schema' || (kind === 'list' && Array.isArray(value))) {
         // A list of schemas — or `items` as a tuple array (pre-2020-12 style)
         copyRecord[key] = mapSlots(value as JsonSchema[], budget, (member) =>
-          this.truncateDepthRecursive(member, childDepth, maxDepth, budget),
+          this.truncateDepthRecursive(member, childDepth, maxDepth, budget, loosened),
         );
       } else {
         // Any other object value (`default`, `examples`, `enum`, `x-*`, ...)
@@ -630,6 +631,7 @@ export class SchemaBuilder {
         });
       }
     }
+    if (opened || keepAccepting(copyRecord, (value) => loosened.has(value as object))) loosened.add(copy);
     return copy;
   }
 
