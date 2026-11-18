@@ -23,9 +23,7 @@ on:
         default: false
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: publish-release-${{ github.ref }}
@@ -35,10 +33,19 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     environment: release
+    # Commits, tags and releases (contents) and publishes to npm through OIDC (id-token)
+    permissions:
+      contents: write
+      id-token: write
+    # Inputs reach the shell as variables, never as script text
+    env:
+      RELEASE_TYPE: ${{ inputs.release_type }}
+      PRE_RELEASE_NUM: ${{ inputs.pre_release_number }}
+      DRY_RUN: ${{ inputs.dry_run }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -71,8 +78,14 @@ jobs:
           node-version-file: ".nvmrc"
           registry-url: "https://registry.npmjs.org/"
 
+      # Pinned: this job can publish, so no unpinned code runs in it
       - name: Update npm CLI for trusted publishing
-        run: npm install -g npm@latest
+        run: npm install -g npm@12.2.3
+
+      - name: Typecheck and test
+        run: |
+          yarn typecheck
+          yarn test
 
       - name: Compute version
         id: version
@@ -81,8 +94,12 @@ jobs:
           set -euo pipefail
 
           RELEASE_LINE="${{ steps.context.outputs.release_line }}"
-          RELEASE_TYPE="${{ inputs.release_type }}"
-          PRE_RELEASE_NUM="${{ inputs.pre_release_number }}"
+
+          # A dispatch through the API is not held to the input's choices
+          if ! [[ "$RELEASE_TYPE" =~ ^(stable|rc|beta)$ && "$PRE_RELEASE_NUM" =~ ^[0-9]*$ ]]; then
+            echo "::error::release_type must be stable, rc or beta and pre_release_number a number"
+            exit 1
+          fi
 
           # Fetch all tags
           git fetch --tags
@@ -146,7 +163,7 @@ jobs:
           if [ -n "$PREV_TAG" ]; then
             DIFF=$(git diff "$PREV_TAG"..HEAD \
               --stat --patch \
-              -- '*.ts' '*.js' '*.json' ':!package-lock.json' ':!*.test.ts' ':!*.spec.ts' \
+              -- '*.ts' '*.js' '*.json' ':!package-lock.json' ':!*.test.ts' ':!*.spec.ts' ':!e2e/fixtures/**' \
               | head -c 50000)
             # Commit subjects are the PRIMARY signal for the notes generator —
             # the repo uses one-line conventional commits, so this list is the
@@ -162,7 +179,7 @@ jobs:
       - name: Generate AI changelog
         id: ai_changelog
         if: ${{ inputs.dry_run != true && inputs.release_type == 'stable' }}
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           VERSION: v${{ steps.version.outputs.version }}
@@ -323,7 +340,7 @@ jobs:
         run: |
           # One release commit: package.json version bump + CHANGELOG.md entry
           if [ -n "$(git status --porcelain)" ]; then
-            git add -A
+            git add package.json CHANGELOG.md
             git commit -m "chore(release): v${{ steps.version.outputs.version }}"
             git push origin HEAD
           fi
@@ -428,21 +445,23 @@ jobs:
             echo "-->" >> /tmp/release-body.md
           fi
 
+      # The GitHub CLI, not a third-party action, in the job that can publish
       - name: Create GitHub Release
         if: ${{ inputs.dry_run != true }}
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: ${{ steps.release_body.outputs.release_name }}
-          prerelease: ${{ steps.version.outputs.is_prerelease }}
-          generate_release_notes: false
-          body_path: /tmp/release-body.md
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.version.outputs.version }}
+          RELEASE_NAME: ${{ steps.release_body.outputs.release_name }}
+          IS_PRERELEASE: ${{ steps.version.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+          FLAGS=()
+          if [ "$IS_PRERELEASE" = "true" ]; then FLAGS+=(--prerelease); fi
+          gh release create "$TAG" --verify-tag --title "$RELEASE_NAME" --notes-file /tmp/release-body.md "${FLAGS[@]}"
 
       - name: Summary
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          if [ "$DRY_RUN" = "true" ]; then
             echo "## Dry Run Summary" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "> **This was a dry run. No packages were published.**" >> "$GITHUB_STEP_SUMMARY"
