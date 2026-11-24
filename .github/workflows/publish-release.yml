@@ -151,6 +151,8 @@ jobs:
         with:
           node-version: ${{ needs.detect.outputs.node_version }}
           registry-url: "https://registry.npmjs.org/"
+          # A job holding the OIDC token restores no cache (setup-node's guidance for publishing)
+          package-manager-cache: false
 
       # Pinned: this job can publish, so no unpinned code runs in it
       - name: Update npm CLI for trusted publishing
