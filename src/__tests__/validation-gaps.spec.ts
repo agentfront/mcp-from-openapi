@@ -1,5 +1,5 @@
 import { OpenAPIToolGenerator } from '../generator';
-import { describeValue } from '../spec';
+import { describeValue } from 'openapi-spec';
 import { isReferenceObject } from '../types';
 import { messageText } from '../validator';
 

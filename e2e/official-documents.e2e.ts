@@ -632,7 +632,7 @@ const UNPROCESSED_CODES: ReadonlySet<string> = new Set([
   // in the query string next to a whole query string that is not form-encoded
   'COOKIE_CONTENT_NOT_SENDABLE',
   'QUERYSTRING_WITH_QUERY_CREDENTIAL',
-  // operation walker (src/spec/operations.ts)
+  // operation walker (openapi-spec: listOperations)
   'PATH_ITEM_NOT_OBJECT',
   'OPERATION_NOT_OBJECT',
   'ADDITIONAL_OPERATIONS_NOT_OBJECT',
@@ -640,14 +640,14 @@ const UNPROCESSED_CODES: ReadonlySet<string> = new Set([
   'DUPLICATE_FIXED_METHOD',
   'REFUSED_METHOD',
   'METHOD_CASE_VARIANT',
-  // declared version (src/spec/versions.ts)
+  // declared version (openapi-spec: detectSpecVersion)
   'INVALID_OPENAPI_VERSION',
   'MISSING_OPENAPI_VERSION',
   'CONFLICTING_VERSION_FIELDS',
   // `query` / `additionalOperations` in a document declaring 3.0 or 3.1: read only from 3.2 on, so no tool
   // (a Swagger 2.0 document: `trace`, `query` and `additionalOperations` are not part of it either)
   'FEATURE_NEWER_THAN_DECLARED_VERSION',
-  // a Swagger 2.0 document is converted to OpenAPI 3.0 first (src/spec/upgrade-v2.ts); each of these says the conversion
+  // a Swagger 2.0 document is converted to OpenAPI 3.0 first (openapi-spec: upgradeSwagger2); each of these says the conversion
   // could not carry something over exactly, or had to assume something. A diagnostic of severity `info` is a note that
   // changes nothing a tool does (see `isInformational`)
   'SWAGGER_VERSION_NOT_2_0',
@@ -857,7 +857,7 @@ interface TypeCheck {
 
 /** Compiles every PASS document of a version as `const d: <namespace>.OpenAPIObject = <literal>;` in one virtual file (Swagger 2.0: `OAS20.SwaggerObject`). */
 function typeCheckDocuments(corpus: Corpus, version: SchemaVersion, namespace: Namespace, names: string[]): TypeCheck {
-  let source = `import type { ${namespace} } from '../src/spec';\n`;
+  let source = `import type { ${namespace} } from 'openapi-spec';\n`;
   const spans: Array<{ name: string; start: number; end: number }> = [];
   names.forEach((name, index) => {
     const literal = JSON.stringify(stripExtensions(loadDocument({ corpus, version, kind: 'pass', name })), null, 2);

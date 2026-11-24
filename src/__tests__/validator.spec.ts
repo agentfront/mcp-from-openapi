@@ -3,7 +3,7 @@
  */
 
 import { Validator } from '../validator';
-import { swagger2SkippedOperations } from '../spec';
+import { swagger2SkippedOperations } from 'openapi-spec';
 import { LEGACY_PATH_KEY_MAX_LENGTH, MAX_DIAGNOSTICS } from '../types';
 import type { OpenAPIDocument } from '../types';
 

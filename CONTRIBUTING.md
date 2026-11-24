@@ -93,7 +93,8 @@ Three scripts support it:
   documents vendored under `e2e/fixtures/oas/` against their pinned checksums
   (offline); `--update` re-downloads them; `--latest` (read-only, needs the
   network) reports what is newer upstream and exits 3 when something is. The
-  `spec-watch` workflow runs it weekly and keeps one issue up to date.
+  weekly spec watch runs in [openapi-spec](https://github.com/agentfront/openapi-spec),
+  which owns the OpenAPI types and the pins they are held to.
 - `node scripts/diff-public-types.mjs` is the public-type check described above.
 - `node scripts/spec-corpus/download.mjs` and `run.mjs` download 38 real-world
   specs into the git-ignored `.spec-corpus/` and run them through the built

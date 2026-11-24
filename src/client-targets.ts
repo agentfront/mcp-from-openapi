@@ -2,7 +2,7 @@ import type { JsonSchema } from './types';
 import { isNeverSchema } from './types';
 import { SchemaError } from './errors';
 import { chargeBudget, copyJsonValue, mapSlots, MAX_VALUE_DEPTH, type CopyBudget } from './json-copy';
-import { setOwnProperty } from './spec';
+import { setOwnProperty } from 'openapi-spec';
 
 /**
  * Client dialect targets. Every MCP client accepts a different JSON Schema

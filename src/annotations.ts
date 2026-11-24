@@ -1,5 +1,5 @@
 import type { FrontMcpExtensionData, HTTPMethod, ToolAnnotations, ToolIcon } from './types';
-import { toStandardMethod, type WithExtensions } from './spec';
+import { toStandardMethod, type WithExtensions } from 'openapi-spec';
 import { SchemaError } from './errors';
 import { copyJsonValue, type CopyBudget } from './json-copy';
 import { resolveSchemaLimits } from './schema-builder';

@@ -58,12 +58,13 @@
     "test:integration": "jest --testPathPatterns='integration'",
     "test:e2e": "jest -c jest.e2e.config.js",
     "test:coverage": "jest --coverage",
-    "typecheck": "tsc -p e2e/tsconfig.json --noEmit && tsc -p src/spec/tsconfig.json --noEmit",
+    "typecheck": "tsc -p e2e/tsconfig.json --noEmit",
     "clean": "rm -rf dist coverage",
     "prepublishOnly": "yarn clean && yarn build && yarn test"
   },
   "dependencies": {
     "@apidevtools/json-schema-ref-parser": "^16.0.2",
+    "openapi-spec": "^1.0.0",
     "yaml": "^2.9.0"
   },
   "peerDependencies": {

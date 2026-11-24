@@ -1,6 +1,6 @@
 import type { McpOpenAPITool, ParameterLocation, ParameterMapper } from './types';
 import { RequestBuildError } from './errors';
-import { describeValue, isDotSegment, isHttpToken, isRefusedMethod, setOwnProperty, wireMethod } from './spec';
+import { describeValue, isDotSegment, isHttpToken, isRefusedMethod, setOwnProperty, wireMethod } from 'openapi-spec';
 import {
   FORM_URLENCODED,
   JSON_MEDIA_TYPE,

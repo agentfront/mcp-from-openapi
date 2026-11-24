@@ -13,7 +13,7 @@ import type {
 } from './types';
 import { isPresentSchema, isReferenceObject, toJsonSchema } from './types';
 import { collectExampleValues } from './parameter-resolver';
-import { isSpecObject, ownProperty } from './spec';
+import { isSpecObject, ownProperty } from 'openapi-spec';
 
 /**
  * The text describing a response: its `description`, else (OpenAPI 3.2,

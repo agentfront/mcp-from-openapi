@@ -15,7 +15,7 @@ import {
   upgradeSwagger2,
   wireMethod,
   withTextName,
-} from './spec';
+} from 'openapi-spec';
 
 export type LintSeverity = 'error' | 'warning' | 'info';
 

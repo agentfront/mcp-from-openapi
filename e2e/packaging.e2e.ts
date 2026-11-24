@@ -25,7 +25,7 @@ const esmPath = join(repoRoot, 'dist', 'esm', 'index.mjs');
 const distDir = join(repoRoot, 'dist');
 
 /** Bare specifiers the published declarations may import: the peer dependency and Node built-ins. */
-const ALLOWED_DECLARATION_IMPORTS = ['zod/v4/core', 'node:http', 'node:https'];
+const ALLOWED_DECLARATION_IMPORTS = ['zod/v4/core', 'node:http', 'node:https', 'openapi-spec'];
 
 /**
  * What a declaration file asks of its consumer. Walks the syntax tree, so

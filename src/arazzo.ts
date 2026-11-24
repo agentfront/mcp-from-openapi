@@ -37,7 +37,7 @@ import {
   toStandardMethod,
   wireMethod,
   type SpecDiagnostic,
-} from './spec';
+} from 'openapi-spec';
 import { fragmentPointerTokens } from './base-uri';
 import { assertBoundedExpansion } from './json-copy';
 import { parseYamlText } from './yaml-document';
