@@ -8,7 +8,7 @@
 
 ```
 OpenAPIToolGenerator (Main Entry Point)
-  ├── Spec layer (src/spec) → declared version, per-version profiles, operation walk, diagnostics,
+  ├── Spec layer (openapi-spec) → declared version, per-version profiles, operation walk, diagnostics,
   │                           Swagger 2.0 → OpenAPI 3.0 conversion (upgradeSwagger2)
   ├── Validator           → Swagger 2.0 / OpenAPI document validation (rules of the declared version)
   ├── ParameterResolver   → Parameter conflict resolution & mapping
@@ -74,7 +74,7 @@ User Input (URL / File / String / Object)
 
 ### Spec layer
 
-**Responsibility:** Everything that knows about OpenAPI versions. It imports nothing from the rest of the library (the compiler enforces it through `src/spec/tsconfig.json`), so it can be extracted as is. It returns diagnostics and the generator decides what each becomes.
+**Responsibility:** Everything that knows about OpenAPI versions. It is its own package, [`openapi-spec`](https://github.com/agentfront/openapi-spec) (a dependency): every module imports it as `'openapi-spec'`, and the library re-exports its public names. It returns diagnostics and the generator decides what each becomes. Its modules:
 
 - `versions.ts`: reads the declared version (`detectSpecVersion`, from `openapi` or, for Swagger 2.0, `swagger`), holds one profile per known `major.minor` (2.0, 3.0, 3.1, 3.2) with the rules the validator applies, and names the version that introduced each feature
 - `operations.ts`: the one place that knows where operations live in a Path Item (`listOperations`, `getOperation`), with own-property reads and diagnostics for what it ignores. Additional methods match exactly as written
@@ -84,7 +84,7 @@ User Input (URL / File / String / Object)
 
 Which operations a document has follows its declared version (`resolveOperationLayout`: `query` and `additionalOperations` only from 3.2), and so does validation; every other construct the library understands is processed whatever version the document declares. The generator, the validator, lint and Arazzo all read operations through the same layout. See [OpenAPI Versions](./openapi-versions.md).
 
-**Key files:** `src/spec/versions.ts`, `src/spec/operations.ts`, `src/spec/diagnostics.ts`, `src/spec/upgrade-v2.ts`
+**Key files:** in [openapi-spec](https://github.com/agentfront/openapi-spec): `src/versions.ts`, `src/operations.ts`, `src/diagnostics.ts`, `src/upgrade-v2.ts`. A change to the spec layer is made there, released, then the dependency moves here.
 
 ### ParameterResolver
 
