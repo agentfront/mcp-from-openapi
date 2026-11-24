@@ -1,5 +1,5 @@
 # Default owners for everything in the repo
-* @frontegg-david
+* @frontegg-david @alexmercerpo
 
 # Security-sensitive surfaces require owner review
 /src/ssrf.ts @frontegg-david
