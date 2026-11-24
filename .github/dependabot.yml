@@ -9,13 +9,27 @@ updates:
     groups:
       dev-dependencies:
         dependency-type: "development"
+    ignore:
+      # TypeScript 7 is the native compiler: Yarn's built-in TypeScript patch fails on it
+      # (ENOENT lib/_tsc.js), which failed the whole group. Moving to it is a deliberate migration.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     labels:
       - "dependencies"
 
   - package-ecosystem: "github-actions"
-    directory: "/"
+    # "/" reads .github/workflows; composite actions are found only by their own directory
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: "weekly"
       day: "monday"
+    # One pull request per directory: steps of one action (codeql-action init and analyze)
+    # must move together, or CodeQL refuses to run
+    groups:
+      github-actions:
+        patterns:
+          - "*"
     labels:
       - "dependencies"
