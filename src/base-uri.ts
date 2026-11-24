@@ -42,7 +42,7 @@ import {
   ownProperty,
   type SpecDiagnostic,
   type SpecVersionInfo,
-} from './spec';
+} from 'openapi-spec';
 
 /** URI schemes a document URI may have: the ones a document can be retrieved from. */
 const BASE_PROTOCOLS: ReadonlySet<string> = new Set(['http:', 'https:', 'file:']);

@@ -8,7 +8,7 @@
  * parsed, never evaluated.
  */
 import { ArazzoError } from './errors';
-import { ownProperty } from './spec';
+import { ownProperty } from 'openapi-spec';
 import type { ExpressionValueIR, PayloadExpressionIR, RuntimeExpressionAST, RuntimeExpressionType } from './arazzo-types';
 
 const EXACT_ROOTS: Record<string, RuntimeExpressionType> = {

@@ -63,7 +63,7 @@ import {
   type SpecDiagnostic,
   type SpecVersionInfo,
   type WithExtensions,
-} from './spec';
+} from 'openapi-spec';
 import type { ParserOptions } from '@apidevtools/json-schema-ref-parser';
 import type { FileHandle } from 'node:fs/promises';
 import { isNeverSchema, isPresentSchema, isReferenceObject } from './types';

@@ -1,6 +1,6 @@
 /**
  * Swagger 2.0 story: the library reads a Swagger 2.0 document by converting it to OpenAPI 3.0
- * (`upgradeSwagger2`, src/spec/upgrade-v2.ts) once it is dereferenced, and generates from that. This story holds the
+ * (`upgradeSwagger2` from openapi-spec) once it is dereferenced, and generates from that. This story holds the
  * conversion to the specifications, not to its own output:
  *
  * 1. CONFORMANCE. Every Swagger 2.0 document we have (the official examples including the multi-file tree, our

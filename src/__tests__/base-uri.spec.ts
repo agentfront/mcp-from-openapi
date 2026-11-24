@@ -25,7 +25,7 @@ import {
 } from '../base-uri';
 import { LoadError } from '../errors';
 import { DIAGNOSTIC_CODES } from '../types';
-import { detectSpecVersion } from '../spec';
+import { detectSpecVersion } from 'openapi-spec';
 
 const v = (openapi: string) => detectSpecVersion({ openapi });
 const V32 = v('3.2.0');

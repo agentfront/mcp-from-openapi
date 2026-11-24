@@ -58,7 +58,7 @@ The Netlify tag list is every tag under `x-tagGroups` plus `aiGateway`. Changing
 
 ## Official OpenAPI schemas (`oas/`)
 
-The OpenAPI Initiative's own JSON Schemas for Swagger 2.0 and OpenAPI 3.0, 3.1 and 3.2, plus the JSON Schema meta-schemas they depend on (draft-04 for 2.0 and 3.0's own schema, 2020-12 for 3.1 and 3.2), vendored byte-for-byte and pinned by checksum. They are the source of truth for the schema-to-types parity story (every field in the official schema exists in our spec types, and our types add nothing the schema lacks) and for validating OpenAPI and Swagger documents. Unit tests never read them.
+The OpenAPI Initiative's own JSON Schemas for Swagger 2.0 and OpenAPI 3.0, 3.1 and 3.2, plus the JSON Schema meta-schemas they depend on (draft-04 for 2.0 and 3.0's own schema, 2020-12 for 3.1 and 3.2), vendored byte-for-byte and pinned by checksum. They are the source of truth for validating OpenAPI and Swagger documents in the stories (`e2e/helpers/oas-validate.ts`; `e2e/oas-sources.e2e.ts` checks the checksums and the 2.0 documents). The schema-to-types parity story lives in [openapi-spec](https://github.com/agentfront/openapi-spec), with the types and the same pins. Unit tests never read them.
 
 [`oas/sources.json`](./oas/sources.json) is the manifest, `{ "upstream": { ... }, "sources": [ ... ] }`:
 

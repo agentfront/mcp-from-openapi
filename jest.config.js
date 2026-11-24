@@ -40,8 +40,6 @@ module.exports = {
     '!src/index.ts',
     // Types-only module (import type everywhere) — never loaded at runtime
     '!src/arazzo-types.ts',
-    // Types-only: the OpenAPI object types
-    '!src/spec/types/**',
     '!src/**/*.spec.ts',
     '!src/**/*.test.ts',
     '!src/**/__tests__/**',

@@ -8,7 +8,7 @@ import { DIAGNOSTIC_CODES, MAX_DIAGNOSTICS } from '../types';
 import type { GenerateOptions, LoadOptions, McpOpenAPITool, OpenAPIDocument } from '../types';
 import { createLoopbackServer, type LoopbackHandler } from './helpers/loopback';
 import { makePinnedLookup } from '../ssrf';
-import { MAX_CONVERSION_ENTRIES, describeValue } from '../spec';
+import { MAX_CONVERSION_ENTRIES, describeValue } from 'openapi-spec';
 import { buildHttpRequest } from '../request-builder';
 import dns from 'node:dns';
 

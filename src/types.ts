@@ -25,8 +25,8 @@ import type {
   SchemaObject,
   SchemaOrBoolean,
   StandardMethod,
-} from './spec';
-import { SPEC_DIAGNOSTIC_CODES, setOwnProperty } from './spec';
+} from 'openapi-spec';
+import { SPEC_DIAGNOSTIC_CODES, setOwnProperty } from 'openapi-spec';
 import { SchemaError } from './errors';
 import { isExtensionKey, referenceAt } from './reference-sites';
 
@@ -38,7 +38,7 @@ import { isExtensionKey, referenceAt } from './reference-sites';
  */
 export type OpenAPIVersion = `3.0.${string}` | `3.1.${string}` | `3.2.${string}`;
 
-// OpenAPI object types (cross-version unions of the `src/spec` types): the
+// OpenAPI object types (cross-version unions of the `openapi-spec` types): the
 // document, and the objects within it that the library reads
 export type {
   OpenAPIDocument,

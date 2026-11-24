@@ -43,7 +43,7 @@ import {
   type SpecFeatureId,
   type SpecProfile,
   type SpecVersionInfo,
-} from './spec';
+} from 'openapi-spec';
 
 /**
  * Findings of the operation walker (`listOperations`) that are validation

@@ -1,6 +1,6 @@
 import { ParseError, SchemaError } from './errors';
 import { referenceAt } from './reference-sites';
-import { setOwnProperty } from './spec';
+import { setOwnProperty } from 'openapi-spec';
 
 /**
  * A node budget that every value copied for one schema, or one tool, counts

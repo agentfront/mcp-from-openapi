@@ -2,7 +2,7 @@ import type { JSONSchema } from 'zod/v4/core';
 import { SchemaError } from './errors';
 import { chargeBudget, copyJsonValue, mapSlots, type CopyBudget } from './json-copy';
 import { isExtensionKey, referenceAt } from './reference-sites';
-import { setOwnProperty } from './spec';
+import { setOwnProperty } from 'openapi-spec';
 import { DEFINITION_KEYWORDS, keepAccepting } from './types';
 
 /** JSON Schema type from Zod v4 */

@@ -144,6 +144,10 @@ const USAGE =
 const BASELINE_PATTERN = /^(?:\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?|[A-Za-z][A-Za-z0-9._-]{0,63})$/;
 // Namespace import names in the probe; unlikely to be shadowed by a type parameter.
 const NS = { baseline: '__baseline', candidate: '__candidate' };
+// Dependencies whose declarations count as the candidate's own when naming positions: the spec layer
+// (src/spec) moved into openapi-spec, whose types this package re-exports, so a position inside one of
+// them is named by that type (`OAS31.OperationObject.responses`), as it was when the files were ours.
+const OWN_DEPENDENCIES = ['openapi-spec'];
 const DIAGNOSTIC_LINES = 4;
 // Errors that leave a type silently `any` (TypeScript 5.9 codes); outside the two packages, only these
 // (and syntax errors) are environment errors.
@@ -649,8 +653,9 @@ function createWalker(ts, checker, probe, dir, exportNames) {
     (p.declarations ?? []).some((d) => (ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Readonly) !== 0);
   const isReadonlyList = (t) =>
     checker.isTupleType(t) ? t.target.readonly : t.target.symbol?.name === 'ReadonlyArray';
+  const ownDirs = [candidateDir, ...OWN_DEPENDENCIES.map((pkg) => `${dir}/node_modules/${pkg}/`)];
   const ownDeclaration = (symbol) =>
-    symbol?.declarations?.find((d) => d.getSourceFile().fileName.startsWith(candidateDir));
+    symbol?.declarations?.find((d) => ownDirs.some((own) => d.getSourceFile().fileName.startsWith(own)));
   // Well-known symbol keys (`__@iterator@12`) carry a compiler-internal id, so they are not positions.
   const properties = (t) => checker.getPropertiesOfType(t).filter((p) => !p.name.startsWith('__@'));
 

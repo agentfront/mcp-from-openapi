@@ -25,7 +25,7 @@ import {
   readParameterName,
   setOwnProperty,
   withTextName,
-} from './spec';
+} from 'openapi-spec';
 import { GenerationError } from './errors';
 import { classifyMediaType } from './media-type';
 

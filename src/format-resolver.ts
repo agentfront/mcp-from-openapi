@@ -1,5 +1,5 @@
 import type { JsonSchema, FormatResolver } from './types';
-import { ownProperty, setOwnProperty } from './spec';
+import { ownProperty, setOwnProperty } from 'openapi-spec';
 
 /**
  * Built-in format resolvers that enrich JSON Schema with concrete constraints.
