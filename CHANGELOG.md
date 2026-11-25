@@ -1,5 +1,11 @@
 ## [2.11.0] - 2026-11-25
 
+### Changed
+- The spec layer (the `OAS20`/`OAS30`/`OAS31`/`OAS32` types, version detection and profiles, the operation walker, the Swagger 2.0 converter) comes from the `openapi-spec` package (`^1.0.0`), a new runtime dependency. The library exports the same names with the same types and reads documents as before.
+
+### Security
+- The Swagger 2.0 converter groups its findings in one linear pass (from `openapi-spec` 1.0.0; CodeQL `js/polynomial-redos`).
+
 ## [2.5.0] - 2026-06-21
 
 ### Security (SSRF hardening — GHSA-65h7-9wrw-629c)
