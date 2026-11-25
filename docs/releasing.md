@@ -33,7 +33,7 @@ A new release line starts with **Create release branch** (`create-release-branch
 
 Release pull requests are not cherry-picked to `main` (`cherry-pick-prompt.yml` skips a head branch starting with `release-pr/`); other pull requests merged into a release branch still are.
 
-The `CHANGELOG.md` entry reaches `main` through **Changelog to main** (`changelog-sync.yml`). After each Publish Release run it opens, or updates, the pull request from `changelog/sync` that adds to `main` the entry of every stable tag `vX.Y.Z` its changelog lacks, read from the tagged commit's `CHANGELOG.md` (`scripts/sync-changelog.mjs`, in version order). Review and merge it like any other. It runs from `main`, so it covers every release line, it never rewrites an entry `main` has, and it does nothing when no entry is missing; Actions → Changelog to main → Run workflow runs it by hand.
+The `CHANGELOG.md` entry reaches `main` through **Changelog to main** (`changelog-sync.yml`). After each Publish Release run it opens, or updates, the pull request from `changelog/sync` that adds to `main` the entry of every stable tag `vX.Y.Z` its changelog lacks, read from the tagged commit's `CHANGELOG.md` (`scripts/sync-changelog.mjs`, in version order). Review and merge it like any other. It runs from `main`, so it covers every release line, it never rewrites an entry `main` has, and it does nothing when no entry is missing. Closing its pull request without merging only defers it: the next run opens it again. Actions → Changelog to main → Run workflow runs it by hand, also to finish a run that failed halfway.
 
 ## When something fails
 

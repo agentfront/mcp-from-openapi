@@ -48,28 +48,30 @@ jobs:
           ADDED=$(node scripts/sync-changelog.mjs)
           if git diff --quiet -- CHANGELOG.md; then
             echo "Every released version is in CHANGELOG.md"
-            echo "push=false" >> "$GITHUB_OUTPUT"
-          elif git rev-parse --verify --quiet "origin/$HEAD_BRANCH" >/dev/null && git diff --quiet "origin/$HEAD_BRANCH" -- CHANGELOG.md; then
-            echo "$HEAD_BRANCH adds these entries already"
-            echo "push=false" >> "$GITHUB_OUTPUT"
+            echo "missing=false" >> "$GITHUB_OUTPUT"
           else
-            echo "push=true" >> "$GITHUB_OUTPUT"
+            echo "missing=true" >> "$GITHUB_OUTPUT"
             echo "versions=$ADDED" >> "$GITHUB_OUTPUT"
           fi
 
+      # Each part is checked on its own, so a rerun after a failure completes what is left
       - name: Open or update the pull request
-        if: ${{ steps.sync.outputs.push == 'true' }}
+        if: ${{ steps.sync.outputs.missing == 'true' }}
         env:
           VERSIONS: ${{ steps.sync.outputs.versions }}
         run: |
           set -euo pipefail
           LIST="v${VERSIONS// /, v}"
           TITLE="docs(changelog): the entries of $LIST"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git switch -c "$HEAD_BRANCH"
-          git commit -m "$TITLE" -- CHANGELOG.md
-          git push --force origin "HEAD:refs/heads/$HEAD_BRANCH"
+          if git rev-parse --verify --quiet "origin/$HEAD_BRANCH" >/dev/null && git diff --quiet "origin/$HEAD_BRANCH" -- CHANGELOG.md; then
+            echo "$HEAD_BRANCH has this CHANGELOG.md already"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git switch -c "$HEAD_BRANCH"
+            git commit -m "$TITLE" -- CHANGELOG.md
+            git push --force origin "HEAD:refs/heads/$HEAD_BRANCH"
+          fi
 
           BODY="Adds the \`CHANGELOG.md\` entries of $LIST to \`$BASE\`, as their release pull requests wrote them on their release branches. Opened by \`changelog-sync.yml\` after a Publish Release run."
           NUMBER=$(gh pr list --head "$HEAD_BRANCH" --base "$BASE" --state open --json number --jq '.[0].number // empty')
@@ -78,4 +80,8 @@ jobs:
           else
             gh pr create --base "$BASE" --head "$HEAD_BRANCH" --title "$TITLE" --body "$BODY"
           fi
-          gh workflow run push.yml --ref "$HEAD_BRANCH"
+
+          HEAD_SHA=$(git ls-remote origin "refs/heads/$HEAD_BRANCH" | cut -f1)
+          if [ -z "$(gh run list --workflow push.yml --commit "$HEAD_SHA" --json databaseId --jq '.[0].databaseId // empty')" ]; then
+            gh workflow run push.yml --ref "$HEAD_BRANCH"
+          fi
