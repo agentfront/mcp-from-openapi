@@ -11,7 +11,7 @@ on:
       - main
       - "next/**"
       - "release/**"
-  # prepare-release.yml starts it on the release pull request, which a pull_request event never reaches
+  # prepare-release.yml and changelog-sync.yml start it on the pull requests they open, which a pull_request event never reaches
   workflow_dispatch:
 
 permissions:

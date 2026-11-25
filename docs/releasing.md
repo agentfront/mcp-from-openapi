@@ -33,11 +33,13 @@ A new release line starts with **Create release branch** (`create-release-branch
 
 Release pull requests are not cherry-picked to `main` (`cherry-pick-prompt.yml` skips a head branch starting with `release-pr/`); other pull requests merged into a release branch still are.
 
+The `CHANGELOG.md` entry reaches `main` through **Changelog to main** (`changelog-sync.yml`). After each Publish Release run it opens, or updates, the pull request from `changelog/sync` that adds to `main` the entry of every stable tag `vX.Y.Z` its changelog lacks, read from the tagged commit's `CHANGELOG.md` (`scripts/sync-changelog.mjs`, in version order). Review and merge it like any other. It runs from `main`, so it covers every release line, it never rewrites an entry `main` has, and it does nothing when no entry is missing. Closing its pull request without merging only defers it: the next run opens it again. Actions → Changelog to main → Run workflow runs it by hand, also to finish a run that failed halfway.
+
 ## When something fails
 
 - **Prepare** fails before the pull request exists: fix the cause and run it again.
 - **Publish** fails: rerun the failed jobs of the run. Each step is safe to repeat: `publish` skips a version npm already has, and `release` skips a release that exists.
-- **Wrong notes after the release:** edit the GitHub release. The `CHANGELOG.md` entry is changed by a normal pull request.
+- **Wrong notes after the release:** edit the GitHub release. The `CHANGELOG.md` entry is changed by a pull request into `main`.
 - **Abandon a release:** close the pull request and delete its `release-pr/` branch. Nothing was published.
 
 ## One-time settings
@@ -76,3 +78,4 @@ Release pull requests are not cherry-picked to `main` (`cherry-pick-prompt.yml` 
 | Publish Release | `build` | `contents: read` | none |
 | Publish Release | `publish` (environment `release`) | `id-token: write` | none |
 | Publish Release | `release` | `contents: write`, `pull-requests: read` | none |
+| Changelog to main | `sync` | `contents: write`, `pull-requests: write`, `actions: write` | none |
