@@ -1,5 +1,15 @@
 ## [2.11.0] - 2026-11-25
 
+### Added
+- OpenAPI spec layer sourced from `openapi-spec` for better integration.
+
+### CI
+- Spec watch runs within `openapi-spec`.
+
+### Chore
+- Repository ownership updated to include alexmercerpo and frontegg-david.
+- Updated actions/setup-node to v7.1.0.
+
 ## [2.5.0] - 2026-06-21
 
 ### Security (SSRF hardening — GHSA-65h7-9wrw-629c)
