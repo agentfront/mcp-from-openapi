@@ -37,7 +37,7 @@
         "note": "Frozen: the examples folder was removed from the repository in 18bf2771eb98f19cdcb1c23d45d8c2a1f49a54d8 and the pin is its parent, so there is no branch to follow."
       }
     ],
-    "acknowledgedBranches": []
+    "acknowledgedBranches": ["v3.3-dev"]
   },
   "sources": [
     {

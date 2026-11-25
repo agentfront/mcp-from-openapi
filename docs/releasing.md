@@ -60,7 +60,9 @@ Release pull requests are not cherry-picked to `main` (`cherry-pick-prompt.yml` 
    - deployment branches: selected branches matching `release/*.*.x` only (no `refs/pull/*`);
    - *Allow administrators to bypass configured protection rules* turned off.
 2. **Environment `release-branch`**, used by Create release branch, which runs from `main`: required reviewers, deployment branches `main` only. It is created by the first run if it does not exist yet, without protection, so create it first.
-3. **Branch protection** (a ruleset for `main` and `release/*.*.x`): pull request required, required status checks (the `Build & Test` jobs and `Public type compatibility`), no force push, no deletion.
+3. **Branch protection** (rulesets, no bypass):
+   - *Main and release branches are kept*: `main` and every `release/*.*.x` cannot be deleted or force-pushed. Each release branch is the source of truth of a release line. Creation stays allowed, and pull-request and check rules are deliberately left off release branches, because Create release branch pushes a new branch's first commit itself.
+   - *Main merges through green pull requests*: `main` changes only through a pull request whose `Build & Test` jobs and `Public type compatibility` pass. A pull request opened with a workflow's token (the cherry-pick ones) starts no workflow by itself, so start its checks with `gh workflow run push.yml --ref <branch>`, as Prepare Release does for its own.
 4. **Actions** (Settings → Actions → General → Workflow permissions): *Allow GitHub Actions to create and approve pull requests* turned on, which the prepare and cherry-pick workflows need.
 5. **Secrets:** `OPENAI_API_KEY` for the release notes. Delete `NPM_TOKEN`: no workflow reads it, and publishing uses the trusted publisher.
 
