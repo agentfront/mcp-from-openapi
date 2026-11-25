@@ -1,6 +1,6 @@
 # mcp-from-openapi
 
-> Convert OpenAPI specifications into MCP tool definitions with automatic parameter conflict resolution
+> Convert Swagger 2.0 and OpenAPI 3.0, 3.1 and 3.2 specifications into MCP tool definitions with automatic parameter conflict resolution
 
 [![npm version](https://img.shields.io/npm/v/mcp-from-openapi.svg)](https://www.npmjs.com/package/mcp-from-openapi)
 [![npm downloads](https://img.shields.io/npm/dm/mcp-from-openapi.svg)](https://www.npmjs.com/package/mcp-from-openapi)
@@ -55,7 +55,7 @@ Now you know exactly how to build the HTTP request.
 
 ## Features
 
-- **Swagger 2.0 and OpenAPI 3.0, 3.1 and 3.2** -- Validated with the rules of the version a document declares. From 3.2: the `query` operation and `additionalOperations` methods, `in: querystring` whole-query parameters, `style: cookie`, streamed responses (`itemSchema`), `$self`, and security schemes named by URI; what the library skips or ignores is recorded in `getDiagnostics()` instead of dropped. A Swagger 2.0 document is converted to OpenAPI 3.0 (`upgradeSwagger2`, also exported) and its tools are generated from the conversion, with what could not be carried over exactly recorded the same way
+- **Swagger 2.0 and OpenAPI 3.0, 3.1 and 3.2** -- Validated with the rules of the version a document declares. From 3.2: the `query` operation and `additionalOperations` methods, `in: querystring` whole-query parameters, `style: cookie`, streamed responses (`itemSchema`), `$self`, and security schemes named by URI; what the library skips or ignores is recorded in `getDiagnostics()` instead of dropped. A Swagger 2.0 document is converted to OpenAPI 3.0 (`upgradeSwagger2`, also exported) and its tools are generated from the conversion, with what could not be carried over exactly recorded the same way. The OpenAPI types, version rules and the converter come from [`openapi-spec`](https://github.com/agentfront/openapi-spec), which is checked every week against the official OpenAPI schemas
 - **Built-in Request Builder** -- `buildHttpRequest()` applies the full OpenAPI serialization table (form/deepObject/pipeDelimited queries, label/matrix paths, `content` parameters, per-field Encoding Objects in form and multipart bodies, `allowReserved` that never lets a value add a query pair, OpenAPI 3.2 whole-query (`in: querystring`) and `style: cookie`, multipart, binary, `wholeBody`) so you never hand-write request assembly
 - **Client Compatibility Targets** -- `target: 'claude' | 'openai' | 'gemini' | 'strict'` emits schemas each client actually accepts (inlined refs, closed objects, collapsed unions, demoted formats)
 - **Context-Budget Reports** -- `analyzeToolSet()` estimates the token bill per tool and warns at the thresholds where agent accuracy degrades
@@ -201,6 +201,8 @@ control: it lets the spec read any local file the process can read (see the
 
 ## Related Projects
 
+- [openapi-spec](https://github.com/agentfront/openapi-spec) -- the OpenAPI types, version rules and Swagger 2.0 converter this library is built on
+- [FrontMCP](https://github.com/agentfront/frontmcp) -- the TypeScript framework for MCP servers, whose OpenAPI adapter uses this library
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 - [OpenAPI Specification](https://www.openapis.org/)
 
