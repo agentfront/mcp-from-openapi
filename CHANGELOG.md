@@ -1,14 +1,10 @@
 ## [2.11.0] - 2026-11-25
 
-### Added
-- OpenAPI spec layer sourced from `openapi-spec` for better integration.
+### Changed
+- The spec layer (the `OAS20`/`OAS30`/`OAS31`/`OAS32` types, version detection and profiles, the operation walker, the Swagger 2.0 converter) comes from the `openapi-spec` package (`^1.0.0`), a new runtime dependency. The library exports the same names with the same types and reads documents as before.
 
-### CI
-- Spec watch runs within `openapi-spec`.
-
-### Chore
-- Repository ownership updated to include alexmercerpo and frontegg-david.
-- Updated actions/setup-node to v7.1.0.
+### Security
+- The Swagger 2.0 converter groups its findings in one linear pass (from `openapi-spec` 1.0.0; CodeQL `js/polynomial-redos`).
 
 ## [2.5.0] - 2026-06-21
 
