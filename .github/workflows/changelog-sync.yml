@@ -1,0 +1,81 @@
+name: Changelog to main
+
+# A release pull request writes its CHANGELOG.md entry on its release branch only. After each Publish
+# Release run, this opens (or updates) one pull request adding to the default branch the entry of every
+# stable tag it lacks (scripts/sync-changelog.mjs). It runs from the default branch, so it covers every
+# release line, and finding nothing missing does nothing.
+
+on:
+  workflow_run:
+    workflows: [Publish Release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: changelog-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Add the missing entries
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    # Pushes the changelog/sync branch, opens the pull request, and starts CI on it: a pull request
+    # opened with this token starts no workflow by itself. Reads the tags as data, runs no tagged code
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BASE: ${{ github.event.repository.default_branch }}
+      HEAD_BRANCH: changelog/sync
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Add the entries
+        id: sync
+        run: |
+          set -euo pipefail
+          ADDED=$(node scripts/sync-changelog.mjs)
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "Every released version is in CHANGELOG.md"
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          elif git rev-parse --verify --quiet "origin/$HEAD_BRANCH" >/dev/null && git diff --quiet "origin/$HEAD_BRANCH" -- CHANGELOG.md; then
+            echo "$HEAD_BRANCH adds these entries already"
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=true" >> "$GITHUB_OUTPUT"
+            echo "versions=$ADDED" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or update the pull request
+        if: ${{ steps.sync.outputs.push == 'true' }}
+        env:
+          VERSIONS: ${{ steps.sync.outputs.versions }}
+        run: |
+          set -euo pipefail
+          LIST="v${VERSIONS// /, v}"
+          TITLE="docs(changelog): the entries of $LIST"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git switch -c "$HEAD_BRANCH"
+          git commit -m "$TITLE" -- CHANGELOG.md
+          git push --force origin "HEAD:refs/heads/$HEAD_BRANCH"
+
+          BODY="Adds the \`CHANGELOG.md\` entries of $LIST to \`$BASE\`, as their release pull requests wrote them on their release branches. Opened by \`changelog-sync.yml\` after a Publish Release run."
+          NUMBER=$(gh pr list --head "$HEAD_BRANCH" --base "$BASE" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$NUMBER" ]; then
+            gh pr edit "$NUMBER" --title "$TITLE" --body "$BODY"
+          else
+            gh pr create --base "$BASE" --head "$HEAD_BRANCH" --title "$TITLE" --body "$BODY"
+          fi
+          gh workflow run push.yml --ref "$HEAD_BRANCH"
