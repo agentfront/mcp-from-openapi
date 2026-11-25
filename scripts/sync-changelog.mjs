@@ -6,6 +6,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 
 const changelogPath = process.argv[2] ?? 'CHANGELOG.md';
 const ENTRY_HEADER = /^## \[(\d+)\.(\d+)\.(\d+)\]/gm;
+const NEXT_SECTION = /^## /m;
 const STABLE_TAG = /^v\d+\.\d+\.\d+$/;
 
 function compareVersions(left, right) {
@@ -23,11 +24,13 @@ function entryHeaders(text) {
 }
 
 function entryOf(text, version) {
-  const headers = entryHeaders(text);
-  const position = headers.findIndex((header) => compareVersions(header.version, version) === 0);
-  if (position === -1) return undefined;
-  const end = headers[position + 1]?.index ?? text.length;
-  return text.slice(headers[position].index, end).trimEnd();
+  const header = entryHeaders(text).find((candidate) => compareVersions(candidate.version, version) === 0);
+  if (!header) return undefined;
+  const headerEnd = text.indexOf('\n', header.index);
+  if (headerEnd === -1) return text.slice(header.index).trimEnd();
+  const nextSection = text.slice(headerEnd).search(NEXT_SECTION);
+  const end = nextSection === -1 ? text.length : headerEnd + nextSection;
+  return text.slice(header.index, end).trimEnd();
 }
 
 function insertEntry(text, version, entry) {
